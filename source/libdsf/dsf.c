@@ -750,12 +750,12 @@ static dsf_error DSF_CodepointRenderBuffer(dsf_handle handle,
         src += tx1 + ty1 * font_width;
         dst += x1 + y1 * out_width;
 
-        for (int y = 0; y <= y2 - y1; y++)
+        for (int y = 0; y < y2 - y1; y++)
         {
             const uint8_t *src_row = src;
             uint8_t *dst_row = dst;
 
-            for (int x = 0; x <= x2 - x1; x++)
+            for (int x = 0; x < x2 - x1; x++)
             {
                 uint8_t color = *src_row++;
                 if (color != 0)
@@ -775,12 +775,12 @@ static dsf_error DSF_CodepointRenderBuffer(dsf_handle handle,
         src += tx1 + ty1 * font_width;
         dst += x1 + y1 * out_width;
 
-        for (int y = 0; y <= y2 - y1; y++)
+        for (int y = 0; y < y2 - y1; y++)
         {
             const uint16_t *src_row = src;
             uint16_t *dst_row = dst;
 
-            for (int x = 0; x <= x2 - x1; x++)
+            for (int x = 0; x < x2 - x1; x++)
             {
                 uint16_t color = *src_row++;
                 if (color & BIT(15))
@@ -800,29 +800,18 @@ static dsf_error DSF_CodepointRenderBuffer(dsf_handle handle,
         src += tx1 + ty1 * font_width;
         dst += x1 + y1 * out_width;
 
-        int alpha_shift;
-
-        if (texture_fmt == GL_RGB32_A3)
-            alpha_shift = 5;
-        else // if (texture_fmt == GL_RGB8_A5)
-            alpha_shift = 3;
-
-        for (int y = 0; y <= y2 - y1; y++)
+        for (int y = 0; y < y2 - y1; y++)
         {
             const uint8_t *src_row = src;
             uint8_t *dst_row = dst;
 
-            for (int x = 0; x <= x2 - x1; x++)
+            for (int x = 0; x < x2 - x1; x++)
             {
-                uint8_t color = *src_row++;
                 // We can't really blend two different colors because we're
-                // limited by the palette. For that reason, if the new alpha is
-                // 0 we leave the old entry. If the new alpha is anything other
-                // than 0, we replace the old entry by the new entry, even if
-                // the result is incorrect.
-                if ((color >> alpha_shift) != 0)
-                    *dst_row = color;
-                dst_row++;
+                // limited by the palette. For that reason, we just directly
+                // copy to the new texture under the assumption that the user
+                // will be using a transparent texture as a base.
+                *dst_row++ = *src_row++;
             }
 
             src += font_width;
@@ -834,12 +823,12 @@ static dsf_error DSF_CodepointRenderBuffer(dsf_handle handle,
         const uint8_t *src = font_texture;
         uint8_t *dst = out_texture;
 
-        for (int y = 0; y <= y2 - y1; y++)
+        for (int y = 0; y < y2 - y1; y++)
         {
             const uint8_t *src_row = src + (((ty1 + y) * font_width) >> 1);
             uint8_t *dst_row = dst + (((y1 + y) * out_width) >> 1);
 
-            for (int x = 0; x <= x2 - x1; x++)
+            for (int x = 0; x < x2 - x1; x++)
             {
                 const uint8_t *src_px = src_row + ((tx1 + x) >> 1);
                 uint8_t *dst_px = dst_row + ((x1 + x) >> 1);
@@ -861,12 +850,12 @@ static dsf_error DSF_CodepointRenderBuffer(dsf_handle handle,
         const uint8_t *src = font_texture;
         uint8_t *dst = out_texture;
 
-        for (int y = 0; y <= y2 - y1; y++)
+        for (int y = 0; y < y2 - y1; y++)
         {
             const uint8_t *src_row = src + (((ty1 + y) * font_width) >> 2);
             uint8_t *dst_row = dst + (((y1 + y) * out_width) >> 2);
 
-            for (int x = 0; x <= x2 - x1; x++)
+            for (int x = 0; x < x2 - x1; x++)
             {
                 const uint8_t *src_px = src_row + ((tx1 + x) >> 2);
                 uint8_t *dst_px = dst_row + ((x1 + x) >> 2);
@@ -923,21 +912,13 @@ dsf_error DSF_StringRenderToTexture(dsf_handle handle,
         return DSF_TEXTURE_TOO_BIG;
 
     // Expand to a valid texture size
+    // We only expand the width as leaving the height clipped saves VRAM
 
     for (size_t i = 8; i <= 1024; i <<= 1)
     {
         if (tex_width <= i)
         {
             tex_width = i;
-            break;
-        }
-    }
-
-    for (size_t i = 8; i <= 1024; i <<= 1)
-    {
-        if (tex_height <= i)
-        {
-            tex_height = i;
             break;
         }
     }
