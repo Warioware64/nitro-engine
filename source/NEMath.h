@@ -11,18 +11,11 @@
 static inline
 void ne_div_start(int32_t num, int32_t den)
 {
-    REG_DIVCNT = DIV_32_32;
-
-    while (REG_DIVCNT & DIV_BUSY);
-
-    REG_DIV_NUMER_L = num;
-    REG_DIV_DENOM_L = den;
+    div32_asynch(num, den);
 }
 
 static inline
 int32_t ne_div_result(void)
 {
-    while (REG_DIVCNT & DIV_BUSY);
-
-    return REG_DIV_RESULT_L;
+    return div32_result();
 }

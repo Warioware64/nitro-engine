@@ -223,7 +223,7 @@ void NE_PhysicsUpdateAll(void)
     }
 }
 
-void NE_PhysicsUpdate(NE_Physics *pointer)
+ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
 {
     if (!ne_physics_system_inited)
         return;
@@ -302,7 +302,7 @@ void NE_PhysicsUpdate(NE_Physics *pointer)
             if (pointer->oncollision == NE_ColBounce)
             {
                 // Used to reduce speed:
-                int temp = divf32(inttof32(pointer->keptpercent), inttof32(100));
+                int temp = (pointer->keptpercent << 12) / 100; // f32 format
                 if ((yenabled) && ((abs(bposy - otherposy) >= (pointer->ysize + otherpointer->ysize) >> 1)))
                 {
                     yenabled = false;
@@ -390,31 +390,45 @@ void NE_PhysicsUpdate(NE_Physics *pointer)
     // Now, we get the module of speed in order to apply friction.
     if (pointer->friction != 0)
     {
-        pointer->xspeed <<= 10;
-        pointer->yspeed <<= 10;
-        pointer->zspeed <<= 10;
-        int _mod_ = mulf32(pointer->xspeed, pointer->xspeed);
-        _mod_ += mulf32(pointer->yspeed, pointer->yspeed);
-        _mod_ += mulf32(pointer->zspeed, pointer->zspeed);
-        _mod_ = sqrtf32(_mod_);
+        int32_t spd[3] = { pointer->xspeed, pointer->yspeed, pointer->zspeed };
+        int64_t modsqrd = (int64_t)spd[0] * spd[0] + (int64_t)spd[1] * spd[1]
+                        + (int64_t)spd[2] * spd[2];
+
+        // This value should be chosen based on time since last update.
+        int32_t friction = pointer->friction;
+        int64_t diff = modsqrd + (int64_t)-friction * friction;
+
+        // Computing the above is faster than waiting on hw
 
         // Check if module is very small -> speed = 0
-        if (_mod_ < pointer->friction)
+        if (__builtin_expect(diff <= 0, 0))
         {
             pointer->xspeed = pointer->yspeed = pointer->zspeed = 0;
         }
         else
         {
-            int newmod = _mod_ - pointer->friction;
-            // mod   --  newmod    ->  newspeed = speed * newmod / mod
-            // speed --  newspeed
-            int number = divf32(newmod, _mod_);
-            pointer->xspeed = mulf32(pointer->xspeed, number);
-            pointer->yspeed = mulf32(pointer->yspeed, number);
-            pointer->zspeed = mulf32(pointer->zspeed, number);
-            pointer->xspeed >>= 10;
-            pointer->yspeed >>= 10;
-            pointer->zspeed >>= 10;
+            uint32_t mod = sqrt64(modsqrd);
+            div64_asynch((int64_t)(mod-friction) << 32, mod);
+            // f < m therefore ((m - f) / m) < 1, therefore ((m - f) << 32 ) / m < (2^32)
+            // i.e. the result fits in 32-bit
+            uint32_t correction_factor = div64_result();
+            int32_t nspd[3];
+            #pragma GCC unroll 3
+            for (int i = 0; i < 3; i++)
+            {
+                int32_t t = spd[i];
+                int32_t st = t;
+                if (t < 0)
+                    st = -st;
+                st = ((uint64_t)(uint32_t)st * correction_factor) >> 32;
+                if (t < 0)
+                    st = -st;
+                nspd[i] = st;
+            }
+
+            pointer->xspeed = nspd[0];
+            pointer->yspeed = nspd[1];
+            pointer->zspeed = nspd[2];
         }
     }
 }
