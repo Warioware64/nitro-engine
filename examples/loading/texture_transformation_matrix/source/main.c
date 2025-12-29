@@ -36,10 +36,7 @@ void Draw3DScene(void *arg)
 
     NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_NONE, 0);
 
-    //NE_TextureUpdateTransformations(Scene->Material[0]);
     NE_ModelDraw(Scene->Model[0]);
-
-    //NE_TextureUpdateTransformations(Scene->Material[1]);
     NE_ModelDraw(Scene->Model[1]);
 }
 
@@ -99,11 +96,12 @@ int main(int argc, char *argv[])
 
     NE_ModelSetCoord(Scene.Model[0], -1.25, 0, 0);
     NE_ModelSetCoord(Scene.Model[1], 1.5, 0, 0);
+    NE_ModelSetRot(Scene.Model[1], 10, 2, 0);
     
     // We set up a light and its color
     NE_LightSet(0, NE_White, -0.5, -0.5, -0.5);
 
-    int transformation_selected = 0;
+    int model_selected = 0;
 
     while (1)
     {
@@ -114,45 +112,49 @@ int main(int argc, char *argv[])
         scanKeys();
         uint32_t keys = keysHeld();
 
-        printf("\x1b[0;0HPad: Rotate.");
+        printf("\x1b[0;0HPad: Rotate.   \n\nA/B/X/Y: Move texture.   \n\nL/R: Scale texture.   \n\nSTART: Reset transformations of current texture.   \n\nSELECT: Switch texture.");
 
         // Rotate model using the pad
         if (keys & KEY_UP)
-            NE_ModelRotate(Scene.Model[0], 0, 0, -2);
+            NE_ModelRotate(Scene.Model[model_selected], 0, 0, -2);
         if (keys & KEY_DOWN)
-            NE_ModelRotate(Scene.Model[0], 0, 0, 2);
+            NE_ModelRotate(Scene.Model[model_selected], 0, 0, 2);
         if (keys & KEY_RIGHT)
-            NE_ModelRotate(Scene.Model[0], 0, 2, 0);
+            NE_ModelRotate(Scene.Model[model_selected], 0, 2, 0);
         if (keys & KEY_LEFT)
-            NE_ModelRotate(Scene.Model[0], 0, -2, 0);
+            NE_ModelRotate(Scene.Model[model_selected], 0, -2, 0);
 
         
         
         // Translate texture
         if (keys & KEY_A)
-            NE_TextureTranslate(Scene.Material[0], 0, 1 << 6);
+            NE_TextureTranslate(Scene.Material[model_selected], 0, 1 << 6);
 
         if (keys & KEY_Y)
-            NE_TextureTranslate(Scene.Material[0], 0, -1 << 6);
+            NE_TextureTranslate(Scene.Material[model_selected], 0, -1 << 6);
 
         if (keys & KEY_B)
-            NE_TextureTranslate(Scene.Material[0], 1 << 6, 0);
+            NE_TextureTranslate(Scene.Material[model_selected], 1 << 6, 0);
 
         if (keys & KEY_X)
-            NE_TextureTranslate(Scene.Material[0], -1 << 6, 0);
-
-
+            NE_TextureTranslate(Scene.Material[model_selected], -1 << 6, 0);
 
         // Scale texture
         if (keys & KEY_L)
-            NE_TextureScale(Scene.Material[0], 0.125, 0.125);
+            NE_TextureScale(Scene.Material[model_selected], 0.125, 0.125);
 
         if (keys & KEY_R)
-            NE_TextureScale(Scene.Material[0], -0.125, -0.125);
+            NE_TextureScale(Scene.Material[model_selected], -0.125, -0.125);
 
-
+        if (keys & KEY_START)
+            NE_TextureResetTransformations(Scene.Material[model_selected]);
+        
+        if (keys & KEY_SELECT)
+        {
+            if (model_selected == 0) model_selected = 1;
+            if (model_selected == 0) model_selected = 0;
+        }
         // Draw scene
-        NE_ModelRotate(Scene.Model[1], 1, 2, 0);
         NE_ProcessArg(Draw3DScene, &Scene);
     }
 

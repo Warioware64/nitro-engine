@@ -358,11 +358,26 @@ void NE_MaterialSetDefaultProperties(u32 diffuse, u32 ambient, u32 specular,
 
 /// Reset transformations of texture.
 ///
-/// This function is useful for avoiding useless GPU matrix calculation when no more transformations are applied.
-/// 
-///
 /// @param tex Texture to reset transfomations.
 void NE_TextureResetTransformations(const NE_Material *tex);
+
+
+/// Set position of a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Coordinates (f32).
+/// @param y (x, y) Coordinates (f32).
+void NE_TextureSetCoordI(const NE_Material *tex, int x, int y);
+
+/// Set position of a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Coordinates (float).
+/// @param y (x, y) Coordinates (float).
+#define NE_TextureSetCoord(m, x, y) \
+    NE_TextureSetCoordI(m, floattof32(x), floattof32(y))
+
+
 
 /// Translate a texture matrix.
 ///
