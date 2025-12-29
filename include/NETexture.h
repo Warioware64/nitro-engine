@@ -355,11 +355,45 @@ void NE_MaterialSetDefaultProperties(u32 diffuse, u32 ambient, u32 specular,
                                      u32 emission, bool vtxcolor,
                                      bool useshininess);
 
-/// Alias of NE_MaterialSetDefaultProperties
+
+/// Reset transformations of texture.
 ///
-/// @deprecated This definition is only present for backwards compatibility and
-/// it will be removed.
-#define NE_MaterialSetDefaultPropierties NE_MaterialSetDefaultProperties
+/// This function is useful for avoiding useless GPU matrix calculation when no more transformations are applied.
+/// 
+///
+/// @param tex Texture to reset transfomations.
+void NE_TextureResetTransformations(const NE_Material *tex);
+
+/// Translate a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Translate vector (f32).
+/// @param y (x, y) Translate vector (f32).
+void NE_TextureTranslateI(const NE_Material *tex, int x, int y);
+
+/// Translate a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Translate vector (float).
+/// @param y (x, y) Translate vector (float).
+#define NE_TextureTranslate(m, x, y) \
+    NE_TextureTranslateI(m, floattof32(x), floattof32(y))
+
+/// Scale a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Scale (f32).
+/// @param y (x, y) Scale (f32).
+void NE_TextureScaleI(const NE_Material *tex, int x, int y);
+
+/// Scale a texture matrix.
+///
+/// @param tex Pointer to the texture.
+/// @param x (x, y) Scale (float).
+/// @param y (x, y) Scale (float).
+#define NE_TextureScale(m, x, y) \
+    NE_TextureScaleI(m, floattof32(x), floattof32(y))
+
 
 /// Enables modification of the specified texture.
 ///
