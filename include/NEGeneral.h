@@ -55,7 +55,8 @@ typedef enum {
     NE_ModeSingle3D         = 1, ///< Initialized in single 3D mode.
     NE_ModeDual3D           = 2, ///< Initialized in regular dual 3D mode.
     NE_ModeDual3D_FB        = 3, ///< Initialized in dual 3D FB mode (no debug console).
-    NE_ModeDual3D_DMA       = 4  ///< Initialized in safe dual 3D mode.
+    NE_ModeDual3D_DMA       = 4,  ///< Initialized in safe dual 3D mode.
+    NE_ModeSingle3D_DoublePass = 5 ///< Initialized in single 3D mode double pass.
 } NE_ExecutionModes;
 
 /// Returns the current execution mode.
@@ -134,6 +135,16 @@ int NE_InitDual3D_FB(void);
 ///
 /// @return Returns 0 on success.
 int NE_InitDual3D_DMA(void);
+
+/// Inits Nitro Engine to draw 3D both times passing two pass.
+///
+/// VRAM banks C and D are used as framebuffers, which means there is only 50%
+/// of the normally available VRAM for textures.
+///
+///
+/// @return Returns 0 on success.
+int NE_InitSingle3D_DoublePass(void);
+
 
 /// Draws 3D scenes in both screens.
 ///

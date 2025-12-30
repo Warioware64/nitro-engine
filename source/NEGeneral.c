@@ -110,6 +110,22 @@ void NE_End(void)
             break;
         }
 
+        case NE_ModeSingle3D_DoublePass:
+        {
+            videoSetMode(0);
+
+            vramSetBankC(VRAM_C_LCD);
+            vramSetBankD(VRAM_D_LCD);
+
+            if (GFX_CONTROL & GL_CLEAR_BMP)
+                NE_ClearBMPEnable(false);
+
+            if (NE_UsingConsole)
+                vramSetBankF(VRAM_F_LCD);
+            
+            break;
+        }
+
         default:
             break;
     }
@@ -480,6 +496,36 @@ int NE_InitDual3D_DMA(void)
     NE_Screen = 0;
 
     NE_DebugPrint("Nitro Engine initialized in dual 3D DMA mode");
+
+    return 0;
+}
+
+int NE_InitSingle3D_DoublePass(void)
+{
+    NE_End();
+
+    if (ne_systems_reset_all(NE_VRAM_AB) != 0)
+        return -1;
+    
+    NE_DisplayListSetDefaultFunction(NE_DL_DMA_GFX_FIFO);
+
+    NE_UpdateInput();
+
+    ne_init_registers();
+
+    REG_BG2CNT = BG_BMP16_256x256;
+    REG_BG2PA = 1 << 8;
+    REG_BG2PB = 0;
+    REG_BG2PC = 0;
+    REG_BG2PD = 1 << 8;
+    REG_BG2X = 0;
+    REG_BG2Y = 0;
+
+    ne_execution_mode = NE_ModeSingle3D_DoublePass;
+
+    NE_Screen = 0;
+
+    NE_DebugPrint("Nitro Engine initialized in single 3D double pass mode");
 
     return 0;
 }
@@ -970,6 +1016,108 @@ static void ne_process_dual_3d_dma_arg(NE_VoidArgfunc mainscreen,
     ne_process_dual_3d_dma_common_end();
 }
 
+
+static void ne_process_single_3d_double_pass_common_start(void)
+{
+    NE_UpdateInput();
+
+    if (ne_main_screen == 1)
+        lcdMainOnTop();
+    else
+        lcdMainOnBottom();
+
+    NE_PolyFormat(31, 0, NE_LIGHT_ALL, NE_CULL_BACK, 0);
+
+    MATRIX_IDENTITY = 0;
+
+    if (NE_Screen == 1)
+    {
+        videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE);
+
+        vramSetBankC(VRAM_C_LCD);
+        vramSetBankD(VRAM_D_MAIN_BG_0x06000000);
+
+        bgSetPriority(2, 1);
+        bgSetPriority(0, 0);
+
+        REG_DISPCAPCNT =
+            // Destination is VRAM_C
+            DCAP_BANK(DCAP_BANK_VRAM_C) |
+            // Size = 256x192
+            DCAP_SIZE(DCAP_SIZE_256x192) |
+            // Capture source A only
+            DCAP_MODE(DCAP_MODE_A) |
+            // Source A = 3D rendered image
+            DCAP_SRC_A(DCAP_SRC_A_3DONLY) |
+            // Enable capture
+            DCAP_ENABLE;
+        
+        NE_Viewport(0, 0, 127, 191);
+
+
+
+    }
+    else
+    {
+        videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE);
+
+        vramSetBankC(VRAM_C_MAIN_BG_0x06000000);
+        vramSetBankD(VRAM_D_LCD);
+
+        bgSetPriority(2, 0);
+        bgSetPriority(0, 1);
+
+        REG_DISPCAPCNT =
+            // Destination is VRAM_D
+            DCAP_BANK(DCAP_BANK_VRAM_D) |
+            // Size = 256x192
+            DCAP_SIZE(DCAP_SIZE_256x192) |
+            // Capture source A only
+            DCAP_MODE(DCAP_MODE_A) |
+            // Source A = 3D rendered image
+            DCAP_SRC_A(DCAP_SRC_A_3DONLY) |
+            // Enable capture
+            DCAP_ENABLE;
+        
+        NE_Viewport(128, 0, 255, 191);
+    }
+}
+
+static void ne_process_single_3d_double_pass_common_end(void)
+{
+    GFX_FLUSH = GL_TRANS_MANUALSORT;
+
+    NE_Screen ^= 1;
+
+    NE_UpdateInput();
+}
+
+static void ne_process_single_3d_double_pass(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
+{
+    ne_process_single_3d_double_pass_common_start();
+
+    if (NE_Screen == 1)
+        mainscreen();
+    else
+        subscreen();
+
+    ne_process_single_3d_double_pass_common_end();
+}
+
+static void ne_process_single_3d_double_pass_arg(NE_VoidArgfunc mainscreen,
+                                                NE_VoidArgfunc subscreen,
+                                                void *argmain, void *argsub)
+{
+    ne_process_single_3d_double_pass_common_start();
+
+    if (NE_Screen == 1)
+        mainscreen(argmain);
+    else
+        subscreen(argsub);
+
+    ne_process_single_3d_double_pass_common_end();
+}
+
 void NE_ProcessDual(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
 {
     NE_AssertPointer(mainscreen, "NULL function pointer (main screen)");
@@ -994,6 +1142,13 @@ void NE_ProcessDual(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
             ne_process_dual_3d_dma(mainscreen, subscreen);
             return;
         }
+
+        case NE_ModeSingle3D_DoublePass:
+        {
+            ne_process_single_3d_double_pass(mainscreen, subscreen);
+            return;
+        }
+
         default:
         {
             return;
@@ -1026,6 +1181,13 @@ void NE_ProcessDualArg(NE_VoidArgfunc mainscreen, NE_VoidArgfunc subscreen,
             ne_process_dual_3d_dma_arg(mainscreen, subscreen, argmain, argsub);
             return;
         }
+
+        case NE_ModeSingle3D_DoublePass:
+        {
+            ne_process_single_3d_double_pass_arg(mainscreen, subscreen, argmain, argsub);
+            return;
+        }
+
         default:
         {
             return;

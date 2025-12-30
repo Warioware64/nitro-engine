@@ -640,8 +640,6 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
     NE_Texture[slot].x_tex_scale = 1 << 12;
     NE_Texture[slot].y_tex_scale = 1 << 12;
 
-    NE_Texture[slot].use_transformation = 0;
-
     // Unlock texture memory for writing
     // TODO: Only unlock the banks that Nitro Engine uses.
     u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
