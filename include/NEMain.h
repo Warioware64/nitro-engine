@@ -52,7 +52,7 @@ extern "C" {
 /// Minor version of Nitro Engine
 #define NITRO_ENGINE_MINOR (15)
 /// Patch version of Nitro Engine
-#define NITRO_ENGINE_PATCH (4)
+#define NITRO_ENGINE_PATCH (5)
 
 /// Full version of Nitro Engine
 #define NITRO_ENGINE_VERSION ((NITRO_ENGINE_MAJOR << 16) |  \

@@ -1,11 +1,26 @@
 Changelog
 =========
 
+Version 0.15.5 (2026-01-23)
+---------------------------
+
+- Ensure final position is returned on dry run with cursor. @Jonko
+- Add x and y axis independent sprite scaling. @BanceDev
+- Optimize physics update and camera use code. @Kuratius
+- Fix off-by-one error that was causing junk to be copied into rendered
+  materials. @Jonko
+- Rendering font with translucent textures (A5PAL8 and A3PAL32) has been
+  modified. Now the new pixels overwrite the previous pixels regardless of the
+  value being overwritten. @Jonko
+- The height of texture buffers is now trimmed instead of being expanded to a
+  valid DS texture size. @Jonko
+
 Version 0.15.4 (2025-07-16)
 ---------------------------
 
-- Allow the number of rich text fonts to be specified dynamically.
+- Allow the number of rich text fonts to be specified dynamically. @Jonko
 - Optionally return cursor position from dry run & allow indenting rich text.
+  @Jonko
 
 Version 0.15.3 (2025-03-26)
 ---------------------------
@@ -37,7 +52,7 @@ Version 0.15.0 (2024-12-01)
 ---------------------------
 
 - Allow users to specify the transformation matrix of a model manually.
-- Fix a devkitARM Makefile in an example.
+- Fix a devkitARM Makefile in an example. @W3SLAV
 
 Version 0.14.0 (2024-09-10)
 ---------------------------
