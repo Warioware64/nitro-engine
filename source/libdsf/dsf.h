@@ -5,6 +5,10 @@
 #ifndef DSF_H__
 #define DSF_H__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// @file dsf.h
 ///
 /// @brief Global include of LibDSF.
@@ -20,7 +24,7 @@
 /// Minor version of LibDSF (semver)
 #define LIBDSF_VERSION_MINOR 1
 /// Patch version of LibDSF (semver)
-#define LIBDSF_VERSION_PATCH 3
+#define LIBDSF_VERSION_PATCH 6
 
 /// Value that combines all version numbers, useful for version checks.
 #define LIBDSF_VERSION \
@@ -29,7 +33,7 @@
                  (LIBDSF_VERSION_PATCH << 1))
 
 /// Version string
-#define LIBDSF_VERSION_STRING "0.1.3"
+#define LIBDSF_VERSION_STRING "0.1.6"
 
 /// Character that is used when there are UTF-8 decoding errors.
 ///
@@ -228,5 +232,9 @@ dsf_error DSF_StringRenderToTexture(dsf_handle handle,
                     void **out_texture, size_t *out_width, size_t *out_height);
 
 /// @}
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DSF_H__
