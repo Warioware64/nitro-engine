@@ -8,21 +8,21 @@ Introduction
 This is a 3D game engine, a lot of functions designed to simplify the process of
 making a 3D game. It isn't standalone, it needs libnds to work.
 
-You can use Nitro Engine with `BlocksDS <https://blocksds.github.io/docs/>`_.
+You can use Nitro Engine with `BlocksDS <https://blocksds.skylyrac.net>`_.
 
 Features:
 
 - Support for static models, converted from OBJ files.
 - Support for animated models, thanks to the `DSMA library
-  <https://github.com/AntonioND/dsma-library>`_, which converts MD5 models (with
-  skeletal animation) into a format that can be rendered with hardware
+  <https://codeberg.org/SkyLyrac/dsma-library>`_, which converts MD5 models
+  (with skeletal animation) into a format that can be rendered with hardware
   acceleration. It can also blend two animations together (for transitions).
 - Support for all format of textures (even compressed textures, thanks to
   `ptexconv <https://github.com/Garhoogin/ptexconv>`_).
 - Dual 3D (render 3D to both screens, but at 30 FPS instead of 60 FPS).
 - Functions to render 2D images accelerated by 3D hardware.
-- Text system based on `libDSF <https://github.com/AntonioND/libdsf>`_, which is
-  based on `BMFont <https://www.angelcode.com/products/bmfont/>`_.
+- Text system based on `libDSF <https://codeberg.org/SkyLyrac/libdsf>`_, which
+  is based on `BMFont <https://www.angelcode.com/products/bmfont/>`_.
 - Basic GUI elements like buttons and scrollbars.
 - Basic physic system: Axis-aligned bounding boxes (AABB) only.
 
@@ -69,8 +69,8 @@ aren't very flexible, and they don't support converting 3D models, or saving
 graphics or models to the filesystem (you can only inject them as data to the
 ARM9, which isn't acceptable for big games).
 
-You can also try `ArchitectDS <https://github.com/AntonioND/architectds>`_. This
-build system written in Python supports converting every format that Nitro
+You can also try `ArchitectDS <https://codeberg.org/blocksds/architectds>`_.
+This build system written in Python supports converting every format that Nitro
 Engine supports, and it lets you save everything in NitroFS so that your game
 can grow as much as you want. ArchitectDS comes with plenty of examples of how
 to use it with Nitro Engine.
@@ -139,13 +139,7 @@ Screenshots of some of the examples included with Nitro Engine:
 Contact
 =======
 
-This project is currently hosted on GitHub at:
-
-    https://github.com/AntonioND/nitro-engine
-
-If you want to contact me (Antonio Niño Díaz) directly you can email me at:
-
-   antonio underscore nd at outlook dot com
+This project is currently hosted in `Codeberg <https://codeberg.org/SkyLyrac/nitro-engine>`__.
 
 License
 =======

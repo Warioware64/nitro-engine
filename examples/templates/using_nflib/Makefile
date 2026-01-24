@@ -14,8 +14,8 @@ ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
 NAME		:= $(shell basename $(CURDIR))
 GAME_TITLE	:= NFlib + Nitro Engine template
 GAME_SUBTITLE	:= Nitro Engine example
-GAME_AUTHOR	:= github.com/AntonioND/nitro-engine
-GAME_ICON	:= $(BLOCKSDS)/sys/icon.bmp
+GAME_AUTHOR	:= blocksds.skylyrac.net
+GAME_ICON	:= $(BLOCKSDS)/sys/icon.gif
 
 # DLDI and internal SD slot of DSi
 # --------------------------------

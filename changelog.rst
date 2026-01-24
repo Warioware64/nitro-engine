@@ -246,9 +246,9 @@ Version 0.8.0 (2022-10-21)
 
 Models and materials:
 
-- Add support for MD5 animated models (thanks to
-  https://github.com/AntonioND/dsma-library): Introduce tool ``md5_to_dsma`` to
-  convert them to a format that Nitro Engine can use.
+- Add support for MD5 animated models (thanks to `dsma library
+  <https://codeberg.org/SkyLyrac/dsma-library>`__): Introduce tool
+  ``md5_to_dsma`` to convert them to a format that Nitro Engine can use.
 
 - Add support for OBJ static models: Introduce tool obj2dl to convert them to a
   format that Nitro Engine can use.
