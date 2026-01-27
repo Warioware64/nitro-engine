@@ -203,6 +203,9 @@ int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
         goto cleanup;
     }
 
+    if (header.flags & GRF_FLAG_COLOR0_TRANSPARENT)
+        flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
+
     if (gfxDst == NULL)
     {
         NE_DebugPrint("No graphics found in GRF file");
