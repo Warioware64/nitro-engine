@@ -137,8 +137,8 @@ VRAM F is setup as main engine background memory, and:
 4. Dual screen 3D mode
 ----------------------
 
-The source code `for regular dual 3D mode is here <https://github.com/AntonioND/nitro-engine/blob/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L608>`_
-and `the source code for the console initialization is here <https://github.com/AntonioND/nitro-engine/blob/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L493>`_.
+The source code `for regular dual 3D mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L608>`__
+and `the source code for the console initialization is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L493>`__.
 
 This is the traditional way to handle dual 3D, and it is used in multiple
 examples that can be found `online <https://github.com/devkitPro/nds-examples/blob/6afa09b2054c9f47685514c32873b3905721c9ee/Graphics/3D/3D_Both_Screens/source/template.c>`_.
@@ -232,7 +232,7 @@ hit the issue where both screens will show the same output.
 5. Dual screen 3D FB mode
 -------------------------
 
-The source code `for dual 3D FB mode is here <https://github.com/AntonioND/nitro-engine/blob/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L670>`_.
+The source code `for dual 3D FB mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L670>`_.
 
 This is another well-known way to handle dual 3D, but it prevents you from using
 the 2D engine in the screen that is being updated in that frame. This prevents
@@ -240,7 +240,7 @@ us from displaying a debug console in one screen because it would only be
 displayed there half of the frames.
 
 It is named after the ``MODE_FB2`` and ``MODE_FB3`` constants of `libnds
-<https://github.com/blocksds/libnds/blob/21ad6a51f5ffff00fa47e9a17f8547a46036933f/include/nds/arm9/video.h#L497-L500>`_.
+<https://codeberg.org/blocksds/libnds/src/commit/21ad6a51f5ffff00fa47e9a17f8547a46036933f/include/nds/arm9/video.h#L497-L500>`_.
 
 VRAM banks are used like this:
 
@@ -320,8 +320,8 @@ anything.
 6. Dual screen 3D DMA mode
 --------------------------
 
-The source code `for this mode is here <https://github.com/AntonioND/nitro-engine/blob/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L735>`_
-and `this is the code to initialize the debug console <https://github.com/AntonioND/nitro-engine/blob/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L518>`_.
+The source code `for this mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L735>`_
+and `this is the code to initialize the debug console <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L518>`_.
 
 Thanks to `Gericom <https://github.com/Gericom>`_ for all the advice regarding
 this system!

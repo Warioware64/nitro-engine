@@ -12,7 +12,7 @@ The following tools are used to export models created on the PC to the NDS:
   Converts MD5 models with skeletal animation (md5mesh and md5anim files) into a
   format that allows them to be displayed on the NDS efficiently.
 
-  https://github.com/AntonioND/dsma-library
+  https://codeberg.org/SkyLyrac/dsma-library
 
 - **img2ds**
 

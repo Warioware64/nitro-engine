@@ -17,8 +17,6 @@ typedef struct {
     char *address;
     int uses; // Number of materials that use this texture
     int sizex, sizey;
-    int x_tex_pos, y_tex_pos;
-    int x_tex_scale, y_tex_scale;
 } ne_textureinfo_t;
 
 static ne_textureinfo_t *NE_Texture = NULL;
@@ -204,6 +202,9 @@ int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
         NE_DebugPrint("Couldn't load GRF file: %d", err);
         goto cleanup;
     }
+
+    if (header.flags & GRF_FLAG_COLOR0_TRANSPARENT)
+        flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
 
     if (gfxDst == NULL)
     {
@@ -529,12 +530,6 @@ int NE_MaterialTex4x4Load(NE_Material *tex, int sizeX, int sizeY,
     NE_Texture[slot].address = slot02;
     NE_Texture[slot].uses = 1; // Initially only this material uses the texture
 
-    NE_Texture[slot].x_tex_pos = 0;
-    NE_Texture[slot].y_tex_pos = 0;
-
-    NE_Texture[slot].x_tex_scale = 1 << 12;
-    NE_Texture[slot].y_tex_scale = 1 << 12;
-
     // Unlock texture memory for writing
     // TODO: Only unlock the banks that Nitro Engine uses.
     u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
@@ -634,12 +629,6 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
     NE_Texture[slot].address = addr;
     NE_Texture[slot].uses = 1; // Initially only this material uses the texture
 
-    NE_Texture[slot].x_tex_pos = 0;
-    NE_Texture[slot].y_tex_pos = 0;
-
-    NE_Texture[slot].x_tex_scale = 1 << 12;
-    NE_Texture[slot].y_tex_scale = 1 << 12;
-
     // Unlock texture memory for writing
     // TODO: Only unlock the banks that Nitro Engine uses.
     u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
@@ -715,27 +704,8 @@ void NE_MaterialUse(const NE_Material *tex)
     if (tex->palette)
         NE_PaletteUse(tex->palette);
 
-    
     GFX_COLOR = tex->color;
     GFX_TEX_FORMAT = NE_Texture[tex->texindex].param;
-
-    // Apply texture matrix transformations
-    
-    // Enable matrix mode texture alias GL_TEXTURE
-    MATRIX_CONTROL = 3;
-    MATRIX_IDENTITY = 0;
-
-    MATRIX_TRANSLATE = NE_Texture[tex->texindex].x_tex_pos;
-    MATRIX_TRANSLATE = NE_Texture[tex->texindex].y_tex_pos;
-    MATRIX_TRANSLATE = 0;
-
-    MATRIX_SCALE = NE_Texture[tex->texindex].x_tex_scale;
-    MATRIX_SCALE = NE_Texture[tex->texindex].y_tex_scale;
-    MATRIX_SCALE = 0;
-    
-    // Matrix mode is set to GL_POSITION because every time NE_MaterialUse() is used the next operations manage vertices and stay with GL_TEXTURE cause unexpected behaviours and break all further vertices operations
-    MATRIX_CONTROL = 1;
-    
 }
 
 int NE_TextureSystemReset(int max_textures, int max_palettes,
@@ -766,8 +736,15 @@ int NE_TextureSystemReset(int max_textures, int max_palettes,
     if ((bank_flags & 0xF) == 0)
         bank_flags = NE_VRAM_ABCD;
 
-    // VRAM_C and VRAM_D can't be used in dual 3D mode
-    if (NE_CurrentExecutionMode() != NE_ModeSingle3D)
+    // VRAM_C and VRAM_D can't be used in dual 3D mode (they are used for
+    // framebuffers). In two-pass FIFO/DMA modes, only VRAM_D is reserved (for
+    // capture), so VRAM_C is available for textures. In two-pass FB mode,
+    // both VRAM_C and VRAM_D alternate as framebuffers/capture destinations.
+    NE_ExecutionModes mode = NE_CurrentExecutionMode();
+    if (mode == NE_ModeSingle3D_TwoPass
+        || mode == NE_ModeSingle3D_TwoPass_DMA)
+        bank_flags &= ~NE_VRAM_D;
+    else if (mode != NE_ModeSingle3D)
         bank_flags &= ~NE_VRAM_CD;
 
     // Now, configure allocation system. The buffer size always sees the
@@ -1010,46 +987,6 @@ static int drawingtexture_x, drawingtexture_y;
 static int drawingtexture_type;
 static int drawingtexture_realx;
 static u32 ne_vram_saved;
-
-
-void NE_TextureResetTransformations(const NE_Material *tex)
-{
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-
-    NE_Texture[tex->texindex].x_tex_pos = 0;
-    NE_Texture[tex->texindex].y_tex_pos = 0;
-
-    NE_Texture[tex->texindex].x_tex_scale = 1 << 12;
-    NE_Texture[tex->texindex].y_tex_scale = 1 << 12;
-}
-
-void NE_TextureSetCoordI(const NE_Material *tex, int x, int y)
-{
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-
-    NE_Texture[tex->texindex].x_tex_pos = x;
-    NE_Texture[tex->texindex].y_tex_pos = y;
-}
-
-void NE_TextureTranslateI(const NE_Material *tex, int x, int y)
-{
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-
-    NE_Texture[tex->texindex].x_tex_pos += x;
-    NE_Texture[tex->texindex].y_tex_pos += y;
-}
-
-void NE_TextureScaleI(const NE_Material *tex, int x, int y)
-{
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-
-    NE_Texture[tex->texindex].x_tex_scale += x;
-    NE_Texture[tex->texindex].y_tex_scale += y;
-}
 
 void *NE_TextureDrawingStart(const NE_Material *tex)
 {

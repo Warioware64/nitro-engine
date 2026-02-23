@@ -51,12 +51,14 @@ void NE_UpdateInput(void);
 
 /// List of all the possible initialization states of Nitro Engine.
 typedef enum {
-    NE_ModeUninitialized    = 0, ///< Nitro Engine hasn't been initialized.
-    NE_ModeSingle3D         = 1, ///< Initialized in single 3D mode.
-    NE_ModeDual3D           = 2, ///< Initialized in regular dual 3D mode.
-    NE_ModeDual3D_FB        = 3, ///< Initialized in dual 3D FB mode (no debug console).
-    NE_ModeDual3D_DMA       = 4,  ///< Initialized in safe dual 3D mode.
-    NE_ModeSingle3D_DoublePass = 5 ///< Initialized in single 3D mode double pass.
+    NE_ModeUninitialized        = 0, ///< Nitro Engine hasn't been initialized.
+    NE_ModeSingle3D             = 1, ///< Initialized in single 3D mode.
+    NE_ModeDual3D               = 2, ///< Initialized in regular dual 3D mode.
+    NE_ModeDual3D_FB            = 3, ///< Initialized in dual 3D FB mode (no debug console).
+    NE_ModeDual3D_DMA           = 4, ///< Initialized in safe dual 3D mode.
+    NE_ModeSingle3D_TwoPass     = 5, ///< Initialized in two-pass FIFO mode.
+    NE_ModeSingle3D_TwoPass_FB  = 6, ///< Initialized in two-pass framebuffer mode.
+    NE_ModeSingle3D_TwoPass_DMA = 7  ///< Initialized in two-pass HBL DMA mode.
 } NE_ExecutionModes;
 
 /// Returns the current execution mode.
@@ -136,15 +138,112 @@ int NE_InitDual3D_FB(void);
 /// @return Returns 0 on success.
 int NE_InitDual3D_DMA(void);
 
-/// Inits Nitro Engine to draw 3D both times passing two pass.
+/// Inits Nitro Engine in two-pass FIFO mode.
 ///
-/// VRAM banks C and D are used as framebuffers, which means there is only 50%
-/// of the normally available VRAM for textures.
+/// This mode doubles the polygon budget by splitting the screen into left and
+/// right halves and rendering each half in a separate hardware frame. The
+/// effective framerate is 30 FPS.
 ///
+/// VRAM bank D is used for display capture. VRAM banks A, B, and C are
+/// available for textures (75% of the normally available VRAM).
+///
+/// Two framebuffers are allocated in main RAM (~192 KB total). The main screen
+/// uses display FIFO mode (MODE_FIFO) with DMA 2 continuously feeding pixel
+/// data from main RAM to the display hardware.
+///
+/// Warning: This mode may show horizontal line artifacts on real hardware due
+/// to bus contention between the continuous DMA 2 display transfer and dmaCopy
+/// (DMA 3) used to copy captured data. Prefer NE_Init3D_TwoPass_DMA() or
+/// NE_Init3D_TwoPass_FB() for artifact-free output.
+///
+/// The sub screen is available for a 2D console via NE_InitConsole().
+///
+/// Note: NE_ClearBMPEnable(), NE_2DViewInit(), and touch test are not supported
+/// in any two-pass mode.
 ///
 /// @return Returns 0 on success.
-int NE_InitSingle3D_DoublePass(void);
+int NE_Init3D_TwoPass(void);
 
+/// Inits Nitro Engine in two-pass framebuffer mode.
+///
+/// This mode doubles the polygon budget by splitting the screen into left and
+/// right halves and rendering each half in a separate hardware frame. The
+/// effective framerate is 30 FPS.
+///
+/// VRAM banks C and D alternate between display capture and main BG display
+/// each frame. VRAM banks A and B are available for textures (50% of the
+/// normally available VRAM, same as dual 3D modes).
+///
+/// No main RAM framebuffers are allocated and DMA 2 is not used. This means
+/// DMA-based display list drawing (NE_DL_DMA_GFX_FIFO) is safe and will be
+/// used by default, providing better performance than the other two-pass modes.
+///
+/// The compositing works by alternating the clear color alpha (opaque vs
+/// transparent) and BG layer priorities each frame, using the DS 3D hardware's
+/// one-frame rendering delay to combine both halves on screen.
+///
+/// No line artifacts on real hardware.
+///
+/// The sub screen is available for a 2D console via NE_InitConsole().
+///
+/// @return Returns 0 on success.
+int NE_Init3D_TwoPass_FB(void);
+
+/// Inits Nitro Engine in two-pass HBL DMA mode.
+///
+/// This mode doubles the polygon budget by splitting the screen into left and
+/// right halves and rendering each half in a separate hardware frame. The
+/// effective framerate is 30 FPS.
+///
+/// VRAM bank D is used for display capture. VRAM banks A, B, and C are
+/// available for textures (75% of the normally available VRAM). VRAM bank F is
+/// used as a one-scanline display buffer.
+///
+/// Two framebuffers are allocated in main RAM (~192 KB total). DMA 2 is
+/// triggered at each HBL to copy one scanline from the main RAM framebuffer to
+/// VRAM F, which is displayed as a bitmap BG. Because DMA 2 is only briefly
+/// active during each HBL (not continuously), there is no bus contention with
+/// dmaCopy (DMA 3).
+///
+/// No line artifacts on real hardware.
+///
+/// The sub screen is available for a 2D console via NE_InitConsole().
+///
+/// @return Returns 0 on success.
+int NE_Init3D_TwoPass_DMA(void);
+
+/// Draws a 3D scene using two-pass rendering.
+///
+/// Works with all three two-pass modes (FIFO, FB, DMA). This must be called
+/// once per hardware frame (60 FPS loop). Internally, it alternates between
+/// rendering the left and right halves of the screen. The user's draw function
+/// is called every frame and should draw the full 3D scene.
+///
+/// @param drawscene Function that draws the screen.
+void NE_ProcessTwoPass(NE_Voidfunc drawscene);
+
+/// Draws a 3D scene using two-pass rendering, passing an argument.
+///
+/// Works with all three two-pass modes (FIFO, FB, DMA).
+///
+/// @param drawscene Function that draws the screen.
+/// @param arg Argument to pass to the drawscene function.
+void NE_ProcessTwoPassArg(NE_VoidArgfunc drawscene, void *arg);
+
+/// Returns the current two-pass frame index.
+///
+/// Works with all three two-pass modes (FIFO, FB, DMA).
+///
+/// Returns 0 when the next pass will render the left half (meaning a complete
+/// frame has just finished). Returns 1 when the next pass will render the right
+/// half. Use this to only update scene state every other frame:
+///
+/// @code
+/// NE_WaitForVBL(NE_TwoPassGetPass() == 0 ? NE_UPDATE_ANIMATIONS : 0);
+/// @endcode
+///
+/// @return Current pass index (0 or 1).
+int NE_TwoPassGetPass(void);
 
 /// Draws 3D scenes in both screens.
 ///

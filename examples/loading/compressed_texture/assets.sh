@@ -6,6 +6,10 @@ mkdir -p data
 BLOCKSDSEXT="${BLOCKSDSEXT:-/opt/blocksds/external/}"
 
 # ptexconv can be obtained here: https://github.com/Garhoogin/ptexconv/
+#
+# It can also be installed with wf-pacman:
+#
+#     wf-pacman -Sy blocksds-ptexconv
 
 $BLOCKSDSEXT/ptexconv/ptexconv \
     -gt -ob -k FF00FF -v -f tex4x4 \

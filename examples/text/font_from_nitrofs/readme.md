@@ -5,7 +5,7 @@ This example shows how to load BMFont fonts from Nitro FS. Check the official
 them. Remember that the output format must be binary for the font metadata, and
 PNG for the images.
 
-The build system used is [ArchitectDS](https://github.com/AntonioND/architectds)
+The build system used is [ArchitectDS](https://codeberg.org/blocksds/architectds)
 because of the flexibility it gives the user.
 
 In order to build this example, run:

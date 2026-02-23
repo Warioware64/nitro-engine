@@ -298,6 +298,14 @@ static inline void NE_ToonHighlightEnable(bool value)
 /// @param id Rear plane polygon ID.
 void NE_ClearColorSet(u32 color, u32 alpha, u32 id);
 
+/// Returns the current clear color register value (internal use).
+///
+/// Used by two-pass FB mode to read and override the clear color alpha for
+/// compositing.
+///
+/// @return The GFX_CLEAR_COLOR value stored internally.
+u32 NE_ClearColorGet(void);
+
 /// Clear BMP scroll register.
 #ifndef REG_CLRIMAGE_OFFSET
 #define REG_CLRIMAGE_OFFSET (*(vu16*)0x4000356)

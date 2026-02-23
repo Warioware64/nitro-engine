@@ -355,60 +355,11 @@ void NE_MaterialSetDefaultProperties(u32 diffuse, u32 ambient, u32 specular,
                                      u32 emission, bool vtxcolor,
                                      bool useshininess);
 
-
-/// Reset transformations of texture.
+/// Alias of NE_MaterialSetDefaultProperties
 ///
-/// @param tex Texture to reset transfomations.
-void NE_TextureResetTransformations(const NE_Material *tex);
-
-
-/// Set position of a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Coordinates (f32).
-/// @param y (x, y) Coordinates (f32).
-void NE_TextureSetCoordI(const NE_Material *tex, int x, int y);
-
-/// Set position of a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Coordinates (float).
-/// @param y (x, y) Coordinates (float).
-#define NE_TextureSetCoord(m, x, y) \
-    NE_TextureSetCoordI(m, floattof32(x), floattof32(y))
-
-
-
-/// Translate a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Translate vector (f32).
-/// @param y (x, y) Translate vector (f32).
-void NE_TextureTranslateI(const NE_Material *tex, int x, int y);
-
-/// Translate a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Translate vector (float).
-/// @param y (x, y) Translate vector (float).
-#define NE_TextureTranslate(m, x, y) \
-    NE_TextureTranslateI(m, floattof32(x), floattof32(y))
-
-/// Scale a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Scale (f32).
-/// @param y (x, y) Scale (f32).
-void NE_TextureScaleI(const NE_Material *tex, int x, int y);
-
-/// Scale a texture matrix.
-///
-/// @param tex Pointer to the texture.
-/// @param x (x, y) Scale (float).
-/// @param y (x, y) Scale (float).
-#define NE_TextureScale(m, x, y) \
-    NE_TextureScaleI(m, floattof32(x), floattof32(y))
-
+/// @deprecated This definition is only present for backwards compatibility and
+/// it will be removed.
+#define NE_MaterialSetDefaultPropierties NE_MaterialSetDefaultProperties
 
 /// Enables modification of the specified texture.
 ///

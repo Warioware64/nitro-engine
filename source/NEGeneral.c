@@ -37,6 +37,20 @@ static uint32_t ne_dma_src = 0;
 static uint32_t ne_dma_dst = 0;
 static uint32_t ne_dma_cr = 0;
 
+// Two-pass rendering state
+static u16 *ne_two_pass_fb[2];              // Two framebuffers in main RAM
+static volatile u8 ne_two_pass_displayed;   // Index of framebuffer being displayed
+static volatile bool ne_two_pass_next_ready;// Next framebuffer ready to swap
+static u8 ne_two_pass_frame;                // Current pass: 0 = left, 1 = right
+static bool ne_two_pass_enabled;            // True when in two-pass mode
+
+#define NE_TWO_PASS_SPLIT 128 // Horizontal split at screen center
+
+// Scanline row offset in the VRAM_F bitmap used for HBL DMA display.
+// Same technique as NE_DUAL_DMA_3D_LINES_OFFSET: the bitmap BG has PD=0 so it
+// repeats one row, and DMA writes new scanline data to that row at each HBL.
+#define NE_TWO_PASS_LINE_OFFSET 20
+
 NE_ExecutionModes NE_CurrentExecutionMode(void)
 {
     return ne_execution_mode;
@@ -110,19 +124,54 @@ void NE_End(void)
             break;
         }
 
-        case NE_ModeSingle3D_DoublePass:
+        case NE_ModeSingle3D_TwoPass:
+        case NE_ModeSingle3D_TwoPass_DMA:
         {
+            ne_two_pass_enabled = false;
+
+#ifdef NE_BLOCKSDS
+            dmaStopSafe(2);
+#else
+            DMA_CR(2) = 0;
+#endif
+
             videoSetMode(0);
+            videoSetModeSub(0);
 
             vramSetBankC(VRAM_C_LCD);
             vramSetBankD(VRAM_D_LCD);
 
-            if (GFX_CONTROL & GL_CLEAR_BMP)
-                NE_ClearBMPEnable(false);
+            if (ne_execution_mode == NE_ModeSingle3D_TwoPass_DMA)
+                vramSetBankF(VRAM_F_LCD);
 
             if (NE_UsingConsole)
-                vramSetBankF(VRAM_F_LCD);
-            
+                vramSetBankH(VRAM_H_LCD);
+
+            for (int i = 0; i < 2; i++)
+            {
+                if (ne_two_pass_fb[i] != NULL)
+                {
+                    free(ne_two_pass_fb[i]);
+                    ne_two_pass_fb[i] = NULL;
+                }
+            }
+            break;
+        }
+
+        case NE_ModeSingle3D_TwoPass_FB:
+        {
+            ne_two_pass_enabled = false;
+
+            videoSetMode(0);
+            videoSetModeSub(0);
+
+            vramSetBankC(VRAM_C_LCD);
+            vramSetBankD(VRAM_D_LCD);
+
+            if (NE_UsingConsole)
+                vramSetBankH(VRAM_H_LCD);
+
+            // No main RAM framebuffers to free in FB mode
             break;
         }
 
@@ -500,19 +549,121 @@ int NE_InitDual3D_DMA(void)
     return 0;
 }
 
-int NE_InitSingle3D_DoublePass(void)
+// Helper: allocate two main RAM framebuffers for two-pass FIFO and DMA modes.
+// Returns 0 on success, -2 on allocation failure.
+static int ne_two_pass_alloc_framebuffers(void)
+{
+    for (int i = 0; i < 2; i++)
+    {
+        ne_two_pass_fb[i] = calloc(256 * 192, sizeof(u16));
+        if (ne_two_pass_fb[i] == NULL)
+        {
+            NE_DebugPrint("Not enough memory for two-pass framebuffers");
+            for (int j = 0; j < i; j++)
+            {
+                free(ne_two_pass_fb[j]);
+                ne_two_pass_fb[j] = NULL;
+            }
+            return -2;
+        }
+        // Flush dirty cache lines to physical RAM. DMA 2 reads directly from
+        // physical RAM, bypassing the CPU cache. Without flushing, dirty cache
+        // lines from calloc could be evicted later, overwriting DMA-written
+        // pixel data with zeros and causing a black screen.
+        DC_FlushRange(ne_two_pass_fb[i], 256 * 192 * sizeof(u16));
+    }
+    return 0;
+}
+
+int NE_Init3D_TwoPass(void)
 {
     NE_End();
 
-    if (ne_systems_reset_all(NE_VRAM_AB) != 0)
+    // VRAM D is reserved for display capture, use A, B, C for textures.
+    // Set execution mode BEFORE ne_systems_reset_all() so that
+    // NE_TextureSystemReset only masks off VRAM_D (not VRAM_C).
+    ne_execution_mode = NE_ModeSingle3D_TwoPass;
+
+    if (ne_systems_reset_all(NE_VRAM_ABC) != 0)
+    {
+        ne_execution_mode = NE_ModeUninitialized;
         return -1;
-    
+    }
+
+    // Use CPU-based display list drawing. DMA channel 0 display lists
+    // (NE_DL_DMA_GFX_FIFO) wait for ALL DMA channels to be idle before
+    // starting. In FIFO mode, DMA 2 runs continuously (DMA_DISP_FIFO |
+    // DMA_REPEAT), so dmaBusy(2) is always true and the wait deadlocks.
+    NE_DisplayListSetDefaultFunction(NE_DL_CPU);
+
+    NE_UpdateInput();
+
+    ne_init_registers();
+
+    int ret = ne_two_pass_alloc_framebuffers();
+    if (ret != 0)
+        return ret;
+
+    ne_two_pass_displayed = 0;
+    ne_two_pass_next_ready = false;
+    ne_two_pass_frame = 0;
+    ne_two_pass_enabled = true;
+
+    // Use VRAM D as destination for video capture
+    vramSetBankD(VRAM_D_LCD);
+
+    // Display from main RAM via display FIFO. DMA 2 is set up in
+    // NE_VBLFunc() with DMA_DISP_FIFO to continuously feed pixel data.
+    //
+    // Warning: this mode causes visible horizontal line artifacts on real
+    // hardware because DMA 2 (display FIFO) and DMA 3 (dmaCopy for capture
+    // data) contend on the main RAM bus simultaneously.
+    videoSetMode(MODE_FIFO | ENABLE_3D);
+
+    // Setup sub engine for 2D (available for console)
+    videoSetModeSub(MODE_0_2D);
+
+    NE_DebugPrint("Nitro Engine initialized in two-pass FIFO mode");
+
+    return 0;
+}
+
+int NE_Init3D_TwoPass_FB(void)
+{
+    NE_End();
+
+    // VRAM C and D alternate between LCD (capture dest) and main BG (display).
+    // Only VRAM A and B are available for textures (50% of max VRAM).
+    ne_execution_mode = NE_ModeSingle3D_TwoPass_FB;
+
+    if (ne_systems_reset_all(NE_VRAM_AB) != 0)
+    {
+        ne_execution_mode = NE_ModeUninitialized;
+        return -1;
+    }
+
+    // DMA 2 is not used in FB mode, so DMA-based display list drawing is safe
+    // and provides better performance than CPU-based drawing.
     NE_DisplayListSetDefaultFunction(NE_DL_DMA_GFX_FIFO);
 
     NE_UpdateInput();
 
     ne_init_registers();
 
+    ne_two_pass_displayed = 0;
+    ne_two_pass_next_ready = false;
+    ne_two_pass_frame = 0;
+    ne_two_pass_enabled = true;
+
+    // No main RAM framebuffers needed - VRAM C/D serve as framebuffers.
+    ne_two_pass_fb[0] = NULL;
+    ne_two_pass_fb[1] = NULL;
+
+    // Initial VRAM setup. The processing function reconfigures C/D each frame.
+    vramSetBankC(VRAM_C_LCD);
+    vramSetBankD(VRAM_D_LCD);
+
+    // BG2 is used to display the captured half via a 16-bit bitmap BG.
     REG_BG2CNT = BG_BMP16_256x256;
     REG_BG2PA = 1 << 8;
     REG_BG2PB = 0;
@@ -521,11 +672,76 @@ int NE_InitSingle3D_DoublePass(void)
     REG_BG2X = 0;
     REG_BG2Y = 0;
 
-    ne_execution_mode = NE_ModeSingle3D_DoublePass;
+    videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE);
 
-    NE_Screen = 0;
+    // Setup sub engine for 2D (available for console)
+    videoSetModeSub(MODE_0_2D);
 
-    NE_DebugPrint("Nitro Engine initialized in single 3D double pass mode");
+    NE_DebugPrint("Nitro Engine initialized in two-pass FB mode");
+
+    return 0;
+}
+
+int NE_Init3D_TwoPass_DMA(void)
+{
+    NE_End();
+
+    // VRAM D is reserved for display capture, use A, B, C for textures.
+    // Set execution mode BEFORE ne_systems_reset_all() so that
+    // NE_TextureSystemReset only masks off VRAM_D (not VRAM_C).
+    ne_execution_mode = NE_ModeSingle3D_TwoPass_DMA;
+
+    if (ne_systems_reset_all(NE_VRAM_ABC) != 0)
+    {
+        ne_execution_mode = NE_ModeUninitialized;
+        return -1;
+    }
+
+    // Use CPU-based display list drawing. DMA channel 0 display lists
+    // (NE_DL_DMA_GFX_FIFO) wait for ALL DMA channels to be idle. DMA 2 is
+    // active during HBL periods, which could cause occasional stalls.
+    NE_DisplayListSetDefaultFunction(NE_DL_CPU);
+
+    NE_UpdateInput();
+
+    ne_init_registers();
+
+    int ret = ne_two_pass_alloc_framebuffers();
+    if (ret != 0)
+        return ret;
+
+    ne_two_pass_displayed = 0;
+    ne_two_pass_next_ready = false;
+    ne_two_pass_frame = 0;
+    ne_two_pass_enabled = true;
+
+    // Use VRAM D as destination for video capture
+    vramSetBankD(VRAM_D_LCD);
+
+    // Use VRAM F as a one-scanline display buffer for HBL DMA.
+    // The bitmap BG has vertical scale PD=0, so it repeats one row for all
+    // 192 lines. DMA 2 is triggered at each HBL to copy a new scanline from
+    // main RAM to this row.
+    //
+    // This avoids MODE_FIFO + DMA_DISP_FIFO which would keep DMA 2
+    // continuously active and conflict with dmaCopy (DMA 3) on the main RAM
+    // bus, causing visible line artifacts on real hardware.
+    vramSetBankF(VRAM_F_MAIN_BG_0x06000000);
+
+    videoSetMode(MODE_5_2D | DISPLAY_BG2_ACTIVE);
+
+    REG_BG2CNT = BG_BMP16_256x256 | BG_BMP_BASE(0) | BG_PRIORITY(0);
+    REG_BG2PA = 1 << 8;
+    REG_BG2PB = 0;
+    REG_BG2PC = 0;
+    REG_BG2PD = 0; // Scale Y to 0: repeat the same row for all scanlines
+    REG_BG2X = 0;
+    REG_BG2Y = NE_TWO_PASS_LINE_OFFSET << 8;
+
+    // Setup sub engine for 2D (available for console)
+    videoSetModeSub(MODE_0_2D);
+
+    NE_DebugPrint("Nitro Engine initialized in two-pass DMA mode");
 
     return 0;
 }
@@ -625,6 +841,22 @@ void NE_InitConsole(void)
             break;
         }
 
+        case NE_ModeSingle3D_TwoPass:
+        case NE_ModeSingle3D_TwoPass_FB:
+        case NE_ModeSingle3D_TwoPass_DMA:
+        {
+            // In all two-pass modes, the main screen is used for 3D display
+            // and cannot host a console. Place the console on the sub screen.
+            vramSetBankH(VRAM_H_SUB_BG);
+
+            BG_PALETTE_SUB[255] = 0xFFFF;
+
+            consoleInit(NULL, 3, BgType_Text4bpp, BgSize_T_256x256, 4, 0,
+                        false, true);
+
+            break;
+        }
+
         default:
         {
             break;
@@ -679,6 +911,231 @@ void NE_ProcessArg(NE_VoidArgfunc drawscene, void *arg)
     drawscene(arg);
 
     GFX_FLUSH = GL_TRANS_MANUALSORT;
+}
+
+int NE_TwoPassGetPass(void)
+{
+    return ne_two_pass_frame;
+}
+
+// Shared helper: compute asymmetric frustum and set viewport for the current
+// two-pass half. Used by all three two-pass modes.
+static void ne_two_pass_setup_frustum(void)
+{
+    const int split = NE_TWO_PASS_SPLIT;
+
+    if (ne_two_pass_frame == 0)
+        GFX_VIEWPORT = 0 | (0 << 8) | ((split - 1) << 16) | (191 << 24);
+    else
+        GFX_VIEWPORT = (split) | (0 << 8) | (255 << 16) | (191 << 24);
+
+    // Compute asymmetric frustum from the user's FOV/znear/zfar settings.
+    // This gives the same perspective as a full-screen render, but only
+    // draws the left or right half.
+    int32_t fovy = fov * DEGREES_IN_CIRCLE / 360;
+    int32_t top = mulf32(ne_znear, tanLerp(fovy >> 1));
+    int32_t full_aspect = divf32(256 << 12, 192 << 12);
+    int32_t right_full = mulf32(top, full_aspect);
+
+    MATRIX_CONTROL = GL_PROJECTION;
+    MATRIX_IDENTITY = 0;
+
+    if (ne_two_pass_frame == 0)
+        glFrustumf32(-right_full, 0, -top, top, ne_znear, ne_zfar);
+    else
+        glFrustumf32(0, right_full, -top, top, ne_znear, ne_zfar);
+}
+
+// Processing for FIFO and DMA modes: copy capture from VRAM_D to main RAM
+// framebuffer, set viewport, frustum, and enable display capture.
+static void ne_process_two_pass_fifo_dma(void)
+{
+    NE_UpdateInput();
+
+    if (ne_main_screen == 1)
+        lcdMainOnTop();
+    else
+        lcdMainOnBottom();
+
+    // Enable display capture: capture 3D output into VRAM_D
+    REG_DISPCAPCNT = DCAP_BANK(DCAP_BANK_VRAM_D)
+                   | DCAP_SIZE(DCAP_SIZE_256x192)
+                   | DCAP_MODE(DCAP_MODE_A)
+                   | DCAP_SRC_A(DCAP_SRC_A_3DONLY)
+                   | DCAP_ENABLE;
+
+    const int split = NE_TWO_PASS_SPLIT;
+
+    if (ne_two_pass_frame == 0)
+    {
+        // Copy the previous left-half capture from VRAM_D to the next
+        // framebuffer. VRAM_D contains the capture from the previous frame's
+        // GPU output (one-frame delay due to double-buffered 3D rendering).
+        const u16 *fb_src = VRAM_D;
+        u16 *fb_dst = ne_two_pass_fb[ne_two_pass_displayed ^ 1];
+
+        for (int j = 0; j < 192; j++)
+        {
+            dmaCopy(fb_src, fb_dst, split * sizeof(u16));
+            fb_src += 256;
+            fb_dst += 256;
+        }
+    }
+    else
+    {
+        // Copy the previous right-half capture from VRAM_D
+        const u16 *fb_src = VRAM_D + split;
+        u16 *fb_dst = ne_two_pass_fb[ne_two_pass_displayed ^ 1] + split;
+
+        for (int j = 0; j < 192; j++)
+        {
+            dmaCopy(fb_src, fb_dst, (256 - split) * sizeof(u16));
+            fb_src += 256;
+            fb_dst += 256;
+        }
+
+        // Both halves are now filled in the next framebuffer
+        ne_two_pass_next_ready = true;
+    }
+
+    ne_two_pass_setup_frustum();
+
+    NE_PolyFormat(31, 0, NE_LIGHT_ALL, NE_CULL_BACK, 0);
+
+    MATRIX_CONTROL = GL_MODELVIEW;
+    MATRIX_IDENTITY = 0;
+}
+
+// Processing for FB mode: alternate VRAM C/D between LCD (capture) and main BG
+// (display), toggle BG priorities and clear color alpha to composite both halves.
+//
+// How it works:
+// The DS GPU has a one-frame rendering delay: the displayed 3D output is from
+// the PREVIOUS glFlush, not the current one. We exploit this:
+//
+//   Frame 0 (left pass): submit left-half geometry. The displayed 3D shows the
+//   previous right-half render. VRAM_D (BG2) shows the previous left-half
+//   capture. BG2 is in front; its transparent pixels (from the transparent
+//   clear of the right pass) let BG0's right-half 3D show through.
+//
+//   Frame 1 (right pass): submit right-half geometry. The displayed 3D shows
+//   the previous left-half render. VRAM_C (BG2) shows the previous right-half
+//   capture. BG0 is in front; its transparent clear pixels let BG2's left-half
+//   capture show through.
+//
+// Each captured frame contains 3D objects with bit15=1 (opaque) in the rendered
+// half, and clear-color pixels in the other half. The clear color alpha controls
+// bit15 in the capture: opaque (alpha>=1) sets bit15=1, transparent (alpha=0)
+// leaves bit15=0. BG2 treats bit15=0 pixels as transparent.
+static void ne_process_two_pass_fb(void)
+{
+    NE_UpdateInput();
+
+    if (ne_main_screen == 1)
+        lcdMainOnTop();
+    else
+        lcdMainOnBottom();
+
+    u32 clearcolor = NE_ClearColorGet();
+
+    if (ne_two_pass_frame == 0)
+    {
+        // Left pass: submit left-half geometry.
+        // Display VRAM_D as BG2 (shows previous right-half capture).
+        // Capture 3D output to VRAM_C.
+        vramSetBankC(VRAM_C_LCD);
+        vramSetBankD(VRAM_D_MAIN_BG_0x06000000);
+
+        // BG0 in front, BG2 behind. Due to the one-frame 3D delay, BG0
+        // shows the RIGHT-half 3D from the previous frame (rendered with
+        // transparent clear). Transparent pixels (alpha=0) in the left
+        // columns let BG2 (the captured left-half) show through.
+        REG_BG0CNT = (REG_BG0CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(0);
+        REG_BG2CNT = (REG_BG2CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(1);
+
+        REG_DISPCAPCNT = DCAP_BANK(DCAP_BANK_VRAM_C)
+                       | DCAP_SIZE(DCAP_SIZE_256x192)
+                       | DCAP_MODE(DCAP_MODE_A)
+                       | DCAP_SRC_A(DCAP_SRC_A_3DONLY)
+                       | DCAP_ENABLE;
+
+        // Opaque clear color: the user's background color with alpha forced
+        // to 31. Pixels in the left half will be either 3D objects or this
+        // opaque clear, both with bit15=1 in the capture.
+        GFX_CLEAR_COLOR = (clearcolor & ~(0x1F << 16)) | (31 << 16);
+    }
+    else
+    {
+        // Right pass: submit right-half geometry.
+        // Display VRAM_C as BG2 (shows previous left-half capture).
+        // Capture 3D output to VRAM_D.
+        vramSetBankC(VRAM_C_MAIN_BG_0x06000000);
+        vramSetBankD(VRAM_D_LCD);
+
+        // BG2 in front, BG0 behind. Due to the one-frame 3D delay, BG0
+        // shows the LEFT-half 3D from the previous frame (rendered with
+        // opaque clear, all pixels bit15=1). BG2 shows the captured
+        // RIGHT-half (transparent clear): right objects bit15=1, left
+        // columns bit15=0, letting BG0's left-half show through.
+        REG_BG0CNT = (REG_BG0CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(1);
+        REG_BG2CNT = (REG_BG2CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(0);
+
+        REG_DISPCAPCNT = DCAP_BANK(DCAP_BANK_VRAM_D)
+                       | DCAP_SIZE(DCAP_SIZE_256x192)
+                       | DCAP_MODE(DCAP_MODE_A)
+                       | DCAP_SRC_A(DCAP_SRC_A_3DONLY)
+                       | DCAP_ENABLE;
+
+        // Transparent clear color: alpha=0 so that pixels outside the
+        // right-half viewport have bit15=0 in the 3D output, letting BG2
+        // (the captured left half) show through.
+        GFX_CLEAR_COLOR = clearcolor & ~(0x1F << 16);
+
+        // Both halves are now being composited on screen
+        ne_two_pass_next_ready = true;
+    }
+
+    ne_two_pass_setup_frustum();
+
+    NE_PolyFormat(31, 0, NE_LIGHT_ALL, NE_CULL_BACK, 0);
+
+    MATRIX_CONTROL = GL_MODELVIEW;
+    MATRIX_IDENTITY = 0;
+}
+
+static void ne_process_two_pass_end(void)
+{
+    GFX_FLUSH = GL_TRANS_MANUALSORT;
+
+    ne_two_pass_frame ^= 1;
+}
+
+void NE_ProcessTwoPass(NE_Voidfunc drawscene)
+{
+    NE_AssertPointer(drawscene, "NULL function pointer");
+
+    if (ne_execution_mode == NE_ModeSingle3D_TwoPass_FB)
+        ne_process_two_pass_fb();
+    else
+        ne_process_two_pass_fifo_dma();
+
+    drawscene();
+
+    ne_process_two_pass_end();
+}
+
+void NE_ProcessTwoPassArg(NE_VoidArgfunc drawscene, void *arg)
+{
+    NE_AssertPointer(drawscene, "NULL function pointer");
+
+    if (ne_execution_mode == NE_ModeSingle3D_TwoPass_FB)
+        ne_process_two_pass_fb();
+    else
+        ne_process_two_pass_fifo_dma();
+
+    drawscene(arg);
+
+    ne_process_two_pass_end();
 }
 
 static void ne_process_dual_3d_common_start(void)
@@ -1016,108 +1473,6 @@ static void ne_process_dual_3d_dma_arg(NE_VoidArgfunc mainscreen,
     ne_process_dual_3d_dma_common_end();
 }
 
-
-static void ne_process_single_3d_double_pass_common_start(void)
-{
-    NE_UpdateInput();
-
-    if (ne_main_screen == 1)
-        lcdMainOnTop();
-    else
-        lcdMainOnBottom();
-
-    NE_PolyFormat(31, 0, NE_LIGHT_ALL, NE_CULL_BACK, 0);
-
-    MATRIX_IDENTITY = 0;
-
-    if (NE_Screen == 1)
-    {
-        videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE);
-
-        vramSetBankC(VRAM_C_LCD);
-        vramSetBankD(VRAM_D_MAIN_BG_0x06000000);
-
-        bgSetPriority(2, 1);
-        bgSetPriority(0, 0);
-
-        REG_DISPCAPCNT =
-            // Destination is VRAM_C
-            DCAP_BANK(DCAP_BANK_VRAM_C) |
-            // Size = 256x192
-            DCAP_SIZE(DCAP_SIZE_256x192) |
-            // Capture source A only
-            DCAP_MODE(DCAP_MODE_A) |
-            // Source A = 3D rendered image
-            DCAP_SRC_A(DCAP_SRC_A_3DONLY) |
-            // Enable capture
-            DCAP_ENABLE;
-        
-        NE_Viewport(0, 0, 127, 191);
-
-
-
-    }
-    else
-    {
-        videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE);
-
-        vramSetBankC(VRAM_C_MAIN_BG_0x06000000);
-        vramSetBankD(VRAM_D_LCD);
-
-        bgSetPriority(2, 0);
-        bgSetPriority(0, 1);
-
-        REG_DISPCAPCNT =
-            // Destination is VRAM_D
-            DCAP_BANK(DCAP_BANK_VRAM_D) |
-            // Size = 256x192
-            DCAP_SIZE(DCAP_SIZE_256x192) |
-            // Capture source A only
-            DCAP_MODE(DCAP_MODE_A) |
-            // Source A = 3D rendered image
-            DCAP_SRC_A(DCAP_SRC_A_3DONLY) |
-            // Enable capture
-            DCAP_ENABLE;
-        
-        NE_Viewport(128, 0, 255, 191);
-    }
-}
-
-static void ne_process_single_3d_double_pass_common_end(void)
-{
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
-
-    NE_Screen ^= 1;
-
-    NE_UpdateInput();
-}
-
-static void ne_process_single_3d_double_pass(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
-{
-    ne_process_single_3d_double_pass_common_start();
-
-    if (NE_Screen == 1)
-        mainscreen();
-    else
-        subscreen();
-
-    ne_process_single_3d_double_pass_common_end();
-}
-
-static void ne_process_single_3d_double_pass_arg(NE_VoidArgfunc mainscreen,
-                                                NE_VoidArgfunc subscreen,
-                                                void *argmain, void *argsub)
-{
-    ne_process_single_3d_double_pass_common_start();
-
-    if (NE_Screen == 1)
-        mainscreen(argmain);
-    else
-        subscreen(argsub);
-
-    ne_process_single_3d_double_pass_common_end();
-}
-
 void NE_ProcessDual(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
 {
     NE_AssertPointer(mainscreen, "NULL function pointer (main screen)");
@@ -1142,13 +1497,6 @@ void NE_ProcessDual(NE_Voidfunc mainscreen, NE_Voidfunc subscreen)
             ne_process_dual_3d_dma(mainscreen, subscreen);
             return;
         }
-
-        case NE_ModeSingle3D_DoublePass:
-        {
-            ne_process_single_3d_double_pass(mainscreen, subscreen);
-            return;
-        }
-
         default:
         {
             return;
@@ -1181,13 +1529,6 @@ void NE_ProcessDualArg(NE_VoidArgfunc mainscreen, NE_VoidArgfunc subscreen,
             ne_process_dual_3d_dma_arg(mainscreen, subscreen, argmain, argsub);
             return;
         }
-
-        case NE_ModeSingle3D_DoublePass:
-        {
-            ne_process_single_3d_double_pass_arg(mainscreen, subscreen, argmain, argsub);
-            return;
-        }
-
         default:
         {
             return;
@@ -1252,6 +1593,82 @@ void NE_VBLFunc(void)
                      256 * 2);
 
         ne_do_dma();
+    }
+
+    if (ne_two_pass_enabled)
+    {
+        // Swap to the next framebuffer when it is complete (all modes)
+        if (ne_two_pass_next_ready)
+        {
+            ne_two_pass_next_ready = false;
+            ne_two_pass_displayed ^= 1;
+        }
+
+        if (ne_execution_mode == NE_ModeSingle3D_TwoPass)
+        {
+            // FIFO mode: stop DMA 2, then restart with DMA_DISP_FIFO.
+            // DMA 2 continuously feeds pixel data from main RAM to the
+            // display hardware via REG_DISP_MMEM_FIFO.
+#ifdef NE_BLOCKSDS
+            dmaStopSafe(2);
+#else
+            DMA_CR(2) = 0;
+#endif
+
+            void *fb = ne_two_pass_fb[ne_two_pass_displayed];
+
+#ifdef NE_BLOCKSDS
+            dmaSetParams(2, fb, (void *)&REG_DISP_MMEM_FIFO,
+                         DMA_DISP_FIFO | DMA_SRC_INC | DMA_DST_FIX
+                         | DMA_REPEAT | DMA_COPY_WORDS | 4);
+#else
+            DMA_SRC(2) = (uint32_t)fb;
+            DMA_DEST(2) = (uint32_t)&REG_DISP_MMEM_FIFO;
+            DMA_CR(2) = DMA_DISP_FIFO | DMA_SRC_INC | DMA_DST_FIX
+                       | DMA_REPEAT | DMA_COPY_WORDS | 4;
+#endif
+        }
+        else if (ne_execution_mode == NE_ModeSingle3D_TwoPass_DMA)
+        {
+            // HBL DMA mode: stop DMA 2, black out the scanline row in
+            // VRAM_F, then restart with HBL-triggered transfer.
+#ifdef NE_BLOCKSDS
+            dmaStopSafe(2);
+#else
+            DMA_CR(2) = 0;
+#endif
+
+            // The first display line is drawn before the first HBL fires,
+            // so it would show stale data. Fill the row with black.
+            dmaFillWords(0,
+                         BG_BMP_RAM(0) + 256 * NE_TWO_PASS_LINE_OFFSET,
+                         256 * 2);
+
+            // Copy one scanline at a time from main RAM to VRAM_F at each
+            // HBL. DMA 2 is only briefly active during each HBL, avoiding
+            // continuous bus contention with dmaCopy (DMA 3).
+            uint32_t two_pass_cr =
+                DMA_COPY_WORDS  |
+                (256 * 2 / 4)   | // 128 words = one scanline
+                DMA_START_HBL   | // Trigger at each HBL
+                DMA_REPEAT      | // Repeat for all 192 lines
+                DMA_SRC_INC     | // Increment source (next line each HBL)
+                DMA_DST_RESET;    // Reset dest to same VRAM row each HBL
+
+            void *dst = (void *)((uint32_t)BG_BMP_RAM(0)
+                       + 256 * NE_TWO_PASS_LINE_OFFSET * sizeof(u16));
+
+#ifdef NE_BLOCKSDS
+            dmaSetParams(2, ne_two_pass_fb[ne_two_pass_displayed],
+                         dst, two_pass_cr);
+#else
+            DMA_SRC(2) = (uint32_t)ne_two_pass_fb[ne_two_pass_displayed];
+            DMA_DEST(2) = (uint32_t)dst;
+            DMA_CR(2) = two_pass_cr;
+#endif
+        }
+        // FB mode: no DMA 2 handling needed. Compositing is done via BG
+        // priority alternation in the processing function.
     }
 
     if (NE_Effect == NE_NOISE || NE_Effect == NE_SINE)

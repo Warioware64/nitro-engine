@@ -168,6 +168,11 @@ void NE_ClearColorSet(u32 color, u32 alpha, u32 id)
     GFX_CLEAR_COLOR = ne_clearcolor;
 }
 
+u32 NE_ClearColorGet(void)
+{
+    return ne_clearcolor;
+}
+
 void NE_ClearBMPEnable(bool value)
 {
     if (NE_CurrentExecutionMode() != NE_ModeSingle3D)
