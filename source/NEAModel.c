@@ -2,15 +2,15 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 #include <nds/arm9/postest.h>
 
 #include "dsma/dsma.h"
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEModel.c
+/// @file NEAModel.c
 
 typedef struct {
     void *address;
@@ -18,9 +18,9 @@ typedef struct {
     bool has_to_free;
 } ne_mesh_info_t;
 
-static ne_mesh_info_t *NE_Mesh = NULL;
-static NE_Model **NE_ModelPointers;
-static int NE_MAX_MODELS;
+static ne_mesh_info_t *NEA_Mesh = NULL;
+static NEA_Model **NEA_ModelPointers;
+static int NEA_MAX_MODELS;
 static bool ne_model_system_inited = false;
 
 static void ne_mesh_delete(int mesh_index)
@@ -28,47 +28,47 @@ static void ne_mesh_delete(int mesh_index)
     int slot = mesh_index;
 
     // A mesh may be used by several models
-    NE_Mesh[slot].uses--;
+    NEA_Mesh[slot].uses--;
 
     // If the number of users is zero, delete it.
-    if (NE_Mesh[slot].uses == 0)
+    if (NEA_Mesh[slot].uses == 0)
     {
-        if (NE_Mesh[slot].has_to_free)
-            free(NE_Mesh[slot].address);
+        if (NEA_Mesh[slot].has_to_free)
+            free(NEA_Mesh[slot].address);
 
-        NE_Mesh[slot].address = NULL;
+        NEA_Mesh[slot].address = NULL;
     }
 }
 
 static int ne_model_get_free_mesh_slot(void)
 {
     // Get free slot
-    for (int i = 0; i < NE_MAX_MODELS; i++)
+    for (int i = 0; i < NEA_MAX_MODELS; i++)
     {
-        if (NE_Mesh[i].address == NULL)
+        if (NEA_Mesh[i].address == NULL)
             return i;
     }
 
-    NE_DebugPrint("No free slots");
-    return NE_NO_MESH;
+    NEA_DebugPrint("No free slots");
+    return NEA_NO_MESH;
 }
 
-static int ne_model_load_ram_common(NE_Model *model, const void *pointer)
+static int ne_model_load_ram_common(NEA_Model *model, const void *pointer)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(pointer, "NULL data pointer");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(pointer, "NULL data pointer");
 
     // Check if a mesh exists
-    if (model->meshindex != NE_NO_MESH)
+    if (model->meshindex != NEA_NO_MESH)
         ne_mesh_delete(model->meshindex);
 
     int slot = ne_model_get_free_mesh_slot();
-    if (slot == NE_NO_MESH)
+    if (slot == NEA_NO_MESH)
         return 0;
 
     model->meshindex = slot;
 
-    ne_mesh_info_t *mesh = &NE_Mesh[slot];
+    ne_mesh_info_t *mesh = &NEA_Mesh[slot];
 
     mesh->address = (void *)pointer;
     mesh->has_to_free = false;
@@ -77,26 +77,26 @@ static int ne_model_load_ram_common(NE_Model *model, const void *pointer)
     return 1;
 }
 
-static int ne_model_load_filesystem_common(NE_Model *model, const char *path)
+static int ne_model_load_filesystem_common(NEA_Model *model, const char *path)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(path, "NULL path pointer");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
 
     // Check if a mesh exists
-    if (model->meshindex != NE_NO_MESH)
+    if (model->meshindex != NEA_NO_MESH)
         ne_mesh_delete(model->meshindex);
 
     int slot = ne_model_get_free_mesh_slot();
-    if (slot == NE_NO_MESH)
+    if (slot == NEA_NO_MESH)
         return 0;
 
-    void *pointer = NE_FATLoadData(path);
+    void *pointer = NEA_FATLoadData(path);
     if (pointer == NULL)
         return 0;
 
     model->meshindex = slot;
 
-    ne_mesh_info_t *mesh = &NE_Mesh[slot];
+    ne_mesh_info_t *mesh = &NEA_Mesh[slot];
 
     mesh->address = pointer;
     mesh->has_to_free = true;
@@ -107,33 +107,33 @@ static int ne_model_load_filesystem_common(NE_Model *model, const char *path)
 
 //--------------------------------------------------------------------------
 
-NE_Model *NE_ModelCreate(NE_ModelType type)
+NEA_Model *NEA_ModelCreate(NEA_ModelType type)
 {
     if (!ne_model_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    NE_Model *model = calloc(1, sizeof(NE_Model));
+    NEA_Model *model = calloc(1, sizeof(NEA_Model));
     if (model == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return NULL;
     }
 
     int i = 0;
     while (1)
     {
-        if (NE_ModelPointers[i] == NULL)
+        if (NEA_ModelPointers[i] == NULL)
         {
-            NE_ModelPointers[i] = model;
+            NEA_ModelPointers[i] = model;
             break;
         }
         i++;
-        if (i == NE_MAX_MODELS)
+        if (i == NEA_MAX_MODELS)
         {
-            NE_DebugPrint("No free slots");
+            NEA_DebugPrint("No free slots");
             free(model);
             return NULL;
         }
@@ -144,14 +144,14 @@ NE_Model *NE_ModelCreate(NE_ModelType type)
     model->mat = NULL;
 
     model->modeltype = type;
-    model->meshindex = NE_NO_MESH;
+    model->meshindex = NEA_NO_MESH;
 
-    if (type == NE_Animated)
+    if (type == NEA_Animated)
     {
         for (int i = 0; i < 2; i++)
         {
-            model->animinfo[i] = calloc(sizeof(NE_AnimInfo), 1);
-            NE_AssertPointer(model->animinfo[i],
+            model->animinfo[i] = calloc(sizeof(NEA_AnimInfo), 1);
+            NEA_AssertPointer(model->animinfo[i],
                              "Couldn't allocate animation info");
         }
     }
@@ -159,30 +159,30 @@ NE_Model *NE_ModelCreate(NE_ModelType type)
     return model;
 }
 
-void NE_ModelDelete(NE_Model *model)
+void NEA_ModelDelete(NEA_Model *model)
 {
     if (!ne_model_system_inited)
         return;
 
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
 
     int i = 0;
     while (1)
     {
-        if (i == NE_MAX_MODELS)
+        if (i == NEA_MAX_MODELS)
         {
-            NE_DebugPrint("Model not found");
+            NEA_DebugPrint("Model not found");
             return;
         }
-        if (NE_ModelPointers[i] == model)
+        if (NEA_ModelPointers[i] == model)
         {
-            NE_ModelPointers[i] = NULL;
+            NEA_ModelPointers[i] = NULL;
             break;
         }
         i++;
     }
 
-    if (model->modeltype == NE_Animated)
+    if (model->modeltype == NEA_Animated)
     {
         for (int i = 0; i < 2; i++)
             free(model->animinfo[i]);
@@ -192,64 +192,64 @@ void NE_ModelDelete(NE_Model *model)
         free(model->mat);
 
     // If there is an asigned mesh
-    if (model->meshindex != NE_NO_MESH)
+    if (model->meshindex != NEA_NO_MESH)
         ne_mesh_delete(model->meshindex);
 
     free(model);
 }
 
-int NE_ModelLoadStaticMeshFAT(NE_Model *model, const char *path)
+int NEA_ModelLoadStaticMeshFAT(NEA_Model *model, const char *path)
 {
     if (!ne_model_system_inited)
         return 0;
 
-    NE_Assert(model->modeltype == NE_Static, "Not a static model");
+    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
 
     return ne_model_load_filesystem_common(model, path);
 }
 
-int NE_ModelLoadStaticMesh(NE_Model *model, const void *pointer)
+int NEA_ModelLoadStaticMesh(NEA_Model *model, const void *pointer)
 {
     if (!ne_model_system_inited)
         return 0;
 
-    NE_Assert(model->modeltype == NE_Static, "Not a static model");
+    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
 
     return ne_model_load_ram_common(model, pointer);
 }
 
-void NE_ModelFreeMeshWhenDeleted(NE_Model *model)
+void NEA_ModelFreeMeshWhenDeleted(NEA_Model *model)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    if (model->meshindex != NE_NO_MESH)
+    NEA_AssertPointer(model, "NULL model pointer");
+    if (model->meshindex != NEA_NO_MESH)
     {
-        ne_mesh_info_t *mesh = &NE_Mesh[model->meshindex];
+        ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
         mesh->has_to_free = true;
     }
 }
 
-void NE_ModelSetMaterial(NE_Model *model, NE_Material *material)
+void NEA_ModelSetMaterial(NEA_Model *model, NEA_Material *material)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(material, "NULL material pointer");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(material, "NULL material pointer");
     model->texture = material;
 }
 
-void NE_ModelSetAnimation(NE_Model *model, NE_Animation *anim)
+void NEA_ModelSetAnimation(NEA_Model *model, NEA_Animation *anim)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(anim, "NULL animation pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(anim, "NULL animation pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[0]->animation = anim;
     uint32_t frames = DSMA_GetNumFrames(anim->data);
     model->animinfo[0]->numframes = frames;
 }
 
-void NE_ModelSetAnimationSecondary(NE_Model *model, NE_Animation *anim)
+void NEA_ModelSetAnimationSecondary(NEA_Model *model, NEA_Animation *anim)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(anim, "NULL animation pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(anim, "NULL animation pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[1]->animation = anim;
     uint32_t frames = DSMA_GetNumFrames(anim->data);
     model->animinfo[1]->numframes = frames;
@@ -258,15 +258,15 @@ void NE_ModelSetAnimationSecondary(NE_Model *model, NE_Animation *anim)
 //---------------------------------------------------------
 
 // Internal use... see below
-extern bool NE_TestTouch;
+extern bool NEA_TestTouch;
 
-void NE_ModelDraw(const NE_Model *model)
+void NEA_ModelDraw(const NEA_Model *model)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    if (model->meshindex == NE_NO_MESH)
+    NEA_AssertPointer(model, "NULL pointer");
+    if (model->meshindex == NEA_NO_MESH)
         return;
 
-    if (model->modeltype == NE_Animated)
+    if (model->modeltype == NEA_Animated)
     {
         // The base animation must always be present. The secondary animation
         // isn't required to draw the model.
@@ -298,7 +298,7 @@ void NE_ModelDraw(const NE_Model *model)
         MATRIX_SCALE = model->sz;
     }
 
-    if (NE_TestTouch)
+    if (NEA_TestTouch)
     {
         PosTest_Asynch(0, 0, 0);
     }
@@ -306,17 +306,17 @@ void NE_ModelDraw(const NE_Model *model)
     {
         // If the texture pointer is NULL, this will set GFX_TEX_FORMAT
         // to 0 and GFX_COLOR to white
-        NE_MaterialUse(model->texture);
+        NEA_MaterialUse(model->texture);
     }
 
-    ne_mesh_info_t *mesh = &NE_Mesh[model->meshindex];
+    ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
     const void *meshdata = mesh->address;
 
-    if (model->modeltype == NE_Static)
+    if (model->modeltype == NEA_Static)
     {
-        NE_DisplayListDrawDefault(meshdata);
+        NEA_DisplayListDrawDefault(meshdata);
     }
-    else // if(model->modeltype == NE_Animated)
+    else // if(model->modeltype == NEA_Animated)
     {
         if (model->animinfo[0]->animation && model->animinfo[1]->animation)
         {
@@ -326,31 +326,31 @@ void NE_ModelDraw(const NE_Model *model)
                     model->animinfo[1]->animation->data,
                     model->animinfo[1]->currframe,
                     model->anim_blend);
-            NE_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
         }
         else // if (model->animinfo[0]->animation)
         {
             int ret = DSMA_DrawModel(meshdata,
                                      model->animinfo[0]->animation->data,
                                      model->animinfo[0]->currframe);
-            NE_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
         }
     }
 
     MATRIX_POP = 1;
 }
 
-void NE_ModelClone(NE_Model *dest, NE_Model *source)
+void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
 {
-    NE_AssertPointer(dest, "NULL dest pointer");
-    NE_AssertPointer(source, "NULL source pointer");
-    NE_Assert(dest->modeltype == source->modeltype,
+    NEA_AssertPointer(dest, "NULL dest pointer");
+    NEA_AssertPointer(source, "NULL source pointer");
+    NEA_Assert(dest->modeltype == source->modeltype,
               "Different model types");
 
-    if (dest->modeltype == NE_Animated)
+    if (dest->modeltype == NEA_Animated)
     {
-        memcpy(dest->animinfo[0], source->animinfo[0], sizeof(NE_AnimInfo));
-        memcpy(dest->animinfo[1], source->animinfo[1], sizeof(NE_AnimInfo));
+        memcpy(dest->animinfo[0], source->animinfo[0], sizeof(NEA_AnimInfo));
+        memcpy(dest->animinfo[1], source->animinfo[1], sizeof(NEA_AnimInfo));
         dest->anim_blend = source->anim_blend;
     }
 
@@ -369,57 +369,57 @@ void NE_ModelClone(NE_Model *dest, NE_Model *source)
 
     // If the model has a mesh (which is the normal situation), increase the
     // count of users of that mesh.
-    if (dest->meshindex != NE_NO_MESH)
+    if (dest->meshindex != NEA_NO_MESH)
     {
-        ne_mesh_info_t *mesh = &NE_Mesh[dest->meshindex];
+        ne_mesh_info_t *mesh = &NEA_Mesh[dest->meshindex];
         mesh->uses++;
     }
 }
 
-void NE_ModelScaleI(NE_Model *model, int x, int y, int z)
+void NEA_ModelScaleI(NEA_Model *model, int x, int y, int z)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
     model->sx = x;
     model->sy = y;
     model->sz = z;
 }
 
-void NE_ModelTranslateI(NE_Model *model, int x, int y, int z)
+void NEA_ModelTranslateI(NEA_Model *model, int x, int y, int z)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
     model->x += x;
     model->y += y;
     model->z += z;
 }
 
-void NE_ModelSetCoordI(NE_Model *model, int x, int y, int z)
+void NEA_ModelSetCoordI(NEA_Model *model, int x, int y, int z)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
     model->x = x;
     model->y = y;
     model->z = z;
 }
 
-void NE_ModelRotate(NE_Model *model, int rx, int ry, int rz)
+void NEA_ModelRotate(NEA_Model *model, int rx, int ry, int rz)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
     model->rx = (model->rx + rx + 512) & 0x1FF;
     model->ry = (model->ry + ry + 512) & 0x1FF;
     model->rz = (model->rz + rz + 512) & 0x1FF;
 }
 
-void NE_ModelSetRot(NE_Model *model, int rx, int ry, int rz)
+void NEA_ModelSetRot(NEA_Model *model, int rx, int ry, int rz)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
     model->rx = rx;
     model->ry = ry;
     model->rz = rz;
 }
 
-int NE_ModelSetMatrix(NE_Model *model, m4x3 *mat)
+int NEA_ModelSetMatrix(NEA_Model *model, m4x3 *mat)
 {
-    NE_AssertPointer(model, "NULL model pointer");
-    NE_AssertPointer(mat, "NULL matrix pointer");
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(mat, "NULL matrix pointer");
 
     if (model->mat == NULL)
     {
@@ -433,9 +433,9 @@ int NE_ModelSetMatrix(NE_Model *model, m4x3 *mat)
     return 1;
 }
 
-void NE_ModelClearMatrix(NE_Model *model)
+void NEA_ModelClearMatrix(NEA_Model *model)
 {
-    NE_AssertPointer(model, "NULL pointer");
+    NEA_AssertPointer(model, "NULL pointer");
 
     if (model->mat == NULL)
         return;
@@ -443,26 +443,26 @@ void NE_ModelClearMatrix(NE_Model *model)
     free(model->mat);
 }
 
-void NE_ModelAnimateAll(void)
+void NEA_ModelAnimateAll(void)
 {
     if (!ne_model_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_MODELS; i++)
+    for (int i = 0; i < NEA_MAX_MODELS; i++)
     {
-        if (NE_ModelPointers[i] == NULL)
+        if (NEA_ModelPointers[i] == NULL)
             continue;
 
-        if (NE_ModelPointers[i]->modeltype != NE_Animated)
+        if (NEA_ModelPointers[i]->modeltype != NEA_Animated)
             continue;
 
         for (int j = 0; j < 2; j++)
         {
-            NE_AnimInfo *animinfo = NE_ModelPointers[i]->animinfo[j];
+            NEA_AnimInfo *animinfo = NEA_ModelPointers[i]->animinfo[j];
 
             animinfo->currframe += animinfo->speed;
 
-            if (animinfo->type ==  NE_ANIM_LOOP)
+            if (animinfo->type ==  NEA_ANIM_LOOP)
             {
                 int32_t endval = inttof32(animinfo->numframes);
                 if (animinfo->currframe >= endval)
@@ -470,7 +470,7 @@ void NE_ModelAnimateAll(void)
                 else if (animinfo->currframe < 0)
                     animinfo->currframe += endval;
             }
-            else if (animinfo->type ==  NE_ANIM_ONESHOT)
+            else if (animinfo->type ==  NEA_ANIM_ONESHOT)
             {
                 int32_t endval = inttof32(animinfo->numframes - 1);
                 if (animinfo->currframe > endval)
@@ -488,74 +488,74 @@ void NE_ModelAnimateAll(void)
     }
 }
 
-void NE_ModelAnimStart(NE_Model *model, NE_AnimationType type, int32_t speed)
+void NEA_ModelAnimStart(NEA_Model *model, NEA_AnimationType type, int32_t speed)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[0]->type = type;
     model->animinfo[0]->speed = speed;
     model->animinfo[0]->currframe = 0;
 }
 
-void NE_ModelAnimSecondaryStart(NE_Model *model, NE_AnimationType type,
+void NEA_ModelAnimSecondaryStart(NEA_Model *model, NEA_AnimationType type,
                                 int32_t speed)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[1]->type = type;
     model->animinfo[1]->speed = speed;
     model->animinfo[1]->currframe = 0;
     model->anim_blend = 0;
 }
 
-void NE_ModelAnimSetSpeed(NE_Model *model, int32_t speed)
+void NEA_ModelAnimSetSpeed(NEA_Model *model, int32_t speed)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[0]->speed = speed;
 }
 
-void NE_ModelAnimSecondarySetSpeed(NE_Model *model, int32_t speed)
+void NEA_ModelAnimSecondarySetSpeed(NEA_Model *model, int32_t speed)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     model->animinfo[1]->speed = speed;
 }
 
-int32_t NE_ModelAnimGetFrame(const NE_Model *model)
+int32_t NEA_ModelAnimGetFrame(const NEA_Model *model)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     return model->animinfo[0]->currframe;
 }
 
-int32_t NE_ModelAnimSecondaryGetFrame(const NE_Model *model)
+int32_t NEA_ModelAnimSecondaryGetFrame(const NEA_Model *model)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     return model->animinfo[1]->currframe;
 }
 
-void NE_ModelAnimSetFrame(NE_Model *model, int32_t frame)
+void NEA_ModelAnimSetFrame(NEA_Model *model, int32_t frame)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     // TODO: Check if it is off bounds
     model->animinfo[0]->currframe = frame;
 }
 
-void NE_ModelAnimSecondarySetFrame(NE_Model *model, int32_t frame)
+void NEA_ModelAnimSecondarySetFrame(NEA_Model *model, int32_t frame)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     // TODO: Check if it is off bounds
     model->animinfo[1]->currframe = frame;
 }
 
-void NE_ModelAnimSecondarySetFactor(NE_Model *model, int32_t factor)
+void NEA_ModelAnimSecondarySetFactor(NEA_Model *model, int32_t factor)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
     if (factor < 0)
         factor = 0;
     if (factor > inttof32(1))
@@ -563,70 +563,70 @@ void NE_ModelAnimSecondarySetFactor(NE_Model *model, int32_t factor)
     model->anim_blend = factor;
 }
 
-void NE_ModelAnimSecondaryClear(NE_Model *model, bool replace_base_anim)
+void NEA_ModelAnimSecondaryClear(NEA_Model *model, bool replace_base_anim)
 {
-    NE_AssertPointer(model, "NULL pointer");
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
 
     // Return if there is no animation to remove
     if (model->animinfo[1]->animation == NULL)
         return;
 
     if (replace_base_anim)
-        memcpy(model->animinfo[0], model->animinfo[1], sizeof(NE_AnimInfo));
+        memcpy(model->animinfo[0], model->animinfo[1], sizeof(NEA_AnimInfo));
 
-    memset(model->animinfo[1], 0, sizeof(NE_AnimInfo));
+    memset(model->animinfo[1], 0, sizeof(NEA_AnimInfo));
 }
 
-int NE_ModelLoadDSMFAT(NE_Model *model, const char *path)
+int NEA_ModelLoadDSMFAT(NEA_Model *model, const char *path)
 {
     if (!ne_model_system_inited)
         return 0;
 
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
 
     return ne_model_load_filesystem_common(model, path);
 }
 
-int NE_ModelLoadDSM(NE_Model *model, const void *pointer)
+int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer)
 {
     if (!ne_model_system_inited)
         return 0;
 
-    NE_Assert(model->modeltype == NE_Animated, "Not an animated model");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
 
     return ne_model_load_ram_common(model, pointer);
 }
 
-void NE_ModelDeleteAll(void)
+void NEA_ModelDeleteAll(void)
 {
     if (!ne_model_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_MODELS; i++)
+    for (int i = 0; i < NEA_MAX_MODELS; i++)
     {
-        if (NE_ModelPointers[i] != NULL)
-            NE_ModelDelete(NE_ModelPointers[i]);
+        if (NEA_ModelPointers[i] != NULL)
+            NEA_ModelDelete(NEA_ModelPointers[i]);
     }
 }
 
-int NE_ModelSystemReset(int max_models)
+int NEA_ModelSystemReset(int max_models)
 {
     if (ne_model_system_inited)
-        NE_ModelSystemEnd();
+        NEA_ModelSystemEnd();
 
     if (max_models < 1)
-        NE_MAX_MODELS = NE_DEFAULT_MODELS;
+        NEA_MAX_MODELS = NEA_DEFAULT_MODELS;
     else
-        NE_MAX_MODELS = max_models;
+        NEA_MAX_MODELS = max_models;
 
-    NE_Mesh = calloc(NE_MAX_MODELS, sizeof(ne_mesh_info_t));
-    NE_ModelPointers = calloc(NE_MAX_MODELS, sizeof(NE_ModelPointers));
-    if ((NE_Mesh == NULL) || (NE_ModelPointers == NULL))
+    NEA_Mesh = calloc(NEA_MAX_MODELS, sizeof(ne_mesh_info_t));
+    NEA_ModelPointers = calloc(NEA_MAX_MODELS, sizeof(NEA_ModelPointers));
+    if ((NEA_Mesh == NULL) || (NEA_ModelPointers == NULL))
     {
-        free(NE_Mesh);
-        free(NE_ModelPointers);
-        NE_DebugPrint("Not enough memory");
+        free(NEA_Mesh);
+        free(NEA_ModelPointers);
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -634,15 +634,15 @@ int NE_ModelSystemReset(int max_models)
     return 0;
 }
 
-void NE_ModelSystemEnd(void)
+void NEA_ModelSystemEnd(void)
 {
     if (!ne_model_system_inited)
         return;
 
-    NE_ModelDeleteAll();
+    NEA_ModelDeleteAll();
 
-    free(NE_Mesh);
-    free(NE_ModelPointers);
+    free(NEA_Mesh);
+    free(NEA_ModelPointers);
 
     ne_model_system_inited = false;
 }

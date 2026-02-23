@@ -1,4 +1,4 @@
-Nitro Engine Tools
+Nitro Engine Advanced Tools
 ==================
 
 The following tools are used to export models created on the PC to the NDS:

@@ -14,7 +14,7 @@ MAKE := make
 
 all:
 	$(MAKE) -f Makefile.blocksds
-	$(MAKE) -f Makefile.blocksds NE_DEBUG=1
+	$(MAKE) -f Makefile.blocksds NEA_DEBUG=1
 
 install: all
 	$(MAKE) -f Makefile.blocksds install

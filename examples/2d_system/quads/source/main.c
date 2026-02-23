@@ -2,9 +2,9 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #define NUM_QUADS 40
 
@@ -46,9 +46,9 @@ void UpdateQuads(void)
 
 void Draw3DScene(void)
 {
-    NE_2DViewInit();
+    NEA_2DViewInit();
 
-    NE_PolyFormat(31, 0,0,NE_CULL_BACK,0);
+    NEA_PolyFormat(31, 0,0,NEA_CULL_BACK,0);
 
     for (int i = 0; i < NUM_QUADS; i++)
     {
@@ -56,9 +56,9 @@ void Draw3DScene(void)
             continue;
 
         if (enable_alpha)
-            NE_PolyFormat(Quad[i].alpha, Quad[i].id, 0, NE_CULL_NONE, 0);
+            NEA_PolyFormat(Quad[i].alpha, Quad[i].id, 0, NEA_CULL_NONE, 0);
 
-        NE_2DDrawQuad(Quad[i].x1, Quad[i].y1, Quad[i].x2, Quad[i].y2, i,
+        NEA_2DDrawQuad(Quad[i].x1, Quad[i].y1, Quad[i].x2, Quad[i].y2, i,
                       Quad[i].color);
     }
 }
@@ -66,13 +66,13 @@ void Draw3DScene(void)
 int main(int argc, char *argv[])
 {
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
-    NE_Init3D();
+    NEA_Init3D();
 
     // libnds uses VRAM_C for the text console, reserve A and B only
-    NE_TextureSystemReset(0, 0, NE_VRAM_AB);
+    NEA_TextureSystemReset(0, 0, NEA_VRAM_AB);
     // Init console in non-3D screen
     consoleDemoInit();
 
@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
         scanKeys();
         uint16_t kheld = keysHeld();
@@ -91,7 +91,7 @@ int main(int argc, char *argv[])
 
         UpdateQuads();
 
-        NE_Process(Draw3DScene);
+        NEA_Process(Draw3DScene);
     }
 
     return 0;

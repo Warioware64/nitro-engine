@@ -2,14 +2,14 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_FAT_H__
-#define NE_FAT_H__
+#ifndef NEA_FAT_H__
+#define NEA_FAT_H__
 
 #include <nds.h>
 
-/// @file   NEFAT.h
+/// @file   NEAFAT.h
 /// @brief  Used to load data from FAT.
 
 /// @defgroup fat FAT functions
@@ -23,13 +23,13 @@
 /// @param filename Path to the file.
 /// @return Returns a pointer to the location of the file that will have to be
 ///         freed with free().
-char *NE_FATLoadData(const char *filename);
+char *NEA_FATLoadData(const char *filename);
 
 /// Returns size of a file.
 ///
 /// @param filename File to check.
 /// @return Returns the file of the size, or -1 on error.
-size_t NE_FATFileSize(const char *filename);
+size_t NEA_FATFileSize(const char *filename);
 
 /// Takes a screenshot of the 3D screen.
 ///
@@ -40,8 +40,8 @@ size_t NE_FATFileSize(const char *filename);
 ///
 /// @param filename File to save the screenshot.
 /// @return Returns 1 on success, 0 on error.
-int NE_ScreenshotBMP(const char *filename);
+int NEA_ScreenshotBMP(const char *filename);
 
 /// @}
 
-#endif // NE_FAT_H__
+#endif // NEA_FAT_H__

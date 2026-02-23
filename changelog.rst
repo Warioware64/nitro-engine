@@ -27,7 +27,7 @@ Version 0.15.3 (2025-03-26)
 
 - The devkitARM makefiles have been removed as they only work with old versions
   of devkitARM, which aren't supported by its maintainers. The code and examples
-  of Nitro Engine will probably need changes to work with current devkitARM.
+  of Nitro Engine Advanced will probably need changes to work with current devkitARM.
 - The GRF files used in an example have been updated, they were built before the
   format was changed.
 - The build scripts for assets have been modified to use the value of the
@@ -65,23 +65,23 @@ Version 0.14.0 (2024-09-10)
 Version 0.13.0 (2024-06-08)
 ---------------------------
 
-- Define BlocksDS as the main toolchain to use with Nitro Engine.
+- Define BlocksDS as the main toolchain to use with Nitro Engine Advanced.
 - Simplify build and installation instructions of the library.
 - Update ``md5_2_dsma`` to correctly export the base animation of models.
-- Stop using ``NE_RGB5`` in the examples, this format is discouraged.
-- Optimize copy of ``NE_RGB5`` textures to VRAM.
+- Stop using ``NEA_RGB5`` in the examples, this format is discouraged.
+- Optimize copy of ``NEA_RGB5`` textures to VRAM.
 
 Version 0.12.0 (2024-03-30)
 ---------------------------
 
-- Deprecate ``NE_ShadingEnable()``. The name was misleading. All examples that
+- Deprecate ``NEA_ShadingEnable()``. The name was misleading. All examples that
   use it have stopped calling it.
 - For sprites, add a way to specify texture coordinates inside the material to
   use a small part of the texture instead of the whole texture:
-  ``NE_SpriteSetMaterialCanvas()``. This is now used in the sprites example.
+  ``NEA_SpriteSetMaterialCanvas()``. This is now used in the sprites example.
 - Stop using global variables in most examples. Instead, the rendering functions
-  get values through the arguments of ``NE_ProcessArg()`` and
-  ``NE_ProcessDualArg()``.
+  get values through the arguments of ``NEA_ProcessArg()`` and
+  ``NEA_ProcessDualArg()``.
 - Don't expect palette objects when loading GRF files if the file doesn't
   contain a palette.
 - Allow loading BMFont fonts from RAM, not just nitroFS. Add an example of
@@ -94,7 +94,7 @@ Version 0.12.0 (2024-03-30)
 - Fix compilation with devkitARM.
 - Fix linker invocation for C++ with BlocksDS.
 - Update libDSF to version 0.1.2, with some speed improvements.
-- Relicensed libDSF under "Zlib OR MIT" to simplify licensing with Nitro Engine.
+- Relicensed libDSF under "Zlib OR MIT" to simplify licensing with Nitro Engine Advanced.
 - Some minor documentation improvements.
 
 Version 0.11.0 (2024-03-02)
@@ -116,7 +116,7 @@ Version 0.11.0 (2024-03-02)
 Version 0.10.0 (2024-01-28)
 ---------------------------
 
-- Create variants of ``NE_Process()`` and ``NE_ProcessDual()`` that can pass an
+- Create variants of ``NEA_Process()`` and ``NEA_ProcessDual()`` that can pass an
   argument to the screen draw callbacks.
 
 - Add function to load textures in GRF format (BlocksDS only).
@@ -163,7 +163,7 @@ Version 0.9.0 (2023-10-19)
   assets, for example.
 
 - The code that switches between screens in dual 3D mode has been more reliable.
-  Nitro Engine now swaps screens after they are actually drawn, not in the
+  Nitro Engine Advanced now swaps screens after they are actually drawn, not in the
   vertical blanking interrupt handler, when it switched every frame even if no
   new frame had been drawn by the game.
 
@@ -188,7 +188,7 @@ Version 0.8.2 (2023-04-20)
 
 - Decouple mesh objects from model objects. This simplifies cloning models.
   Previously it was needed to preserve the original object as long as you wanted
-  to use the clones. Now, it can be deleted and Nitro Engine won't free the mesh
+  to use the clones. Now, it can be deleted and Nitro Engine Advanced won't free the mesh
   until all clones have been deleted.
 
 - Support vertex color commands in ``obj2dl``. This can't be used at the same
@@ -222,9 +222,9 @@ Models and materials:
   Note that ``img2ds`` doesn't support this format yet. Until that support is
   added, compressed texture support should be considered experimental.
 
-- Add example of how to use NFlib at the same time as Nitro Engine. NFlib is a
+- Add example of how to use NFlib at the same time as Nitro Engine Advanced. NFlib is a
   library that has support for 2D graphics, which complements the 3D hardware
-  support of Nitro Engine.
+  support of Nitro Engine Advanced.
 
 Other:
 
@@ -248,10 +248,10 @@ Models and materials:
 
 - Add support for MD5 animated models (thanks to `dsma library
   <https://codeberg.org/SkyLyrac/dsma-library>`__): Introduce tool
-  ``md5_to_dsma`` to convert them to a format that Nitro Engine can use.
+  ``md5_to_dsma`` to convert them to a format that Nitro Engine Advanced can use.
 
 - Add support for OBJ static models: Introduce tool obj2dl to convert them to a
-  format that Nitro Engine can use.
+  format that Nitro Engine Advanced can use.
 
 - Introduce tool ``img2ds`` to convert images in many popular formats (PNG, JPG,
   BMP, etc) to DS textures (PNG is still recommended over other formats, as it
@@ -269,7 +269,7 @@ General:
 
 - Cleanup of all examples. Add the original assets and textures used in all
   examples to the repository, along scripts to convert them to the formats used
-  by Nitro Engine.
+  by Nitro Engine Advanced.
 
 - Implement a better way to have debug and release builds of the library.
 
@@ -316,9 +316,9 @@ Version 0.6.0 (2009-6-30)
   Defragmenting functions don't work now, but I'll fix them for the next
   version.
 
-- Added a debug system. You can compile Nitro Engine in "debug mode" and it will
+- Added a debug system. You can compile Nitro Engine Advanced in "debug mode" and it will
   send error messages to the function you want. Once you have finished debugging
-  or whatever, just recompile Nitro Engine without debug mode.
+  or whatever, just recompile Nitro Engine Advanced without debug mode.
 
 - Window system renamed to Sprite system. You can set a rotation and a scale for
   each one.
@@ -340,7 +340,7 @@ Version 0.5.0 (2009-1-5)
 
 - Text system and camera system optimized. New functions for the camera system.
 
-- ``NE_TextPrintBox()`` and ``NE_TextPrintBoxFree()`` slightly changed. They can
+- ``NEA_TextPrintBox()`` and ``NEA_TextPrintBoxFree()`` slightly changed. They can
   limit the text drawn to a number of characters set by the coder.
 
 - Some functions made internal. Don't use them unless you know what you are
@@ -352,29 +352,29 @@ Version 0.5.0 (2009-1-5)
 
 - Touch test functions.
 
-- ``NE_UPDATE_INPUT`` removed.
+- ``NEA_UPDATE_INPUT`` removed.
 
 - It now supports any BMP size, and BMP with 4 bits of depth.
 
 - Arrays made pointers, so there is more memory free when you are not using
-  Nitro Engine. You can also configure the number of objects of each systems you
+  Nitro Engine Advanced. You can also configure the number of objects of each systems you
   are going to use.
 
-- ``NE_TextPalette`` replaced by ``NE_Palette``.
+- ``NEA_TextPalette`` replaced by ``NEA_Palette``.
 
 - You can clone materials to use the same texture with different colors. This
   doesn't have the problems of cloning models.
 
 - Added functions to remove all palettes and textures.
 
-- Fixed ``NE_End()``.
+- Fixed ``NEA_End()``.
 
 - NE can free all memory used by it, and the coder can tell NE how much memory
   to use.
 
 - Texture drawing system improved a bit.
 
-- ``NE_PolyFormat()`` simplified.
+- ``NEA_PolyFormat()`` simplified.
 
 - Some bugfixes, code reorganized, define lists converted into enums.
 
@@ -390,7 +390,7 @@ Version 0.5.0 (2009-1-5)
   levels of alpha in the textures that can handle it. It does only accept PNG
   files.
 
-- NE now accepts any texture size. ``NE_SIZE_XXX`` defines removed as they are
+- NE now accepts any texture size. ``NEA_SIZE_XXX`` defines removed as they are
   not needed now.
 
 - Added a couple of examples.
@@ -423,7 +423,7 @@ Version 0.4.0 (2008-10-15)
 --------------------------
 
 - Added ``MD2_2_NEA`` (converts an MD2 model into a NEA file that can used by
-  Nitro Engine) and ``MD2_2_BIN`` (Converts the first frame of an MD2 model
+  Nitro Engine Advanced) and ``MD2_2_BIN`` (Converts the first frame of an MD2 model
   into a display list). Display lists created by them are really optimized.
 
 - Updated ``DisplayList_Fixer``. Now it can remove normal commands too.
@@ -449,13 +449,13 @@ Version 0.4.0 (2008-10-15)
 
 - Renamed lots of model functions. Take a look at new examples or documentation.
 
-- ``NE_Color`` struct removed (I don't even know why I created it...).
+- ``NEA_Color`` struct removed (I don't even know why I created it...).
 
 - Examples updated to work with last version and added examples of clonning
   models, API and text system.
 
-- libnds' console is not inited with Nitro Engine. You will have to init it
-  yourself with ``NE_InitConsole()`` or libnds' functions.
+- libnds' console is not inited with Nitro Engine Advanced. You will have to init it
+  yourself with ``NEA_InitConsole()`` or libnds' functions.
 
 Version 0.3.0 (2008-9-16)
 -------------------------
@@ -473,12 +473,12 @@ Version 0.3.0 (2008-9-16)
 
 - Window system, very simple. I will make some API functions in next versions.
 
-- Nitro Engine compiled as a library to include it easier in projects and save
+- Nitro Engine Advanced compiled as a library to include it easier in projects and save
   space.
 
 - Examples folder organized a bit and added some new examples.
 
-- Nitro Engine is now licensed under the BSD license.
+- Nitro Engine Advanced is now licensed under the BSD license.
 
 Version 0.2.0 (2008-8-31)
 -------------------------

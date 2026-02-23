@@ -2,45 +2,45 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 #include <nds/arm9/postest.h>
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEAnimation.c
+/// @file NEAAnimation.c
 
-static NE_Animation **NE_AnimationPointers;
-static int NE_MAX_ANIMATIONS;
+static NEA_Animation **NEA_AnimationPointers;
+static int NEA_MAX_ANIMATIONS;
 static bool ne_animation_system_inited = false;
 
-NE_Animation *NE_AnimationCreate(void)
+NEA_Animation *NEA_AnimationCreate(void)
 {
     if (!ne_animation_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    NE_Animation *animation = calloc(1, sizeof(NE_Animation));
+    NEA_Animation *animation = calloc(1, sizeof(NEA_Animation));
     if (animation == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return NULL;
     }
 
     int i = 0;
     while (1)
     {
-        if (NE_AnimationPointers[i] == NULL)
+        if (NEA_AnimationPointers[i] == NULL)
         {
-            NE_AnimationPointers[i] = animation;
+            NEA_AnimationPointers[i] = animation;
             break;
         }
         i++;
-        if (i == NE_MAX_ANIMATIONS)
+        if (i == NEA_MAX_ANIMATIONS)
         {
-            NE_DebugPrint("No free slots");
+            NEA_DebugPrint("No free slots");
             free(animation);
             return NULL;
         }
@@ -49,24 +49,24 @@ NE_Animation *NE_AnimationCreate(void)
     return animation;
 }
 
-void NE_AnimationDelete(NE_Animation *animation)
+void NEA_AnimationDelete(NEA_Animation *animation)
 {
     if (!ne_animation_system_inited)
         return;
 
-    NE_AssertPointer(animation, "NULL pointer");
+    NEA_AssertPointer(animation, "NULL pointer");
 
     int i = 0;
     while (1)
     {
-        if (i == NE_MAX_ANIMATIONS)
+        if (i == NEA_MAX_ANIMATIONS)
         {
-            NE_DebugPrint("Animation not found");
+            NEA_DebugPrint("Animation not found");
             return;
         }
-        if (NE_AnimationPointers[i] == animation)
+        if (NEA_AnimationPointers[i] == animation)
         {
-            NE_AnimationPointers[i] = NULL;
+            NEA_AnimationPointers[i] = NULL;
             break;
         }
         i++;
@@ -78,23 +78,23 @@ void NE_AnimationDelete(NE_Animation *animation)
     free(animation);
 }
 
-int NE_AnimationLoadFAT(NE_Animation *animation, const char *dsa_path)
+int NEA_AnimationLoadFAT(NEA_Animation *animation, const char *dsa_path)
 {
     if (!ne_animation_system_inited)
         return 0;
 
-    NE_AssertPointer(animation, "NULL animation pointer");
-    NE_AssertPointer(dsa_path, "NULL path pointer");
+    NEA_AssertPointer(animation, "NULL animation pointer");
+    NEA_AssertPointer(dsa_path, "NULL path pointer");
 
     if (animation->loadedfromfat)
         free((void *)animation->data);
 
     animation->loadedfromfat = true;
 
-    uint32_t *pointer = (uint32_t *)NE_FATLoadData(dsa_path);
+    uint32_t *pointer = (uint32_t *)NEA_FATLoadData(dsa_path);
     if (pointer == NULL)
     {
-        NE_DebugPrint("Couldn't load file from FAT");
+        NEA_DebugPrint("Couldn't load file from FAT");
         return 0;
     }
 
@@ -102,7 +102,7 @@ int NE_AnimationLoadFAT(NE_Animation *animation, const char *dsa_path)
     uint32_t version = pointer[0];
     if (version != 1)
     {
-        NE_DebugPrint("file version is %ld, it should be 1", version);
+        NEA_DebugPrint("file version is %ld, it should be 1", version);
         free(pointer);
         return 0;
     }
@@ -111,13 +111,13 @@ int NE_AnimationLoadFAT(NE_Animation *animation, const char *dsa_path)
     return 1;
 }
 
-int NE_AnimationLoad(NE_Animation *animation, const void *dsa_pointer)
+int NEA_AnimationLoad(NEA_Animation *animation, const void *dsa_pointer)
 {
     if (!ne_animation_system_inited)
         return 0;
 
-    NE_AssertPointer(animation, "NULL animation pointer");
-    NE_AssertPointer(dsa_pointer, "NULL data pointer");
+    NEA_AssertPointer(animation, "NULL animation pointer");
+    NEA_AssertPointer(dsa_pointer, "NULL data pointer");
 
     if (animation->loadedfromfat)
         free((void *)animation->data);
@@ -130,7 +130,7 @@ int NE_AnimationLoad(NE_Animation *animation, const void *dsa_pointer)
     uint32_t version = pointer[0];
     if (version != 1)
     {
-        NE_DebugPrint("file version is %ld, it should be 1", version);
+        NEA_DebugPrint("file version is %ld, it should be 1", version);
         free((void *)pointer);
         return 0;
     }
@@ -140,32 +140,32 @@ int NE_AnimationLoad(NE_Animation *animation, const void *dsa_pointer)
     return 1;
 }
 
-void NE_AnimationDeleteAll(void)
+void NEA_AnimationDeleteAll(void)
 {
     if (!ne_animation_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_ANIMATIONS; i++)
+    for (int i = 0; i < NEA_MAX_ANIMATIONS; i++)
     {
-        if (NE_AnimationPointers[i] != NULL)
-            NE_AnimationDelete(NE_AnimationPointers[i]);
+        if (NEA_AnimationPointers[i] != NULL)
+            NEA_AnimationDelete(NEA_AnimationPointers[i]);
     }
 }
 
-int NE_AnimationSystemReset(int max_animations)
+int NEA_AnimationSystemReset(int max_animations)
 {
     if (ne_animation_system_inited)
-        NE_AnimationSystemEnd();
+        NEA_AnimationSystemEnd();
 
     if (max_animations < 1)
-        NE_MAX_ANIMATIONS = NE_DEFAULT_ANIMATIONS;
+        NEA_MAX_ANIMATIONS = NEA_DEFAULT_ANIMATIONS;
     else
-        NE_MAX_ANIMATIONS = max_animations;
+        NEA_MAX_ANIMATIONS = max_animations;
 
-    NE_AnimationPointers = calloc(NE_MAX_ANIMATIONS, sizeof(NE_AnimationPointers));
-    if (NE_AnimationPointers == NULL)
+    NEA_AnimationPointers = calloc(NEA_MAX_ANIMATIONS, sizeof(NEA_AnimationPointers));
+    if (NEA_AnimationPointers == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -173,14 +173,14 @@ int NE_AnimationSystemReset(int max_animations)
     return 0;
 }
 
-void NE_AnimationSystemEnd(void)
+void NEA_AnimationSystemEnd(void)
 {
     if (!ne_animation_system_inited)
         return;
 
-    NE_AnimationDeleteAll();
+    NEA_AnimationDeleteAll();
 
-    free(NE_AnimationPointers);
+    free(NEA_AnimationPointers);
 
     ne_animation_system_inited = false;
 }

@@ -2,24 +2,24 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEFAT.c
+/// @file NEAFAT.c
 
-char *NE_FATLoadData(const char *filename)
+char *NEA_FATLoadData(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     if (f == NULL)
     {
-        NE_DebugPrint("%s could't be opened", filename);
+        NEA_DebugPrint("%s could't be opened", filename);
         return NULL;
     }
 
     if (fseek(f, 0, SEEK_END) != 0)
     {
-        NE_DebugPrint("Failed to fseek: %s", filename);
+        NEA_DebugPrint("Failed to fseek: %s", filename);
         fclose(f);
         return NULL;
     }
@@ -30,14 +30,14 @@ char *NE_FATLoadData(const char *filename)
     char *buffer = malloc(size);
     if (buffer == NULL)
     {
-        NE_DebugPrint("Not enought memory to load %s", filename);
+        NEA_DebugPrint("Not enought memory to load %s", filename);
         fclose(f);
         return NULL;
     }
 
     if (fread(buffer, 1, size, f) != size)
     {
-        NE_DebugPrint("Failed to read data of %s", filename);
+        NEA_DebugPrint("Failed to read data of %s", filename);
         fclose(f);
         return NULL;
     }
@@ -46,18 +46,18 @@ char *NE_FATLoadData(const char *filename)
     return buffer;
 }
 
-size_t NE_FATFileSize(const char *filename)
+size_t NEA_FATFileSize(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     if (f == NULL)
     {
-        NE_DebugPrint("%s could't be opened", filename);
+        NEA_DebugPrint("%s could't be opened", filename);
         return -1;
     }
 
     if (fseek(f, 0, SEEK_END) != 0)
     {
-        NE_DebugPrint("Failed to fseek: %s", filename);
+        NEA_DebugPrint("Failed to fseek: %s", filename);
         fclose(f);
         return -1;
     }
@@ -67,7 +67,7 @@ size_t NE_FATFileSize(const char *filename)
     return size;
 }
 
-static void NE_write16(u16 *address, u16 value)
+static void NEA_write16(u16 *address, u16 value)
 {
     u8 *first = (u8 *)address;
     u8 *second = first + 1;
@@ -76,7 +76,7 @@ static void NE_write16(u16 *address, u16 value)
     *second = value >> 8;
 }
 
-static void NE_write32(u32 *address, u32 value)
+static void NEA_write32(u32 *address, u32 value)
 {
     u8 *first = (u8 *) address;
     u8 *second = first + 1;
@@ -89,21 +89,21 @@ static void NE_write32(u32 *address, u32 value)
     *fourth = (value >> 24) & 0xff;
 }
 
-int NE_ScreenshotBMP(const char *filename)
+int NEA_ScreenshotBMP(const char *filename)
 {
     FILE *f = fopen(filename, "wb");
 
     if (f == NULL)
     {
-        NE_DebugPrint("%s could't be opened", filename);
+        NEA_DebugPrint("%s could't be opened", filename);
         return 0;
     }
 
-    NE_SpecialEffectPause(true);
+    NEA_SpecialEffectPause(true);
 
     // In normal 3D mode we need to capture the composited (3D+2D output)
     // and save it to VRAM. In dual 3D mode it already is in VRAM.
-    if (NE_CurrentExecutionMode() == NE_ModeSingle3D)
+    if (NEA_CurrentExecutionMode() == NEA_ModeSingle3D)
     {
         // TODO: VRAM_D needs to be saved somewhere and then restored!
 
@@ -120,42 +120,42 @@ int NE_ScreenshotBMP(const char *filename)
 
     int ysize = 0;
 
-    if (NE_CurrentExecutionMode() == NE_ModeSingle3D)
+    if (NEA_CurrentExecutionMode() == NEA_ModeSingle3D)
         ysize = 192;
     else
         ysize = 384;
 
     u8 *temp = malloc(256 * ysize * 3
-                      + sizeof(NE_BMPInfoHeader)
-                      + sizeof(NE_BMPHeader));
+                      + sizeof(NEA_BMPInfoHeader)
+                      + sizeof(NEA_BMPHeader));
 
-    NE_BMPHeader *header = (NE_BMPHeader *) temp;
-    NE_BMPInfoHeader *infoheader =
-        (NE_BMPInfoHeader *)(temp + sizeof(NE_BMPHeader));
+    NEA_BMPHeader *header = (NEA_BMPHeader *) temp;
+    NEA_BMPInfoHeader *infoheader =
+        (NEA_BMPInfoHeader *)(temp + sizeof(NEA_BMPHeader));
 
-    NE_write16(&header->type, 0x4D42);
-    NE_write32(&header->size, 256 * ysize * 3 + sizeof(NE_BMPInfoHeader)
-                              + sizeof(NE_BMPHeader));
-    NE_write32(&header->offset,
-           sizeof(NE_BMPInfoHeader) + sizeof(NE_BMPHeader));
-    NE_write16(&header->reserved1, 0);
-    NE_write16(&header->reserved2, 0);
+    NEA_write16(&header->type, 0x4D42);
+    NEA_write32(&header->size, 256 * ysize * 3 + sizeof(NEA_BMPInfoHeader)
+                              + sizeof(NEA_BMPHeader));
+    NEA_write32(&header->offset,
+           sizeof(NEA_BMPInfoHeader) + sizeof(NEA_BMPHeader));
+    NEA_write16(&header->reserved1, 0);
+    NEA_write16(&header->reserved2, 0);
 
-    NE_write16(&infoheader->bits, 24);
-    NE_write32(&infoheader->size, sizeof(NE_BMPInfoHeader));
-    NE_write32(&infoheader->compression, 0);
-    NE_write32(&infoheader->width, 256);
-    NE_write32(&infoheader->height, ysize);
-    NE_write16(&infoheader->planes, 1);
-    NE_write32(&infoheader->imagesize, 256 * ysize * 3);
-    NE_write32(&infoheader->xresolution, 0);
-    NE_write32(&infoheader->yresolution, 0);
-    NE_write32(&infoheader->importantcolors, 0);
-    NE_write32(&infoheader->ncolors, 0);
+    NEA_write16(&infoheader->bits, 24);
+    NEA_write32(&infoheader->size, sizeof(NEA_BMPInfoHeader));
+    NEA_write32(&infoheader->compression, 0);
+    NEA_write32(&infoheader->width, 256);
+    NEA_write32(&infoheader->height, ysize);
+    NEA_write16(&infoheader->planes, 1);
+    NEA_write32(&infoheader->imagesize, 256 * ysize * 3);
+    NEA_write32(&infoheader->xresolution, 0);
+    NEA_write32(&infoheader->yresolution, 0);
+    NEA_write32(&infoheader->importantcolors, 0);
+    NEA_write32(&infoheader->ncolors, 0);
 
     // Allow CPU to access VRAM
     uint32_t vramTemp = 0;
-    if (NE_CurrentExecutionMode() != NE_ModeSingle3D)
+    if (NEA_CurrentExecutionMode() != NEA_ModeSingle3D)
     {
         vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD,
                                        VRAM_C_LCD, VRAM_D_LCD);
@@ -167,7 +167,7 @@ int NE_ScreenshotBMP(const char *filename)
         {
             u16 color = 0;
 
-            if (NE_CurrentExecutionMode() == NE_ModeSingle3D)
+            if (NEA_CurrentExecutionMode() == NEA_ModeSingle3D)
             {
                 color = VRAM_D[256 * 192 - (y + 1) * 256 + x];
             }
@@ -184,8 +184,8 @@ int NE_ScreenshotBMP(const char *filename)
             u8 r = ((color >> 10) & 31) << 3;
 
             int index = ((y * 256) + x) * 3
-                      + sizeof(NE_BMPInfoHeader)
-                      + sizeof(NE_BMPHeader);
+                      + sizeof(NEA_BMPInfoHeader)
+                      + sizeof(NEA_BMPHeader);
 
             temp[index + 0] = r;
             temp[index + 1] = g;
@@ -193,16 +193,16 @@ int NE_ScreenshotBMP(const char *filename)
         }
     }
 
-    if (NE_CurrentExecutionMode() != NE_ModeSingle3D)
+    if (NEA_CurrentExecutionMode() != NEA_ModeSingle3D)
         vramRestorePrimaryBanks(vramTemp);
 
-    fwrite(temp, 1, 256 * ysize * 3 + sizeof(NE_BMPInfoHeader)
-                    + sizeof(NE_BMPHeader), f);
+    fwrite(temp, 1, 256 * ysize * 3 + sizeof(NEA_BMPInfoHeader)
+                    + sizeof(NEA_BMPHeader), f);
     fclose(f);
     free(temp);
 
     // TODO: Restore previous value, not just unpause
-    NE_SpecialEffectPause(false);
+    NEA_SpecialEffectPause(false);
 
     return 1;
 }

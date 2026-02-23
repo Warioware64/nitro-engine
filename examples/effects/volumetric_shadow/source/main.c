@@ -2,179 +2,179 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "teapot_bin.h"
 #include "teapot.h"
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Teapot;
-    NE_Material *Material;
+    NEA_Camera *Camera;
+    NEA_Model *Teapot;
+    NEA_Material *Material;
 
     bool draw_edges;
 } SceneData;
 
 void DrawFloor(void)
 {
-    NE_PolyNormal(0, -0.97, 0);
+    NEA_PolyNormal(0, -0.97, 0);
 
-    NE_PolyBegin(GL_QUAD);
+    NEA_PolyBegin(GL_QUAD);
 
-        NE_PolyTexCoord(0, 0);
-        NE_PolyVertex(-10, 0, -10);
+        NEA_PolyTexCoord(0, 0);
+        NEA_PolyVertex(-10, 0, -10);
 
-        NE_PolyTexCoord(0, 256);
-        NE_PolyVertex(-10, 0, 10);
+        NEA_PolyTexCoord(0, 256);
+        NEA_PolyVertex(-10, 0, 10);
 
-        NE_PolyTexCoord(256, 256);
-        NE_PolyVertex(10, 0, 10);
+        NEA_PolyTexCoord(256, 256);
+        NEA_PolyVertex(10, 0, 10);
 
-        NE_PolyTexCoord(256, 0);
-        NE_PolyVertex(10, 0, -10);
+        NEA_PolyTexCoord(256, 0);
+        NEA_PolyVertex(10, 0, -10);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 }
 
 void DrawLid(void)
 {
-    NE_PolyNormal(0, -0.97, 0);
+    NEA_PolyNormal(0, -0.97, 0);
 
-    NE_PolyBegin(GL_QUAD);
+    NEA_PolyBegin(GL_QUAD);
 
-        NE_PolyTexCoord(0, 0);
-        NE_PolyVertex(-0.75, 3, -0.75);
+        NEA_PolyTexCoord(0, 0);
+        NEA_PolyVertex(-0.75, 3, -0.75);
 
-        NE_PolyTexCoord(0, 256);
-        NE_PolyVertex(-0.75, 3,  0.75);
+        NEA_PolyTexCoord(0, 256);
+        NEA_PolyVertex(-0.75, 3,  0.75);
 
-        NE_PolyTexCoord(256, 256);
-        NE_PolyVertex( 0.75, 3,  0.75);
+        NEA_PolyTexCoord(256, 256);
+        NEA_PolyVertex( 0.75, 3,  0.75);
 
-        NE_PolyTexCoord(256, 0);
-        NE_PolyVertex( 0.75, 3, -0.75);
+        NEA_PolyTexCoord(256, 0);
+        NEA_PolyVertex( 0.75, 3, -0.75);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 }
 
 void DrawShadowVolume(void)
 {
     // Lid
 
-    NE_PolyBegin(GL_QUAD);
+    NEA_PolyBegin(GL_QUAD);
 
-        NE_PolyVertex(-0.75, 3, -0.75);
-        NE_PolyVertex(-0.75, 3,  0.75);
-        NE_PolyVertex( 0.75, 3,  0.75);
-        NE_PolyVertex( 0.75, 3, -0.75);
+        NEA_PolyVertex(-0.75, 3, -0.75);
+        NEA_PolyVertex(-0.75, 3,  0.75);
+        NEA_PolyVertex( 0.75, 3,  0.75);
+        NEA_PolyVertex( 0.75, 3, -0.75);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 
     // Walls
 
-    NE_PolyBegin(GL_QUAD_STRIP);
+    NEA_PolyBegin(GL_QUAD_STRIP);
 
-        NE_PolyVertex(-0.75, 3, -0.75);
-        NE_PolyVertex(-0.75, 0, -0.75);
-        NE_PolyVertex(-0.75, 3,  0.75);
-        NE_PolyVertex(-0.75, 0,  0.75);
+        NEA_PolyVertex(-0.75, 3, -0.75);
+        NEA_PolyVertex(-0.75, 0, -0.75);
+        NEA_PolyVertex(-0.75, 3,  0.75);
+        NEA_PolyVertex(-0.75, 0,  0.75);
 
-        NE_PolyVertex( 0.75, 3,  0.75);
-        NE_PolyVertex( 0.75, 0,  0.75);
+        NEA_PolyVertex( 0.75, 3,  0.75);
+        NEA_PolyVertex( 0.75, 0,  0.75);
 
-        NE_PolyVertex( 0.75, 3, -0.75);
-        NE_PolyVertex( 0.75, 0, -0.75);
+        NEA_PolyVertex( 0.75, 3, -0.75);
+        NEA_PolyVertex( 0.75, 0, -0.75);
 
-        NE_PolyVertex(-0.75, 3, -0.75);
-        NE_PolyVertex(-0.75, 0, -0.75);
+        NEA_PolyVertex(-0.75, 3, -0.75);
+        NEA_PolyVertex(-0.75, 0, -0.75);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 
     // Bottom
 
-    NE_PolyBegin(GL_QUAD);
+    NEA_PolyBegin(GL_QUAD);
 
-        NE_PolyVertex(-0.75, 0, -0.75);
-        NE_PolyVertex(-0.75, 0,  0.75);
-        NE_PolyVertex( 0.75, 0,  0.75);
-        NE_PolyVertex( 0.75, 0, -0.75);
+        NEA_PolyVertex(-0.75, 0, -0.75);
+        NEA_PolyVertex(-0.75, 0,  0.75);
+        NEA_PolyVertex( 0.75, 0,  0.75);
+        NEA_PolyVertex( 0.75, 0, -0.75);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 }
 
 void Draw3DSceneBright(void *arg)
 {
-    NE_LightSet(0, NE_White, 0, -0.97, -0.0);
+    NEA_LightSet(0, NEA_White, 0, -0.97, -0.0);
 
     SceneData *Scene = arg;
 
     // Set camera
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
     // Set polygon format for regular models
-    NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_BACK, NE_MODULATION);
+    NEA_PolyFormat(31, 0, NEA_LIGHT_0, NEA_CULL_BACK, NEA_MODULATION);
 
     // Draw regular models
-    NE_ModelDraw(Scene->Teapot);
+    NEA_ModelDraw(Scene->Teapot);
 
-    NE_MaterialUse(Scene->Material);
+    NEA_MaterialUse(Scene->Material);
     DrawFloor();
     DrawLid();
 
     // Draw shadow volume as a black volume (shadow)
-    NE_MaterialUse(NULL);
-    NE_PolyColor(NE_Black);
+    NEA_MaterialUse(NULL);
+    NEA_PolyColor(NEA_Black);
 
     if (Scene->draw_edges)
     {
         // Draw the shadow volume in wireframe mode to see where it is
-        NE_PolyFormat(0, 0, 0, NE_CULL_NONE, NE_MODULATION);
+        NEA_PolyFormat(0, 0, 0, NEA_CULL_NONE, NEA_MODULATION);
         DrawShadowVolume();
     }
 
-    NE_PolyFormat(1, 0, 0, NE_CULL_NONE, NE_SHADOW_POLYGONS);
+    NEA_PolyFormat(1, 0, 0, NEA_CULL_NONE, NEA_SHADOW_POLYGONS);
     DrawShadowVolume();
 
-    NE_PolyFormat(20, 63, 0, NE_CULL_NONE, NE_SHADOW_POLYGONS);
+    NEA_PolyFormat(20, 63, 0, NEA_CULL_NONE, NEA_SHADOW_POLYGONS);
     DrawShadowVolume();
 }
 
 void Draw3DSceneDark(void *arg)
 {
-    NE_LightSet(0, RGB15(8, 8, 8), 0, -0.97, -0.0);
+    NEA_LightSet(0, RGB15(8, 8, 8), 0, -0.97, -0.0);
 
     SceneData *Scene = arg;
 
     // Set camera
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
     // Set polygon format for regular models
-    NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_BACK, NE_MODULATION);
+    NEA_PolyFormat(31, 0, NEA_LIGHT_0, NEA_CULL_BACK, NEA_MODULATION);
 
     // Draw regular models
-    NE_ModelDraw(Scene->Teapot);
+    NEA_ModelDraw(Scene->Teapot);
 
-    NE_MaterialUse(Scene->Material);
+    NEA_MaterialUse(Scene->Material);
     DrawFloor();
     DrawLid();
 
     // Draw shadow volume as a yellow volume (light)
-    NE_MaterialUse(NULL);
-    NE_PolyColor(RGB15(15, 15, 0));
+    NEA_MaterialUse(NULL);
+    NEA_PolyColor(RGB15(15, 15, 0));
 
     if (Scene->draw_edges)
     {
         // Draw the shadow volume in wireframe mode to see where it is
-        NE_PolyFormat(0, 0, 0, NE_CULL_NONE, NE_MODULATION);
+        NEA_PolyFormat(0, 0, 0, NEA_CULL_NONE, NEA_MODULATION);
         DrawShadowVolume();
     }
 
-    NE_PolyFormat(1, 0, 0, NE_CULL_NONE, NE_SHADOW_POLYGONS);
+    NEA_PolyFormat(1, 0, 0, NEA_CULL_NONE, NEA_SHADOW_POLYGONS);
     DrawShadowVolume();
 
-    NE_PolyFormat(20, 63, 0, NE_CULL_NONE, NE_SHADOW_POLYGONS);
+    NEA_PolyFormat(20, 63, 0, NEA_CULL_NONE, NEA_SHADOW_POLYGONS);
     DrawShadowVolume();
 }
 
@@ -184,38 +184,38 @@ int main(int argc, char *argv[])
 
     // This is needed for special screen effects
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_VBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_VBLANK, NEA_HBLFunc);
 
-    // Init console and Nitro Engine
-    NE_InitDual3D();
-    NE_InitConsole();
+    // Init console and Nitro Engine Advanced
+    NEA_InitDual3D();
+    NEA_InitConsole();
 
     // Setup camera
-    Scene.Camera = NE_CameraCreate();
-    NE_CameraSet(Scene.Camera,
+    Scene.Camera = NEA_CameraCreate();
+    NEA_CameraSet(Scene.Camera,
                  0, 3.25, -3.25,
                  0, 1.25, 0,
                  0, 1, 0);
 
     // Load teapot and texture
     {
-        Scene.Teapot = NE_ModelCreate(NE_Static);
-        Scene.Material = NE_MaterialCreate();
+        Scene.Teapot = NEA_ModelCreate(NEA_Static);
+        Scene.Material = NEA_MaterialCreate();
 
         // Load mesh from RAM and assign it to a model
-        NE_ModelLoadStaticMesh(Scene.Teapot, teapot_bin);
+        NEA_ModelLoadStaticMesh(Scene.Teapot, teapot_bin);
 
         // Load teapot texture from RAM and assign it to a material
-        NE_MaterialTexLoad(Scene.Material, NE_A1RGB5, 256, 256,
-                           NE_TEXGEN_TEXCOORD | NE_TEXTURE_WRAP_S | NE_TEXTURE_WRAP_T,
+        NEA_MaterialTexLoad(Scene.Material, NEA_A1RGB5, 256, 256,
+                           NEA_TEXGEN_TEXCOORD | NEA_TEXTURE_WRAP_S | NEA_TEXTURE_WRAP_T,
                            teapotBitmap);
 
         // Assign material to the model
-        NE_ModelSetMaterial(Scene.Teapot, Scene.Material);
+        NEA_ModelSetMaterial(Scene.Teapot, Scene.Material);
 
         // Set some properties to the material
-        NE_MaterialSetProperties(Scene.Material,
+        NEA_MaterialSetProperties(Scene.Material,
                         RGB15(24, 24, 24), // Diffuse
                         RGB15(8, 8, 8),    // Ambient
                         RGB15(0, 0, 0),    // Specular
@@ -223,7 +223,7 @@ int main(int argc, char *argv[])
                         false, false);     // Vertex color, use shininess table
 
         // Set initial position of the object
-        NE_ModelSetCoordI(Scene.Teapot,
+        NEA_ModelSetCoordI(Scene.Teapot,
                           floattof32(0), floattof32(1.5), floattof32(0));
     }
 
@@ -235,7 +235,7 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
         // Refresh keys
         scanKeys();
@@ -243,23 +243,23 @@ int main(int argc, char *argv[])
 
         // Move model using the pad
         if (keys & KEY_UP)
-            NE_ModelTranslate(Scene.Teapot, 0, 0, 0.05);
+            NEA_ModelTranslate(Scene.Teapot, 0, 0, 0.05);
         if (keys & KEY_DOWN)
-            NE_ModelTranslate(Scene.Teapot, 0, 0, -0.05);
+            NEA_ModelTranslate(Scene.Teapot, 0, 0, -0.05);
         if (keys & KEY_RIGHT)
-            NE_ModelTranslate(Scene.Teapot, -0.05, 0, 0);
+            NEA_ModelTranslate(Scene.Teapot, -0.05, 0, 0);
         if (keys & KEY_LEFT)
-            NE_ModelTranslate(Scene.Teapot, 0.05, 0, 0);
+            NEA_ModelTranslate(Scene.Teapot, 0.05, 0, 0);
 
         // Rotate model using the pad
         if (keys & KEY_Y)
-            NE_ModelRotate(Scene.Teapot, 0, 0, 2);
+            NEA_ModelRotate(Scene.Teapot, 0, 0, 2);
         if (keys & KEY_B)
-            NE_ModelRotate(Scene.Teapot, 0, 0, -2);
+            NEA_ModelRotate(Scene.Teapot, 0, 0, -2);
         if (keys & KEY_X)
-            NE_ModelRotate(Scene.Teapot, 0, 2, 0);
+            NEA_ModelRotate(Scene.Teapot, 0, 2, 0);
         if (keys & KEY_A)
-            NE_ModelRotate(Scene.Teapot, 0, -2, 0);
+            NEA_ModelRotate(Scene.Teapot, 0, -2, 0);
 
         if (keys & KEY_SELECT)
             Scene.draw_edges = true;
@@ -270,7 +270,7 @@ int main(int argc, char *argv[])
             break;
 
         // Draw Scene
-        NE_ProcessDualArg(Draw3DSceneBright, Draw3DSceneDark, &Scene, &Scene);
+        NEA_ProcessDualArg(Draw3DSceneBright, Draw3DSceneDark, &Scene, &Scene);
     }
 
     return 0;

@@ -2,9 +2,9 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2022
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "a3pal32.h"
 
@@ -14,38 +14,38 @@ int main(int argc, char *argv[])
 {
     // This is needed for special screen effects
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_VBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_VBLANK, NEA_HBLFunc);
 
-    // Init console and Nitro Engine
-    NE_Init3D();
+    // Init console and Nitro Engine Advanced
+    NEA_Init3D();
     // Use banks A and B for teapots. libnds uses bank C for the demo text
     // console.
-    NE_TextureSystemReset(0, 0, NE_VRAM_AB);
+    NEA_TextureSystemReset(0, 0, NEA_VRAM_AB);
     // This is needed to print text
     consoleDemoInit();
 
-    NE_Material *Material[NUM_CLONES];
+    NEA_Material *Material[NUM_CLONES];
     for (int i = 0; i < NUM_CLONES; i++)
-        Material[i] = NE_MaterialCreate();
+        Material[i] = NEA_MaterialCreate();
 
-    NE_Palette *Palette = NE_PaletteCreate();
+    NEA_Palette *Palette = NEA_PaletteCreate();
 
-    int total_tex_mem = NE_TextureFreeMem();
-    int total_pal_mem = NE_PaletteFreeMem();
+    int total_tex_mem = NEA_TextureFreeMem();
+    int total_pal_mem = NEA_PaletteFreeMem();
 
-    NE_MaterialTexLoad(Material[0],
-                       NE_A3PAL32, // Texture type
+    NEA_MaterialTexLoad(Material[0],
+                       NEA_A3PAL32, // Texture type
                        64, 200,    // Width, height (in pixels)
-                       NE_TEXGEN_TEXCOORD, a3pal32Bitmap);
-    NE_PaletteLoad(Palette, a3pal32Pal, 32, NE_A3PAL32);
-    NE_MaterialSetPalette(Material[0], Palette);
+                       NEA_TEXGEN_TEXCOORD, a3pal32Bitmap);
+    NEA_PaletteLoad(Palette, a3pal32Pal, 32, NEA_A3PAL32);
+    NEA_MaterialSetPalette(Material[0], Palette);
 
     for (int i = 1; i < NUM_CLONES; i++)
-        NE_MaterialClone(Material[0], Material[i]);
+        NEA_MaterialClone(Material[0], Material[i]);
 
-    int remaining_tex_mem = NE_TextureFreeMem();
-    int remaining_pal_mem = NE_PaletteFreeMem();
+    int remaining_tex_mem = NEA_TextureFreeMem();
+    int remaining_pal_mem = NEA_PaletteFreeMem();
 
     printf("Total:     %6d | %6d\n"
            "Remaining: %6d | %6d\n",
@@ -54,28 +54,28 @@ int main(int argc, char *argv[])
 
     // Delete all materials but one, so that the texture isn't freed yet
     for (int i = 0; i < NUM_CLONES - 1; i++)
-        NE_MaterialDelete(Material[i]);
+        NEA_MaterialDelete(Material[i]);
 
-    if (remaining_tex_mem != NE_TextureFreeMem())
+    if (remaining_tex_mem != NEA_TextureFreeMem())
         printf("Texture memory wrongly freed\n");
 
-    if (remaining_pal_mem != NE_PaletteFreeMem())
+    if (remaining_pal_mem != NEA_PaletteFreeMem())
         printf("Palette memory wrongly freed\n");
 
     // Delete the last material so that the texture is freed
-    NE_MaterialDelete(Material[NUM_CLONES - 1]);
-    NE_PaletteDelete(Palette);
+    NEA_MaterialDelete(Material[NUM_CLONES - 1]);
+    NEA_PaletteDelete(Palette);
 
-    if (total_tex_mem != NE_TextureFreeMem())
+    if (total_tex_mem != NEA_TextureFreeMem())
         printf("Texture memory not freed\n");
 
-    if (total_pal_mem != NE_PaletteFreeMem())
+    if (total_pal_mem != NEA_PaletteFreeMem())
         printf("Palette memory not freed\n");
 
     printf("Tests finished\n");
 
     while (1)
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
     return 0;
 }

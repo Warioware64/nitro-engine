@@ -2,22 +2,22 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "pal256.h"
 
 typedef struct {
-    NE_Material *Material;
+    NEA_Material *Material;
 } SceneData;
 
 void Draw3DScene(void *arg)
 {
     SceneData *Scene = arg;
 
-    NE_2DViewInit();
-    NE_2DDrawTexturedQuad(0, 0,
+    NEA_2DViewInit();
+    NEA_2DDrawTexturedQuad(0, 0,
                           256, 256,
                           0, Scene->Material);
 }
@@ -27,54 +27,54 @@ int main(int argc, char *argv[])
     SceneData Scene = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
-    // Init Nitro Engine, normal 3D mode, and move the 3D screen to the
+    // Init Nitro Engine Advanced, normal 3D mode, and move the 3D screen to the
     // bottom screen
-    NE_Init3D();
-    NE_SwapScreens();
+    NEA_Init3D();
+    NEA_SwapScreens();
 
     // Allocate objects
-    Scene.Material = NE_MaterialCreate();
-    NE_Palette *Palette = NE_PaletteCreate();
+    Scene.Material = NEA_MaterialCreate();
+    NEA_Palette *Palette = NEA_PaletteCreate();
 
     // Load texture
-    NE_MaterialTexLoad(Scene.Material, NE_PAL256, 256, 256, NE_TEXGEN_TEXCOORD,
+    NEA_MaterialTexLoad(Scene.Material, NEA_PAL256, 256, 256, NEA_TEXGEN_TEXCOORD,
                        pal256Bitmap);
-    NE_PaletteLoad(Palette, pal256Pal, 32, NE_PAL256);
-    NE_MaterialSetPalette(Scene.Material, Palette);
+    NEA_PaletteLoad(Palette, pal256Pal, 32, NEA_PAL256);
+    NEA_MaterialSetPalette(Scene.Material, Palette);
 
     // Modify color 254 of the palette so that we can use it to draw with a
     // known color
-    NE_PaletteModificationStart(Palette);
-    NE_PaletteRGB256SetColor(254, RGB15(0, 0, 31));
-    NE_PaletteModificationEnd();
+    NEA_PaletteModificationStart(Palette);
+    NEA_PaletteRGB256SetColor(254, RGB15(0, 0, 31));
+    NEA_PaletteModificationEnd();
 
     touchPosition touch;
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
         scanKeys();
         touchRead(&touch);
 
         if (keysHeld() & KEY_TOUCH)
         {
-            NE_TextureDrawingStart(Scene.Material);
+            NEA_TextureDrawingStart(Scene.Material);
 
-            // The function NE_TexturePutPixelRGB256() makes sure to not draw
+            // The function NEA_TexturePutPixelRGB256() makes sure to not draw
             // outside of the function, so we don't have to check here.
-            NE_TexturePutPixelRGB256(touch.px, touch.py, 254);
-            NE_TexturePutPixelRGB256(touch.px + 1, touch.py, 254);
-            NE_TexturePutPixelRGB256(touch.px, touch.py + 1, 254);
-            NE_TexturePutPixelRGB256(touch.px + 1, touch.py + 1, 254);
+            NEA_TexturePutPixelRGB256(touch.px, touch.py, 254);
+            NEA_TexturePutPixelRGB256(touch.px + 1, touch.py, 254);
+            NEA_TexturePutPixelRGB256(touch.px, touch.py + 1, 254);
+            NEA_TexturePutPixelRGB256(touch.px + 1, touch.py + 1, 254);
 
-            NE_TextureDrawingEnd();
+            NEA_TextureDrawingEnd();
         }
 
-        NE_ProcessArg(Draw3DScene, &Scene);
+        NEA_ProcessArg(Draw3DScene, &Scene);
     }
 
     return 0;

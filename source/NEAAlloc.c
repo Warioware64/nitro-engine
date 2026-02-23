@@ -2,36 +2,36 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 #include <stdlib.h>
 
-#include "NEMain.h"
-#include "NEAlloc.h"
+#include "NEAMain.h"
+#include "NEAAlloc.h"
 
-int NE_AllocInit(NEChunk **first_chunk, void *start, void *end)
+int NEA_AllocInit(NEAChunk **first_chunk, void *start, void *end)
 {
     if (first_chunk == NULL)
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
     if (end <= start)
     {
-        NE_DebugPrint("Invalid range");
+        NEA_DebugPrint("Invalid range");
         return -2;
     }
 
-    *first_chunk = malloc(sizeof(NEChunk));
+    *first_chunk = malloc(sizeof(NEAChunk));
     if (*first_chunk == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -3;
     }
 
     (*first_chunk)->previous = NULL;
-    (*first_chunk)->state = NE_STATE_FREE;
+    (*first_chunk)->state = NEA_STATE_FREE;
     (*first_chunk)->start = start;
     (*first_chunk)->end = end;
     (*first_chunk)->next = NULL;
@@ -39,19 +39,19 @@ int NE_AllocInit(NEChunk **first_chunk, void *start, void *end)
     return 0;
 }
 
-int NE_AllocEnd(NEChunk **first_chunk)
+int NEA_AllocEnd(NEAChunk **first_chunk)
 {
     if (first_chunk == NULL)
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
-    NEChunk *this = *first_chunk;
+    NEAChunk *this = *first_chunk;
 
     while (this != NULL)
     {
-        NEChunk *next = this->next;
+        NEAChunk *next = this->next;
         free(this);
         this = next;
     }
@@ -72,18 +72,18 @@ int NE_AllocEnd(NEChunk **first_chunk)
 // +------+----------+------+
 //
 // It returns a pointer to the new chunk.
-static NEChunk *ne_split_chunk(NEChunk *this, size_t this_size)
+static NEAChunk *ne_split_chunk(NEAChunk *this, size_t this_size)
 {
-    NE_AssertPointer(this, "NULL pointer");
+    NEA_AssertPointer(this, "NULL pointer");
 
     // Get next chunk and create a new one.
 
-    NEChunk *next = this->next;
+    NEAChunk *next = this->next;
 
-    NEChunk *new = malloc(sizeof(NEChunk));
+    NEAChunk *new = malloc(sizeof(NEAChunk));
     if (new == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return NULL;
     }
 
@@ -104,7 +104,7 @@ static NEChunk *ne_split_chunk(NEChunk *this, size_t this_size)
 
         // It shouldn't be free because deallocating a chunk should merge it
         // with any free chunk next to it.
-        NE_Assert(next->state != NE_STATE_FREE, "Possible list corruption");
+        NEA_Assert(next->state != NEA_STATE_FREE, "Possible list corruption");
     }
 
     // Update pointers to start and end of this chunk and the new chunk
@@ -120,11 +120,11 @@ static NEChunk *ne_split_chunk(NEChunk *this, size_t this_size)
 // This returns a pointer to the chunk that contains the provided address.
 // The start address of the chunk is considered to be part of that chunk, but
 // the end address isn't considered part of that chunk.
-static NEChunk *ne_search_address(NEChunk *first_chunk, void *address)
+static NEAChunk *ne_search_address(NEAChunk *first_chunk, void *address)
 {
-    NE_AssertPointer(first_chunk, "NULL pointer");
+    NEA_AssertPointer(first_chunk, "NULL pointer");
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     uintptr_t addr = (uintptr_t)address;
 
@@ -145,17 +145,17 @@ static NEChunk *ne_search_address(NEChunk *first_chunk, void *address)
     return NULL;
 }
 
-void *NE_AllocFindInRange(NEChunk *first_chunk, void *start, void *end, size_t size)
+void *NEA_AllocFindInRange(NEAChunk *first_chunk, void *start, void *end, size_t size)
 {
     if ((first_chunk == NULL) || (start == NULL) || (end == NULL) || (size == 0))
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return NULL;
     }
 
     // Get the chunk that contains the first address. If the start address of
     // the first chunk is after the provided start, get the first chunk.
-    NEChunk *this;
+    NEAChunk *this;
     if (start < first_chunk->start)
         this = first_chunk;
     else
@@ -166,7 +166,7 @@ void *NE_AllocFindInRange(NEChunk *first_chunk, void *start, void *end, size_t s
     for ( ; this != NULL; this = this->next)
     {
         // Is this free?
-        if (this->state != NE_STATE_FREE)
+        if (this->state != NEA_STATE_FREE)
             continue;
 
         // "start" is inside "this", but "this->start" may be before "start". In
@@ -200,16 +200,16 @@ void *NE_AllocFindInRange(NEChunk *first_chunk, void *start, void *end, size_t s
 
 // This function searches the list and returns a chunk that contains the
 // specified range of memory (address, address + size) if it is free.
-static NEChunk *ne_search_free_range_chunk(NEChunk *first_chunk,
+static NEAChunk *ne_search_free_range_chunk(NEAChunk *first_chunk,
                                            void *address, size_t size)
 {
-    NE_AssertPointer(first_chunk, "NULL pointer");
+    NEA_AssertPointer(first_chunk, "NULL pointer");
 
     // If that range of memory is free, it should be in one single chunk. Look
     // for the chunk that contains the base address, and check if the end
     // address is also part of that chunk.
 
-    NEChunk *chunk = ne_search_address(first_chunk, address);
+    NEAChunk *chunk = ne_search_address(first_chunk, address);
     if (chunk == NULL)
         return NULL;
 
@@ -219,29 +219,29 @@ static NEChunk *ne_search_free_range_chunk(NEChunk *first_chunk,
     if (end_address > chunk_end)
         return NULL;
 
-    if (chunk->state != NE_STATE_FREE)
+    if (chunk->state != NEA_STATE_FREE)
         return NULL;
 
     return chunk;
 }
 
-int NE_AllocAddress(NEChunk *first_chunk, void *address, size_t size)
+int NEA_AllocAddress(NEAChunk *first_chunk, void *address, size_t size)
 {
     if ((first_chunk == NULL) || (address == NULL) || (size == 0))
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
-    // Force sizes multiple of NE_ALLOC_MIN_SIZE
-    const size_t mask = NE_ALLOC_MIN_SIZE - 1;
+    // Force sizes multiple of NEA_ALLOC_MIN_SIZE
+    const size_t mask = NEA_ALLOC_MIN_SIZE - 1;
     if ((size & mask) != 0)
-        size += NE_ALLOC_MIN_SIZE - (size & mask);
+        size += NEA_ALLOC_MIN_SIZE - (size & mask);
 
     // Get a free chunk that contains this range of memory. This function
     // returns NULL if there is no chunk that contains this range entirely.
     // It also returns NULL if it isn't free.
-    NEChunk *this = ne_search_free_range_chunk(first_chunk, address, size);
+    NEAChunk *this = ne_search_free_range_chunk(first_chunk, address, size);
     if (this == NULL)
         return -2;
 
@@ -276,57 +276,57 @@ int NE_AllocAddress(NEChunk *first_chunk, void *address, size_t size)
         // Only the start has changed
         this_start = (uintptr_t)this->start;
 
-        NE_Assert(this_end == (uintptr_t)this->end, "Unexpected error");
+        NEA_Assert(this_end == (uintptr_t)this->end, "Unexpected error");
     }
 
-    this->state = NE_STATE_USED;
+    this->state = NEA_STATE_USED;
 
     if (alloc_end < this_end)
     {
         // Split this chunk into two as well. The first one is the final desired
         // chunk, the second one is more free space.
-        NEChunk *next = ne_split_chunk(this, size);
+        NEAChunk *next = ne_split_chunk(this, size);
         if (next == NULL)
         {
             if (this_is_modified)
-                NE_Free(first_chunk, this);
+                NEA_Free(first_chunk, this);
 
             return -4;
         }
 
-        next->state = NE_STATE_FREE;
+        next->state = NEA_STATE_FREE;
 
         // Only the end has changed
         this_end = (uintptr_t)this->end;
 
-        NE_Assert(this_start == (uintptr_t)this->start, "Unexpected error");
+        NEA_Assert(this_start == (uintptr_t)this->start, "Unexpected error");
     }
 
-    NE_Assert(size == (this_end - this_start), "Unexpected error");
-    NE_Assert(this->start == address, "Unexpected error");
+    NEA_Assert(size == (this_end - this_start), "Unexpected error");
+    NEA_Assert(this->start == address, "Unexpected error");
 
     return 0;
 }
 
-void *NE_Alloc(NEChunk *first_chunk, size_t size)
+void *NEA_Alloc(NEAChunk *first_chunk, size_t size)
 {
     if ((first_chunk == NULL) || (size == 0))
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return NULL;
     }
 
-    // Force sizes multiple of NE_ALLOC_MIN_SIZE
-    const size_t mask = NE_ALLOC_MIN_SIZE - 1;
+    // Force sizes multiple of NEA_ALLOC_MIN_SIZE
+    const size_t mask = NEA_ALLOC_MIN_SIZE - 1;
     if ((size & mask) != 0)
-        size += NE_ALLOC_MIN_SIZE - (size & mask);
+        size += NEA_ALLOC_MIN_SIZE - (size & mask);
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     for ( ; this != NULL; this = this->next)
     {
         // Skip non-free chunks
-        if (this->state != NE_STATE_FREE)
+        if (this->state != NEA_STATE_FREE)
             continue;
 
         size_t this_size = (size_t)this->end - (size_t)this->start;
@@ -338,7 +338,7 @@ void *NE_Alloc(NEChunk *first_chunk, size_t size)
         // If we have exactly the space requested, we're done.
         if (this_size == size)
         {
-            this->state = NE_STATE_USED;
+            this->state = NEA_STATE_USED;
             return this->start;
         }
 
@@ -352,13 +352,13 @@ void *NE_Alloc(NEChunk *first_chunk, size_t size)
         // +------+----------+------+  After
         // | USED | NOT USED | USED |
 
-        NEChunk *new = ne_split_chunk(this, size);
+        NEAChunk *new = ne_split_chunk(this, size);
         if (new == NULL)
             return NULL;
 
         // Flag this chunk as used and the new one as free
-        this->state = NE_STATE_USED;
-        new->state = NE_STATE_FREE;
+        this->state = NEA_STATE_USED;
+        new->state = NEA_STATE_FREE;
 
         return this->start;
     }
@@ -367,21 +367,21 @@ void *NE_Alloc(NEChunk *first_chunk, size_t size)
     return NULL;
 }
 
-void *NE_AllocFromEnd(NEChunk *first_chunk, size_t size)
+void *NEA_AllocFromEnd(NEAChunk *first_chunk, size_t size)
 {
     if ((first_chunk == NULL) || (size == 0))
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return NULL;
     }
 
-    // Force sizes multiple of NE_ALLOC_MIN_SIZE
-    const size_t mask = NE_ALLOC_MIN_SIZE - 1;
+    // Force sizes multiple of NEA_ALLOC_MIN_SIZE
+    const size_t mask = NEA_ALLOC_MIN_SIZE - 1;
     if ((size & mask) != 0)
-        size += NE_ALLOC_MIN_SIZE - (size & mask);
+        size += NEA_ALLOC_MIN_SIZE - (size & mask);
 
     // Find last chunk
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
     while (this->next != NULL)
         this = this->next;
 
@@ -389,7 +389,7 @@ void *NE_AllocFromEnd(NEChunk *first_chunk, size_t size)
     for ( ; this != NULL; this = this->previous)
     {
         // Skip non-free chunks
-        if (this->state != NE_STATE_FREE)
+        if (this->state != NEA_STATE_FREE)
             continue;
 
         size_t this_size = (size_t)this->end - (size_t)this->start;
@@ -401,7 +401,7 @@ void *NE_AllocFromEnd(NEChunk *first_chunk, size_t size)
         // If we have exactly the space requested, we're done.
         if (this_size == size)
         {
-            this->state = NE_STATE_USED;
+            this->state = NEA_STATE_USED;
             return this->start;
         }
 
@@ -417,12 +417,12 @@ void *NE_AllocFromEnd(NEChunk *first_chunk, size_t size)
 
         // The size of this chunk has to be the current one minus the requested
         // size for the new chunk.
-        NEChunk *new = ne_split_chunk(this, this_size - size);
+        NEAChunk *new = ne_split_chunk(this, this_size - size);
         if (new == NULL)
             return NULL;
 
         // Flag the new chunk as used
-        new->state = NE_STATE_USED;
+        new->state = NEA_STATE_USED;
 
         return new->start;
     }
@@ -431,15 +431,15 @@ void *NE_AllocFromEnd(NEChunk *first_chunk, size_t size)
     return NULL;
 }
 
-int NE_Free(NEChunk *first_chunk, void *pointer)
+int NEA_Free(NEAChunk *first_chunk, void *pointer)
 {
     if (first_chunk == NULL)
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     // Look for the chunk that corresponds to the given pointer
     while (1)
@@ -456,19 +456,19 @@ int NE_Free(NEChunk *first_chunk, void *pointer)
     }
 
     // If the specified chunk is free or locked, it can't be freed.
-    if (this->state != NE_STATE_USED)
+    if (this->state != NEA_STATE_USED)
         return -3;
 
     // Chunk found. Free it.
-    this->state = NE_STATE_FREE;
+    this->state = NEA_STATE_FREE;
 
     // Now, check if we can join this free chunk with the previous or the
     // next one
-    NEChunk *previous = this->previous;
-    NEChunk *next = this->next;
+    NEAChunk *previous = this->previous;
+    NEAChunk *next = this->next;
 
     // Check the previous one
-    if (previous && previous->state == NE_STATE_FREE)
+    if (previous && previous->state == NEA_STATE_FREE)
     {
         // We can join them
         //
@@ -502,7 +502,7 @@ int NE_Free(NEChunk *first_chunk, void *pointer)
     }
 
     // Check the next one
-    if (next && next->state == NE_STATE_FREE)
+    if (next && next->state == NEA_STATE_FREE)
     {
         // We can join them
         //
@@ -514,13 +514,13 @@ int NE_Free(NEChunk *first_chunk, void *pointer)
         // +---------------------+-----------+  After
         // |       NOT USED      |   USED    |
 
-        NEChunk *next_next = next->next;
+        NEAChunk *next_next = next->next;
 
         if (next_next)
         {
             // Next Next should be used or locked. If not,
             // something bad is happening here.
-            NE_Assert(next_next->state != NE_STATE_FREE,
+            NEA_Assert(next_next->state != NEA_STATE_FREE,
                       "Possible list corruption. (2)");
 
             // First, join this chunk and the next next chunk
@@ -542,25 +542,25 @@ int NE_Free(NEChunk *first_chunk, void *pointer)
     return 0;
 }
 
-int NE_Lock(NEChunk *first_chunk, void *pointer)
+int NEA_Lock(NEAChunk *first_chunk, void *pointer)
 {
     if (first_chunk == NULL)
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     while (1)
     {
         if (this->start == pointer)
         {
             // Check if we are trying to lock a chunk that isn't in use
-            if (this->state != NE_STATE_USED)
+            if (this->state != NEA_STATE_USED)
                 return -2;
 
-            this->state = NE_STATE_LOCKED;
+            this->state = NEA_STATE_LOCKED;
             return 0;
         }
 
@@ -572,25 +572,25 @@ int NE_Lock(NEChunk *first_chunk, void *pointer)
     }
 }
 
-int NE_Unlock(NEChunk *first_chunk, void *pointer)
+int NEA_Unlock(NEAChunk *first_chunk, void *pointer)
 {
     if (first_chunk == NULL)
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     while (1)
     {
         if (this->start == pointer)
         {
             // Check if we are trying to unlock a chunk that isn't locked
-            if (this->state != NE_STATE_LOCKED)
+            if (this->state != NEA_STATE_LOCKED)
                 return -2;
 
-            this->state = NE_STATE_USED;
+            this->state = NEA_STATE_USED;
             return 0;
         }
 
@@ -602,11 +602,11 @@ int NE_Unlock(NEChunk *first_chunk, void *pointer)
     }
 }
 
-int NE_MemGetInformation(NEChunk *first_chunk, NEMemInfo *info)
+int NEA_MemGetInformation(NEAChunk *first_chunk, NEAMemInfo *info)
 {
     if ((first_chunk == NULL) || (info == NULL))
     {
-        NE_DebugPrint("Invalid arguments");
+        NEA_DebugPrint("Invalid arguments");
         return -1;
     }
 
@@ -615,7 +615,7 @@ int NE_MemGetInformation(NEChunk *first_chunk, NEMemInfo *info)
     info->total = 0;
     info->locked = 0;
 
-    NEChunk *this = first_chunk;
+    NEAChunk *this = first_chunk;
 
     for ( ; this != NULL; this = this->next)
     {
@@ -623,15 +623,15 @@ int NE_MemGetInformation(NEChunk *first_chunk, NEMemInfo *info)
 
         switch (this->state)
         {
-            case NE_STATE_FREE:
+            case NEA_STATE_FREE:
                 info->free += size;
                 info->total += size;
                 break;
-            case NE_STATE_USED:
+            case NEA_STATE_USED:
                 info->used += size;
                 info->total += size;
                 break;
-            case NE_STATE_LOCKED:
+            case NEA_STATE_LOCKED:
                 // Locked memory isn't added to the total
                 info->locked += size;
                 break;

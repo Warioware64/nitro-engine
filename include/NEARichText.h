@@ -2,12 +2,12 @@
 //
 // Copyright (c) 2024 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_RICHTEXT_H__
-#define NE_RICHTEXT_H__
+#ifndef NEA_RICHTEXT_H__
+#define NEA_RICHTEXT_H__
 
-/// @file  NERichText.h
+/// @file  NEARichText.h
 /// @brief Rich text system.
 
 /// @defgroup text_system Text system
@@ -19,7 +19,7 @@
 /// The functions accept '\n', but not things like '%d', '%s', etc. You'll need
 /// to use snprintf() or similar for that.
 ///
-/// You need to call NE_2DViewInit() before using any of the quad drawing
+/// You need to call NEA_2DViewInit() before using any of the quad drawing
 /// functions.
 ///
 /// In order to generate fonts, please check the website of BMFont:
@@ -34,16 +34,16 @@
 ///
 /// @{
 
-#define NE_DEFAULT_RICH_TEXT_FONTS 8 ///< Default max number of rich text fonts
-#define NE_MAX_RICH_TEXT_FONTS NE_DEFAULT_RICH_TEXT_FONTS ///< Deprecated and unused, left for compatibility
+#define NEA_DEFAULT_RICH_TEXT_FONTS 8 ///< Default max number of rich text fonts
+#define NEA_MAX_RICH_TEXT_FONTS NEA_DEFAULT_RICH_TEXT_FONTS ///< Deprecated and unused, left for compatibility
 
 /// Change the priority of rich text drawn after this function call.
 ///
 /// @param priority New priority.
-void NE_RichTextPrioritySet(int priority);
+void NEA_RichTextPrioritySet(int priority);
 
 /// Set to 0 the priority of rich text drawn after this function call.
-void NE_RichTextPriorityReset(void);
+void NEA_RichTextPriorityReset(void);
 
 /// Initializes the rich text system with the specified number of slots.
 ///
@@ -51,28 +51,28 @@ void NE_RichTextPriorityReset(void);
 ///
 /// @param numSlots The number of rich text slots to allocate.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextStartSystem(u32 numSlots);
+int NEA_RichTextStartSystem(u32 numSlots);
 
 /// Clears all rich text font slots.
-void NE_RichTextResetSystem(void);
+void NEA_RichTextResetSystem(void);
 
 /// Initialize a rich text slot.
 ///
-/// @param slot The slot to initialize (from 0 to the number of slots specified in NE_RichTextSystemStart).
-void NE_RichTextInit(u32 slot);
+/// @param slot The slot to initialize (from 0 to the number of slots specified in NEA_RichTextSystemStart).
+void NEA_RichTextInit(u32 slot);
 
 /// End a rich text slot and free all the resources used by it.
 ///
 /// @param slot The slot to end.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextEnd(u32 slot);
+int NEA_RichTextEnd(u32 slot);
 
 /// Load font metadata from the specified file in the filesystem.
 ///
 /// @param slot The slot to use.
 /// @param path Path to a '.fnt' binary file.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextMetadataLoadFAT(u32 slot, const char *path);
+int NEA_RichTextMetadataLoadFAT(u32 slot, const char *path);
 
 /// Load font metadata from the buffer in RAM.
 ///
@@ -80,20 +80,20 @@ int NE_RichTextMetadataLoadFAT(u32 slot, const char *path);
 /// @param data Pointer to a '.fnt' binary file in RAM
 /// @param data_size Size of the file.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextMetadataLoadMemory(u32 slot, const void *data, size_t data_size);
+int NEA_RichTextMetadataLoadMemory(u32 slot, const void *data, size_t data_size);
 
 /// Load a GRF file to be used as material when drawing text as 3D quads.
 ///
 /// This loads a GRF file with a texture and loads it to VRAM as a material.
 ///
-/// This is required for NE_RichTextRender3D() and NE_RichTextRender3DAlpha().
+/// This is required for NEA_RichTextRender3D() and NEA_RichTextRender3DAlpha().
 ///
-/// This isn't required for NE_RichTextRenderMaterial().
+/// This isn't required for NEA_RichTextRenderMaterial().
 ///
 /// @param slot The slot to use.
 /// @param path Path to the GRF file.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextMaterialLoadGRF(u32 slot, const char *path);
+int NEA_RichTextMaterialLoadGRF(u32 slot, const char *path);
 
 /// Assign a material to the slot, which will be used to draw text as 3D quads.
 ///
@@ -101,20 +101,20 @@ int NE_RichTextMaterialLoadGRF(u32 slot, const char *path);
 /// delete them when the font is deleted. The caller of this function must not
 /// try to delete the material or palette manually after calling this function.
 ///
-/// This is required for NE_RichTextRender3D() and NE_RichTextRender3DAlpha().
+/// This is required for NEA_RichTextRender3D() and NEA_RichTextRender3DAlpha().
 ///
-/// This isn't required for NE_RichTextRenderMaterial().
+/// This isn't required for NEA_RichTextRenderMaterial().
 ///
 /// @param slot The slot to use.
 /// @param mat The material to assign.
 /// @param pal The palette to assign.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextMaterialSet(u32 slot, NE_Material *mat, NE_Palette *pal);
+int NEA_RichTextMaterialSet(u32 slot, NEA_Material *mat, NEA_Palette *pal);
 
 /// Load a GRF file to RAM to be used to render text to textures.
 ///
 /// This doesn't load the texture to VRAM, it keeps it in RAM. The texture will
-/// be used whenever the user uses NE_RichTextRenderMaterial() to render text to
+/// be used whenever the user uses NEA_RichTextRenderMaterial() to render text to
 /// a new material.
 ///
 /// Also, note that this texture doesn't need to have a size that is a power of
@@ -124,23 +124,23 @@ int NE_RichTextMaterialSet(u32 slot, NE_Material *mat, NE_Palette *pal);
 /// never find any issue, ensure that your textures have a width multiple of 4
 /// pixels, that will work with all texture formats.
 ///
-/// This is required for NE_RichTextRenderMaterial().
+/// This is required for NEA_RichTextRenderMaterial().
 ///
-/// This isn't required for NE_RichTextRender3D() or NE_RichTextRender3DAlpha().
+/// This isn't required for NEA_RichTextRender3D() or NEA_RichTextRender3DAlpha().
 ///
 /// @param slot The slot to use.
 /// @param path Path to the GRF file.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextBitmapLoadGRF(u32 slot, const char *path);
+int NEA_RichTextBitmapLoadGRF(u32 slot, const char *path);
 
 /// Assign a texture (and palette) to be used to render text to textures.
 ///
 /// This doesn't load the texture to VRAM, it keeps it in RAM. The texture will
-/// be used whenever the user uses NE_RichTextRenderMaterial() to render text to
+/// be used whenever the user uses NEA_RichTextRenderMaterial() to render text to
 /// a new material.
 ///
 /// The buffers provided won't be freed when the text font is cleared with
-/// NE_RichTextEnd(), they have to be freed manually.
+/// NEA_RichTextEnd(), they have to be freed manually.
 ///
 /// Also, note that this texture doesn't need to have a size that is a power of
 /// two. However, consider that the size of a row should at least be a multiple
@@ -149,9 +149,9 @@ int NE_RichTextBitmapLoadGRF(u32 slot, const char *path);
 /// never find any issue, ensure that your textures have a width multiple of 4
 /// pixels, that will work with all texture formats.
 ///
-/// This is required for NE_RichTextRenderMaterial().
+/// This is required for NEA_RichTextRenderMaterial().
 ///
-/// This isn't required for NE_RichTextRender3D() or NE_RichTextRender3DAlpha().
+/// This isn't required for NEA_RichTextRender3D() or NEA_RichTextRender3DAlpha().
 ///
 /// @param slot The slot to use.
 /// @param texture_buffer Pointer to the texture.
@@ -161,9 +161,9 @@ int NE_RichTextBitmapLoadGRF(u32 slot, const char *path);
 /// @param palette_buffer Pointer to the palette.
 /// @param palette_size Size of the palette in bytes.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextBitmapSet(u32 slot, const void *texture_buffer,
+int NEA_RichTextBitmapSet(u32 slot, const void *texture_buffer,
                          size_t texture_width, size_t texture_height,
-                         NE_TextureFormat texture_fmt,
+                         NEA_TextureFormat texture_fmt,
                          const void *palette_buffer, size_t palette_size);
 
 /// Calculates the final size and cursor position of rendering the provided string.
@@ -175,7 +175,7 @@ int NE_RichTextBitmapSet(u32 slot, const void *texture_buffer,
 /// @param final_x Pointer to store the final X position of the cursor.
 /// @param final_y Pointer to store the final Y position of the cursor.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRenderDryRunWithPos(u32 slot, const char *str,
+int NEA_RichTextRenderDryRunWithPos(u32 slot, const char *str,
                             size_t *size_x, size_t *size_y,
                             size_t *final_x, size_t *final_y);
 
@@ -186,7 +186,7 @@ int NE_RichTextRenderDryRunWithPos(u32 slot, const char *str,
 /// @param size_x Pointer to store the width of the resulting image.
 /// @param size_y Pointer to store the height of the resulting image.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRenderDryRun(u32 slot, const char *str,
+int NEA_RichTextRenderDryRun(u32 slot, const char *str,
                             size_t *size_x, size_t *size_y);
 
 /// Render a string by rendering one 3D quad per codepoint.
@@ -199,7 +199,7 @@ int NE_RichTextRenderDryRun(u32 slot, const char *str,
 /// @param y The top coordinate of the text.
 /// @param xIndent The horizontal indentation to apply to the first line of text.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
+int NEA_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
                                   s32 xIndent);
 
 /// Render a string by rendering one 3D quad per codepoint.
@@ -211,7 +211,7 @@ int NE_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
 /// @param x The left coordinate of the text.
 /// @param y The top coordinate of the text.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
+int NEA_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
 
 /// Render a string by rendering one 3D quad per codepoint.More actions
 ///
@@ -223,14 +223,14 @@ int NE_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
 /// @param y The top coordinate of the text.
 /// @param xIndent The horizontal indentation to apply to the first line of text.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
+int NEA_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
                                   s32 xIndent);
 
 /// Render a string by rendering one 3D quad per codepoint.
 ///
 /// This preserves the polygon format that is currently active.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
+int NEA_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
 
 /// Render a string by rendering one 3D quad per codepoint with alternating
 /// polygon IDs.
@@ -251,7 +251,7 @@ int NE_RichTextRender3D(u32 slot, const char *str, s32 x, s32 y);
 /// @param poly_id_base The base polygon ID to use for the quads.
 /// @param xIndent The horizontal indentation to apply to the first line of text.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3DAlphaWithIndent(u32 slot, const char *str, s32 x, s32 y,
+int NEA_RichTextRender3DAlphaWithIndent(u32 slot, const char *str, s32 x, s32 y,
                                        uint32_t poly_fmt, int poly_id_base,
                                        s32 xIndent);
 
@@ -273,7 +273,7 @@ int NE_RichTextRender3DAlphaWithIndent(u32 slot, const char *str, s32 x, s32 y,
 /// @param poly_fmt The polygon format values to be used for the quads.
 /// @param poly_id_base The base polygon ID to use for the quads.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRender3DAlpha(u32 slot, const char *str, s32 x, s32 y,
+int NEA_RichTextRender3DAlpha(u32 slot, const char *str, s32 x, s32 y,
                              uint32_t poly_fmt, int poly_id_base);
 
 /// Render a string with the specified font and create a material from it.
@@ -291,12 +291,12 @@ int NE_RichTextRender3DAlpha(u32 slot, const char *str, s32 x, s32 y,
 ///
 /// @param slot The font slot to use.
 /// @param str The string to print.
-/// @param mat A pointer to a NE_Material to store the new material.
-/// @param pal A pointer to a NE_Palette to store the new palette, or NULL.
+/// @param mat A pointer to a NEA_Material to store the new material.
+/// @param pal A pointer to a NEA_Palette to store the new palette, or NULL.
 /// @return Returns 1 on success, 0 on failure.
-int NE_RichTextRenderMaterial(u32 slot, const char *str, NE_Material **mat,
-                              NE_Palette **pal);
+int NEA_RichTextRenderMaterial(u32 slot, const char *str, NEA_Material **mat,
+                              NEA_Palette **pal);
 
 /// @}
 
-#endif // NE_RICHTEXT_H__
+#endif // NEA_RICHTEXT_H__

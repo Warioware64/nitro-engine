@@ -19,10 +19,10 @@ BINDIRS		:=
 # Defines passed to all files
 # ---------------------------
 
-ifeq ($(NE_DEBUG),1)
-DEFINES		:= -DNE_DEBUG -DNE_BLOCKSDS
+ifeq ($(NEA_DEBUG),1)
+DEFINES		:= -DNEA_DEBUG -DNEA_BLOCKSDS
 else
-DEFINES		:= -DNE_BLOCKSDS
+DEFINES		:= -DNEA_BLOCKSDS
 endif
 
 # Libraries
@@ -33,14 +33,14 @@ LIBDIRS		:= $(BLOCKSDS)/libs/libnds
 # Build artifacts
 # ---------------
 
-ifeq ($(NE_DEBUG),1)
-	NAME		:= NE_debug
+ifeq ($(NEA_DEBUG),1)
+	NAME		:= NEA_debug
 	BUILDDIR	:= build_debug
 else
-	NAME		:= NE
+	NAME		:= NEA
 	BUILDDIR	:= build_release
 endif
-INSTALLNAME	:= nitro-engine
+INSTALLNAME	:= nitro-engine-advanced
 ARCHIVE		:= lib/lib$(NAME).a
 
 # Tools

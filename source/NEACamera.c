@@ -2,18 +2,18 @@
 //
 // Copyright (c) 2008-2024 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NECamera.c
+/// @file NEACamera.c
 
-static NE_Camera **NE_UserCamera;
-static int NE_MAX_CAMERAS;
+static NEA_Camera **NEA_UserCamera;
+static int NEA_MAX_CAMERAS;
 static bool ne_camera_system_inited = false;
 
 // Internal use only
-ARM_CODE static void __NE_CameraUpdateMatrix(NE_Camera * cam)
+ARM_CODE static void __NEA_CameraUpdateMatrix(NEA_Camera * cam)
 {
     // From libnds, modified a bit
     int32_t side[3], forward[3], up[3];
@@ -51,23 +51,23 @@ ARM_CODE static void __NE_CameraUpdateMatrix(NE_Camera * cam)
     cam->matrix.m[15] = inttof32(1);
 }
 
-NE_Camera *NE_CameraCreate(void)
+NEA_Camera *NEA_CameraCreate(void)
 {
     if (!ne_camera_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_MAX_CAMERAS; i++)
+    for (int i = 0; i < NEA_MAX_CAMERAS; i++)
     {
-        if (NE_UserCamera[i] != NULL)
+        if (NEA_UserCamera[i] != NULL)
             continue;
 
-        NE_Camera *cam = calloc(1, sizeof(NE_Camera));
+        NEA_Camera *cam = calloc(1, sizeof(NEA_Camera));
         if (cam == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
@@ -75,20 +75,20 @@ NE_Camera *NE_CameraCreate(void)
         cam->up[1] = inttof32(1);
 
         cam->matrix_is_updated = false;
-        NE_UserCamera[i] = cam;
+        NEA_UserCamera[i] = cam;
 
         return cam;
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-void NE_CameraSetI(NE_Camera *cam, int xfrom, int yfrom, int zfrom,
+void NEA_CameraSetI(NEA_Camera *cam, int xfrom, int yfrom, int zfrom,
            int xto, int yto, int zto, int xup, int yup, int zup)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     cam->from[0] = xfrom;
     cam->from[1] = yfrom;
@@ -105,22 +105,22 @@ void NE_CameraSetI(NE_Camera *cam, int xfrom, int yfrom, int zfrom,
     cam->matrix_is_updated = false;
 }
 
-void NE_CameraUse(NE_Camera *cam)
+void NEA_CameraUse(NEA_Camera *cam)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     if (!cam->matrix_is_updated)
     {
-        __NE_CameraUpdateMatrix(cam);
+        __NEA_CameraUpdateMatrix(cam);
         cam->matrix_is_updated = true;
     }
 
     glLoadMatrix4x4(&cam->matrix);
 }
 
-ARM_CODE void NE_CameraMoveFreeI(NE_Camera *cam, int front, int right, int up)
+ARM_CODE void NEA_CameraMoveFreeI(NEA_Camera *cam, int front, int right, int up)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     cam->matrix_is_updated = false;
 
@@ -174,9 +174,9 @@ ARM_CODE void NE_CameraMoveFreeI(NE_Camera *cam, int front, int right, int up)
     }
 }
 
-void NE_CameraMoveI(NE_Camera *cam, int x, int y, int z)
+void NEA_CameraMoveI(NEA_Camera *cam, int x, int y, int z)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     cam->matrix_is_updated = false;
 
@@ -189,9 +189,9 @@ void NE_CameraMoveI(NE_Camera *cam, int x, int y, int z)
     cam->to[2] += z;
 }
 
-ARM_CODE void NE_CameraRotate(NE_Camera *cam, int rx, int ry, int rz)
+ARM_CODE void NEA_CameraRotate(NEA_Camera *cam, int rx, int ry, int rz)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     int cam_vector[3], result_vector[3];
 
@@ -250,7 +250,7 @@ ARM_CODE void NE_CameraRotate(NE_Camera *cam, int rx, int ry, int rz)
 }
 
 // Internal use only
-ARM_CODE static void __NE_RotateVectorAxis(int32_t *vector, int angle,
+ARM_CODE static void __NEA_RotateVectorAxis(int32_t *vector, int angle,
                                            int x, int y, int z)
 {
     // Vector must be an array of 3 ints with your vector in f32 format!
@@ -296,9 +296,9 @@ ARM_CODE static void __NE_RotateVectorAxis(int32_t *vector, int angle,
         vector[i] = result_vector[i];
 }
 
-void NE_CameraRotateAxisI(NE_Camera *cam, int angle, int x, int y, int z)
+void NEA_CameraRotateAxisI(NEA_Camera *cam, int angle, int x, int y, int z)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
     if (angle == 0)
         return;
 
@@ -309,15 +309,15 @@ void NE_CameraRotateAxisI(NE_Camera *cam, int angle, int x, int y, int z)
     for (int i = 0; i < 3; i++)
         cam_vector[i] = cam->to[i] - cam->from[i];
 
-    __NE_RotateVectorAxis(cam_vector, angle, x, y, z);
+    __NEA_RotateVectorAxis(cam_vector, angle, x, y, z);
 
     for (int i = 0; i < 3; i++)
         cam->to[i] = cam->from[i] + cam_vector[i];
 }
 
-ARM_CODE void NE_CameraRotateFree(NE_Camera *cam, int rx, int ry, int rz)
+ARM_CODE void NEA_CameraRotateFree(NEA_Camera *cam, int rx, int ry, int rz)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
     if ((rx | ry | rz) == 0)
         return;
@@ -336,13 +336,13 @@ ARM_CODE void NE_CameraRotateFree(NE_Camera *cam, int rx, int ry, int rz)
         {
             crossf32(vec_right, vec_front, vec_up);
             normalizef32(vec_up);
-            NE_CameraRotateAxisI(cam, ry, vec_up[0], vec_up[1], vec_up[2]);
+            NEA_CameraRotateAxisI(cam, ry, vec_up[0], vec_up[1], vec_up[2]);
         }
 
         if (rx)
         {
             normalizef32(vec_right);
-            NE_CameraRotateAxisI(cam, rx,
+            NEA_CameraRotateAxisI(cam, rx,
                                  vec_right[0], vec_right[1], vec_right[2]);
         }
     }
@@ -350,42 +350,42 @@ ARM_CODE void NE_CameraRotateFree(NE_Camera *cam, int rx, int ry, int rz)
     if (rz)
     {
         normalizef32(vec_front);
-        __NE_RotateVectorAxis(cam->up, rz,
+        __NEA_RotateVectorAxis(cam->up, rz,
                               vec_front[0], vec_front[1], vec_front[2]);
     }
 }
 
-void NE_CameraDelete(NE_Camera *cam)
+void NEA_CameraDelete(NEA_Camera *cam)
 {
-    NE_AssertPointer(cam, "NULL pointer");
+    NEA_AssertPointer(cam, "NULL pointer");
 
-    for (int i = 0; i < NE_MAX_CAMERAS; i++)
+    for (int i = 0; i < NEA_MAX_CAMERAS; i++)
     {
-        if (NE_UserCamera[i] != cam)
+        if (NEA_UserCamera[i] != cam)
             continue;
 
-        NE_UserCamera[i] = NULL;
+        NEA_UserCamera[i] = NULL;
         free(cam);
         return;
     }
 
-    NE_DebugPrint("Object not found");
+    NEA_DebugPrint("Object not found");
 }
 
-int NE_CameraSystemReset(int max_cameras)
+int NEA_CameraSystemReset(int max_cameras)
 {
     if (ne_camera_system_inited)
-        NE_CameraSystemEnd();
+        NEA_CameraSystemEnd();
 
     if (max_cameras < 1)
-        NE_MAX_CAMERAS = NE_DEFAULT_CAMERAS;
+        NEA_MAX_CAMERAS = NEA_DEFAULT_CAMERAS;
     else
-        NE_MAX_CAMERAS = max_cameras;
+        NEA_MAX_CAMERAS = max_cameras;
 
-    NE_UserCamera = calloc(NE_MAX_CAMERAS, sizeof(NE_UserCamera));
-    if (NE_UserCamera == NULL)
+    NEA_UserCamera = calloc(NEA_MAX_CAMERAS, sizeof(NEA_UserCamera));
+    if (NEA_UserCamera == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -393,40 +393,40 @@ int NE_CameraSystemReset(int max_cameras)
     return 0;
 }
 
-void NE_CameraSystemEnd(void)
+void NEA_CameraSystemEnd(void)
 {
     if (!ne_camera_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_CAMERAS; i++)
+    for (int i = 0; i < NEA_MAX_CAMERAS; i++)
     {
-        if (NE_UserCamera[i])
-            NE_CameraDelete(NE_UserCamera[i]);
+        if (NEA_UserCamera[i])
+            NEA_CameraDelete(NEA_UserCamera[i]);
     }
 
-    free(NE_UserCamera);
+    free(NEA_UserCamera);
 
     ne_camera_system_inited = false;
 }
 
-void NE_ViewPush(void)
+void NEA_ViewPush(void)
 {
     MATRIX_PUSH = 0;
 }
 
-void NE_ViewPop(void)
+void NEA_ViewPop(void)
 {
     MATRIX_POP = 1;
 }
 
-void NE_ViewMoveI(int x, int y, int z)
+void NEA_ViewMoveI(int x, int y, int z)
 {
     MATRIX_TRANSLATE = x;
     MATRIX_TRANSLATE = y;
     MATRIX_TRANSLATE = z;
 }
 
-void NE_ViewRotate(int rx, int ry, int rz)
+void NEA_ViewRotate(int rx, int ry, int rz)
 {
     if (rx != 0)
         glRotateXi(rx << 6);
@@ -436,7 +436,7 @@ void NE_ViewRotate(int rx, int ry, int rz)
         glRotateZi(rz << 6);
 }
 
-void NE_ViewScaleI(int x, int y, int z)
+void NEA_ViewScaleI(int x, int y, int z)
 {
     MATRIX_SCALE = x;
     MATRIX_SCALE = y;

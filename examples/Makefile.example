@@ -13,7 +13,7 @@ ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
 
 NAME		:= $(shell basename $(CURDIR))
 GAME_TITLE	:= $(shell basename $(CURDIR)).nds
-GAME_SUBTITLE	:= Nitro Engine example
+GAME_SUBTITLE	:= Nitro Engine Advanced example
 GAME_AUTHOR	:= blocksds.skylyrac.net
 GAME_ICON	:= $(BLOCKSDS)/sys/icon.gif
 
@@ -44,8 +44,8 @@ DEFINES		?=
 # Libraries
 # ---------
 
-LIBS		?= -lNE -lnds9 -lc
-LIBDIRS		+= $(BLOCKSDSEXT)/nitro-engine \
+LIBS		?= -lNEA -lnds9 -lc
+LIBDIRS		+= $(BLOCKSDSEXT)/nitro-engine-advanced \
 		   $(BLOCKSDS)/libs/libnds
 
 # Build artifacts

@@ -2,12 +2,12 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
-#include "NEAlloc.h"
+#include "NEAMain.h"
+#include "NEAAlloc.h"
 
-/// @file NETexture.c
+/// @file NEATexture.c
 
 typedef struct {
     u32 param;
@@ -19,14 +19,14 @@ typedef struct {
     int sizex, sizey;
 } ne_textureinfo_t;
 
-static ne_textureinfo_t *NE_Texture = NULL;
-static NE_Material **NE_UserMaterials = NULL;
+static ne_textureinfo_t *NEA_Texture = NULL;
+static NEA_Material **NEA_UserMaterials = NULL;
 
-static NEChunk *NE_TexAllocList; // See NEAlloc.h
+static NEAChunk *NEA_TexAllocList; // See NEAAlloc.h
 
 static bool ne_texture_system_inited = false;
 
-static int NE_MAX_TEXTURES;
+static int NEA_MAX_TEXTURES;
 
 // Default material properties
 static u32 ne_default_diffuse_ambient;
@@ -81,13 +81,13 @@ static inline void *slot1_to_slot2(void *ptr)
     return (void *)((uintptr_t)VRAM_C + (offset1 * 2));
 }
 
-static inline void ne_set_material_tex_param(NE_Material *tex,
+static inline void ne_set_material_tex_param(NEA_Material *tex,
                             int sizeX, int sizeY, uint32_t *addr,
                             GL_TEXTURE_TYPE_ENUM mode, u32 param)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No assigned texture");
-    NE_Texture[tex->texindex].param =
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No assigned texture");
+    NEA_Texture[tex->texindex].param =
             (ne_tex_raw_size(sizeX) << 20) |
             (ne_tex_raw_size(sizeY) << 23) |
             (((uint32_t)addr >> 3) & 0xFFFF) |
@@ -99,96 +99,96 @@ static void ne_texture_delete(int texture_index)
     int slot = texture_index;
 
     // A texture may be used by several materials
-    NE_Texture[slot].uses--;
+    NEA_Texture[slot].uses--;
 
     // If the number of users is zero, delete it.
-    if (NE_Texture[slot].uses == 0)
+    if (NEA_Texture[slot].uses == 0)
     {
-        uint32_t fmt = (NE_Texture[slot].param >> 26) & 7;
+        uint32_t fmt = (NEA_Texture[slot].param >> 26) & 7;
 
-        if (fmt == NE_TEX4X4)
+        if (fmt == NEA_TEX4X4)
         {
             // Check if the texture is allocated in VRAM_A or VRAM_C, and
             // calculate the corresponding address in VRAM_B.
-            void *slot02 = NE_Texture[slot].address;
+            void *slot02 = NEA_Texture[slot].address;
             void *slot1 = (slot02 < (void *)VRAM_B) ?
                           slot0_to_slot1(slot02) : slot2_to_slot1(slot02);
-            NE_Free(NE_TexAllocList, slot02);
-            NE_Free(NE_TexAllocList, slot1);
+            NEA_Free(NEA_TexAllocList, slot02);
+            NEA_Free(NEA_TexAllocList, slot1);
         }
         else
         {
-            NE_Free(NE_TexAllocList, NE_Texture[slot].address);
+            NEA_Free(NEA_TexAllocList, NEA_Texture[slot].address);
         }
 
-        NE_Texture[slot].address = NULL;
-        NE_Texture[slot].param = 0;
+        NEA_Texture[slot].address = NULL;
+        NEA_Texture[slot].param = 0;
     }
 }
 
 //--------------------------------------------------------------------------
 
-NE_Material *NE_MaterialCreate(void)
+NEA_Material *NEA_MaterialCreate(void)
 {
     if (!ne_texture_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_MAX_TEXTURES; i++)
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
-        if (NE_UserMaterials[i] != NULL)
+        if (NEA_UserMaterials[i] != NULL)
             continue;
 
-        NE_Material *mat = calloc(1, sizeof(NE_Material));
+        NEA_Material *mat = calloc(1, sizeof(NEA_Material));
         if (mat == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_UserMaterials[i] = mat;
-        mat->texindex = NE_NO_TEXTURE;
+        NEA_UserMaterials[i] = mat;
+        mat->texindex = NEA_NO_TEXTURE;
         mat->palette = NULL;
         mat->palette_autodelete = false;
-        mat->color = NE_White;
+        mat->color = NEA_White;
         mat->diffuse_ambient = ne_default_diffuse_ambient;
         mat->specular_emission = ne_default_specular_emission;
 
         return mat;
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-void NE_MaterialColorSet(NE_Material *tex, u32 color)
+void NEA_MaterialColorSet(NEA_Material *tex, u32 color)
 {
-    NE_AssertPointer(tex, "NULL pointer");
+    NEA_AssertPointer(tex, "NULL pointer");
     tex->color = color;
 }
 
-void NE_MaterialColorDelete(NE_Material *tex)
+void NEA_MaterialColorDelete(NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    tex->color = NE_White;
+    NEA_AssertPointer(tex, "NULL pointer");
+    tex->color = NEA_White;
 }
 
-int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
-                          NE_TextureFlags flags, const char *path)
+int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
+                          NEA_TextureFlags flags, const char *path)
 {
-#ifndef NE_BLOCKSDS
+#ifndef NEA_BLOCKSDS
     (void)tex;
     (void)pal;
     (void)flags;
     (void)path;
-    NE_DebugPrint("%s only supported in BlocksDS", __func__);
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
     return 0;
-#else // NE_BLOCKSDS
-    NE_AssertPointer(tex, "NULL material pointer");
-    NE_AssertPointer(path, "NULL path pointer");
+#else // NEA_BLOCKSDS
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
 
     int ret = 0;
 
@@ -199,7 +199,7 @@ int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
                                &palDst, NULL);
     if (err != GRF_NO_ERROR)
     {
-        NE_DebugPrint("Couldn't load GRF file: %d", err);
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
         goto cleanup;
     }
 
@@ -208,43 +208,43 @@ int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
 
     if (gfxDst == NULL)
     {
-        NE_DebugPrint("No graphics found in GRF file");
+        NEA_DebugPrint("No graphics found in GRF file");
         goto cleanup;
     }
 
-    NE_TextureFormat fmt;
+    NEA_TextureFormat fmt;
     switch (header.gfxAttr)
     {
         case GRF_TEXFMT_A5I3:
-            fmt = NE_A5PAL8;
+            fmt = NEA_A5PAL8;
             break;
         case GRF_TEXFMT_A3I5:
-            fmt = NE_A3PAL32;
+            fmt = NEA_A3PAL32;
             break;
         case GRF_TEXFMT_4x4:
-            fmt = NE_TEX4X4;
+            fmt = NEA_TEX4X4;
             break;
         case 16:
-            fmt = NE_A1RGB5;
+            fmt = NEA_A1RGB5;
             break;
         case 8:
-            fmt = NE_PAL256;
+            fmt = NEA_PAL256;
             break;
         case 4:
-            fmt = NE_PAL16;
+            fmt = NEA_PAL16;
             break;
         case 2:
-            fmt = NE_PAL4;
+            fmt = NEA_PAL4;
             break;
         default:
-            NE_DebugPrint("Invalid format in GRF file");
+            NEA_DebugPrint("Invalid format in GRF file");
             goto cleanup;
     }
 
-    if (NE_MaterialTexLoad(tex, fmt, header.gfxWidth, header.gfxHeight,
+    if (NEA_MaterialTexLoad(tex, fmt, header.gfxWidth, header.gfxHeight,
                            flags, gfxDst) == 0)
     {
-        NE_DebugPrint("Failed to load GRF texture");
+        NEA_DebugPrint("Failed to load GRF texture");
         goto cleanup;
     }
 
@@ -264,32 +264,32 @@ int NE_MaterialTexLoadGRF(NE_Material *tex, NE_Palette *pal,
 
     if (pal == NULL)
     {
-        NE_DebugPrint("GRF with a palette, but no palette object provided");
+        NEA_DebugPrint("GRF with a palette, but no palette object provided");
         create_palette = true;
     }
 
     if (create_palette)
     {
-        pal = NE_PaletteCreate();
+        pal = NEA_PaletteCreate();
         if (pal == NULL)
         {
-            NE_DebugPrint("Not enough memory for palette object");
+            NEA_DebugPrint("Not enough memory for palette object");
             goto cleanup;
         }
     }
 
-    if (NE_PaletteLoadSize(pal, palDst, header.palAttr * 2, fmt) == 0)
+    if (NEA_PaletteLoadSize(pal, palDst, header.palAttr * 2, fmt) == 0)
     {
-        NE_DebugPrint("Failed to load GRF palette");
+        NEA_DebugPrint("Failed to load GRF palette");
         if (create_palette)
-            NE_PaletteDelete(pal);
+            NEA_PaletteDelete(pal);
         goto cleanup;
     }
 
-    NE_MaterialSetPalette(tex, pal);
+    NEA_MaterialSetPalette(tex, pal);
 
     if (create_palette)
-        NE_MaterialAutodeletePalette(tex);
+        NEA_MaterialAutodeletePalette(tex);
 
     ret = 1; // Success
 
@@ -297,55 +297,55 @@ cleanup:
     free(gfxDst);
     free(palDst);
     return ret;
-#endif // NE_BLOCKSDS
+#endif // NEA_BLOCKSDS
 }
 
-int NE_MaterialTexLoadFAT(NE_Material *tex, NE_TextureFormat fmt,
-                          int sizeX, int sizeY, NE_TextureFlags flags,
+int NEA_MaterialTexLoadFAT(NEA_Material *tex, NEA_TextureFormat fmt,
+                          int sizeX, int sizeY, NEA_TextureFlags flags,
                           const char *path)
 {
-    NE_AssertPointer(tex, "NULL material pointer");
-    NE_AssertPointer(path, "NULL path pointer");
-    NE_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
 
-    void *ptr = NE_FATLoadData(path);
+    void *ptr = NEA_FATLoadData(path);
     if (ptr == NULL)
     {
-        NE_DebugPrint("Couldn't load file from FAT");
+        NEA_DebugPrint("Couldn't load file from FAT");
         return 0;
     }
 
-    int ret = NE_MaterialTexLoad(tex, fmt, sizeX, sizeY, flags, ptr);
+    int ret = NEA_MaterialTexLoad(tex, fmt, sizeX, sizeY, flags, ptr);
     free(ptr);
 
     return ret;
 }
 
-int NE_MaterialTex4x4LoadFAT(NE_Material *tex, int sizeX, int sizeY,
-                             NE_TextureFlags flags, const char *path02,
+int NEA_MaterialTex4x4LoadFAT(NEA_Material *tex, int sizeX, int sizeY,
+                             NEA_TextureFlags flags, const char *path02,
                              const char *path1)
 {
-    NE_AssertPointer(tex, "NULL material pointer");
-    NE_AssertPointer(path02, "NULL path02 pointer");
-    NE_AssertPointer(path1, "NULL path1 pointer");
-    NE_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path02, "NULL path02 pointer");
+    NEA_AssertPointer(path1, "NULL path1 pointer");
+    NEA_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
 
-    void *texture02 = NE_FATLoadData(path02);
+    void *texture02 = NEA_FATLoadData(path02);
     if (texture02 == NULL)
     {
-        NE_DebugPrint("Couldn't load file from FAT");
+        NEA_DebugPrint("Couldn't load file from FAT");
         return 0;
     }
 
-    void *texture1 = NE_FATLoadData(path1);
+    void *texture1 = NEA_FATLoadData(path1);
     if (texture1 == NULL)
     {
-        NE_DebugPrint("Couldn't load file from FAT");
+        NEA_DebugPrint("Couldn't load file from FAT");
         free(texture02);
         return 0;
     }
 
-    int ret = NE_MaterialTex4x4Load(tex, sizeX, sizeY, flags, texture02,
+    int ret = NEA_MaterialTex4x4Load(tex, sizeX, sizeY, flags, texture02,
                                     texture1);
 
     free(texture02);
@@ -369,7 +369,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
     // -------------------------------
 
     // Get the first valid range in slot 0
-    void *addr0 = NE_AllocFindInRange(NE_TexAllocList, VRAM_A, VRAM_B, size02);
+    void *addr0 = NEA_AllocFindInRange(NEA_TexAllocList, VRAM_A, VRAM_B, size02);
     if (addr0 != NULL)
     {
         // Only use the first half of slot 1 for slot 0
@@ -382,7 +382,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
             addr1 = slot0_to_slot1(addr0);
 
             // Check if this address is free and has enough space
-            addr1 = NE_AllocFindInRange(NE_TexAllocList, addr1, addr1_end, size1);
+            addr1 = NEA_AllocFindInRange(NEA_TexAllocList, addr1, addr1_end, size1);
             if (addr1 == NULL)
                 break;
 
@@ -398,7 +398,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
             addr0 = slot1_to_slot0(addr1);
 
             // Check if this address is free and has enough space
-            addr0 = NE_AllocFindInRange(NE_TexAllocList, addr0, VRAM_B, size02);
+            addr0 = NEA_AllocFindInRange(NEA_TexAllocList, addr0, VRAM_B, size02);
             if (addr0 == NULL)
                 break;
 
@@ -416,7 +416,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
     // ------------------------------
 
     // Get the first valid range in slot 2
-    void *addr2 = NE_AllocFindInRange(NE_TexAllocList, VRAM_C, VRAM_D, size02);
+    void *addr2 = NEA_AllocFindInRange(NEA_TexAllocList, VRAM_C, VRAM_D, size02);
     if (addr2 == NULL)
         return -1;
 
@@ -430,7 +430,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
         addr1 = slot2_to_slot1(addr2);
 
         // Check if this address is free and has enough space
-        addr1 = NE_AllocFindInRange(NE_TexAllocList, addr1, addr1_end, size1);
+        addr1 = NEA_AllocFindInRange(NEA_TexAllocList, addr1, addr1_end, size1);
         if (addr1 == NULL)
             break;
 
@@ -446,7 +446,7 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
         addr2 = slot1_to_slot2(addr1);
 
         // Check if this address is free and has enough space
-        addr2 = NE_AllocFindInRange(NE_TexAllocList, addr2, VRAM_B, size02);
+        addr2 = NEA_AllocFindInRange(NEA_TexAllocList, addr2, VRAM_B, size02);
         if (addr2 == NULL)
             break;
 
@@ -462,38 +462,38 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
     return -1;
 }
 
-int NE_MaterialTex4x4Load(NE_Material *tex, int sizeX, int sizeY,
-                          NE_TextureFlags flags, const void *texture02,
+int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
+                          NEA_TextureFlags flags, const void *texture02,
                           const void *texture1)
 {
-    NE_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(tex, "NULL material pointer");
 
     // For tex4x4 textures, both width and height must be valid
     if ((ne_is_valid_tex_size(sizeX) != sizeX)
         || (ne_is_valid_tex_size(sizeY) != sizeY))
     {
-        NE_DebugPrint("Width and height of tex4x4 textures must be a power of 2");
+        NEA_DebugPrint("Width and height of tex4x4 textures must be a power of 2");
         return 0;
     }
 
     // Check if a texture exists
-    if (tex->texindex != NE_NO_TEXTURE)
+    if (tex->texindex != NEA_NO_TEXTURE)
         ne_texture_delete(tex->texindex);
 
     // Get free slot
-    tex->texindex = NE_NO_TEXTURE;
-    for (int i = 0; i < NE_MAX_TEXTURES; i++)
+    tex->texindex = NEA_NO_TEXTURE;
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
-        if (NE_Texture[i].address == NULL)
+        if (NEA_Texture[i].address == NULL)
         {
             tex->texindex = i;
             break;
         }
     }
 
-    if (tex->texindex == NE_NO_TEXTURE)
+    if (tex->texindex == NEA_NO_TEXTURE)
     {
-        NE_DebugPrint("No free slots");
+        NEA_DebugPrint("No free slots");
         return 0;
     }
 
@@ -504,34 +504,34 @@ int NE_MaterialTex4x4Load(NE_Material *tex, int sizeX, int sizeY,
     int ret = ne_alloc_compressed_tex(size02, &slot02, &slot1);
     if (ret != 0)
     {
-        NE_DebugPrint("Can't find space for compressed texture");
+        NEA_DebugPrint("Can't find space for compressed texture");
         return 0;
     }
 
-    ret = NE_AllocAddress(NE_TexAllocList, slot02, size02);
+    ret = NEA_AllocAddress(NEA_TexAllocList, slot02, size02);
     if (ret != 0)
     {
-        NE_DebugPrint("Can't allocate slot 0/2");
+        NEA_DebugPrint("Can't allocate slot 0/2");
         return 0;
     }
 
-    ret = NE_AllocAddress(NE_TexAllocList, slot1, size1);
+    ret = NEA_AllocAddress(NEA_TexAllocList, slot1, size1);
     if (ret != 0)
     {
-        NE_Free(NE_TexAllocList, slot02);
-        NE_DebugPrint("Can't allocate slot 1");
+        NEA_Free(NEA_TexAllocList, slot02);
+        NEA_DebugPrint("Can't allocate slot 1");
         return 0;
     }
 
     // Save information
     int slot = tex->texindex;
-    NE_Texture[slot].sizex = sizeX;
-    NE_Texture[slot].sizey = sizeY;
-    NE_Texture[slot].address = slot02;
-    NE_Texture[slot].uses = 1; // Initially only this material uses the texture
+    NEA_Texture[slot].sizex = sizeX;
+    NEA_Texture[slot].sizey = sizeY;
+    NEA_Texture[slot].address = slot02;
+    NEA_Texture[slot].uses = 1; // Initially only this material uses the texture
 
     // Unlock texture memory for writing
-    // TODO: Only unlock the banks that Nitro Engine uses.
+    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
     u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
                                         VRAM_D_LCD);
 
@@ -540,21 +540,21 @@ int NE_MaterialTex4x4Load(NE_Material *tex, int sizeX, int sizeY,
 
     int hardware_size_y = ne_is_valid_tex_size(sizeY);
     ne_set_material_tex_param(tex, sizeX, hardware_size_y, slot02,
-                              NE_TEX4X4, flags);
+                              NEA_TEX4X4, flags);
 
     vramRestorePrimaryBanks(vramTemp);
 
     return 1;
 }
 
-int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
-                       int sizeX, int sizeY, NE_TextureFlags flags,
+int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
+                       int sizeX, int sizeY, NEA_TextureFlags flags,
                        const void *texture)
 {
-    NE_AssertPointer(tex, "NULL material pointer");
-    NE_Assert(fmt != 0, "No texture format provided");
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_Assert(fmt != 0, "No texture format provided");
 
-    if (fmt == NE_TEX4X4)
+    if (fmt == NEA_TEX4X4)
     {
         // Split tex4x4 texture into its two parts, that have been concatenated
 
@@ -563,7 +563,7 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
         const void *texture02 = texture;
         const void *texture1 = (const void *)((uintptr_t)texture + size02);
 
-        return NE_MaterialTex4x4Load(tex, sizeX, sizeY, flags,
+        return NEA_MaterialTex4x4Load(tex, sizeX, sizeY, flags,
                                      texture02, texture1);
     }
 
@@ -572,28 +572,28 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
     // it is a power of 2.
     if (ne_is_valid_tex_size(sizeX) != sizeX)
     {
-        NE_DebugPrint("Width of textures must be a power of 2");
+        NEA_DebugPrint("Width of textures must be a power of 2");
         return 0;
     }
 
     // Check if a texture exists
-    if (tex->texindex != NE_NO_TEXTURE)
+    if (tex->texindex != NEA_NO_TEXTURE)
         ne_texture_delete(tex->texindex);
 
     // Get free slot
-    tex->texindex = NE_NO_TEXTURE;
-    for (int i = 0; i < NE_MAX_TEXTURES; i++)
+    tex->texindex = NEA_NO_TEXTURE;
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
-        if (NE_Texture[i].address == NULL)
+        if (NEA_Texture[i].address == NULL)
         {
             tex->texindex = i;
             break;
         }
     }
 
-    if (tex->texindex == NE_NO_TEXTURE)
+    if (tex->texindex == NEA_NO_TEXTURE)
     {
-        NE_DebugPrint("No free slots");
+        NEA_DebugPrint("No free slots");
         return 0;
     }
 
@@ -601,42 +601,42 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
 
     const int size_shift[] = {
         0, // Nothing
-        1, // NE_A3PAL32
-        3, // NE_PAL4
-        2, // NE_PAL16
-        1, // NE_PAL256
-        0, // NE_TEX4X4 (This value isn't used)
-        1, // NE_A5PAL8
-        0, // NE_A1RGB5
-        0, // NE_RGB5
+        1, // NEA_A3PAL32
+        3, // NEA_PAL4
+        2, // NEA_PAL16
+        1, // NEA_PAL256
+        0, // NEA_TEX4X4 (This value isn't used)
+        1, // NEA_A5PAL8
+        0, // NEA_A1RGB5
+        0, // NEA_RGB5
     };
 
     uint32_t size = (sizeX * sizeY << 1) >> size_shift[fmt];
 
     // This pointer must be aligned to 8 bytes at least
-    void *addr = NE_AllocFromEnd(NE_TexAllocList, size);
+    void *addr = NEA_AllocFromEnd(NEA_TexAllocList, size);
     if (!addr)
     {
-        tex->texindex = NE_NO_TEXTURE;
-        NE_DebugPrint("Not enough memory");
+        tex->texindex = NEA_NO_TEXTURE;
+        NEA_DebugPrint("Not enough memory");
         return 0;
     }
 
     // Save information
     int slot = tex->texindex;
-    NE_Texture[slot].sizex = sizeX;
-    NE_Texture[slot].sizey = sizeY;
-    NE_Texture[slot].address = addr;
-    NE_Texture[slot].uses = 1; // Initially only this material uses the texture
+    NEA_Texture[slot].sizex = sizeX;
+    NEA_Texture[slot].sizey = sizeY;
+    NEA_Texture[slot].address = addr;
+    NEA_Texture[slot].uses = 1; // Initially only this material uses the texture
 
     // Unlock texture memory for writing
-    // TODO: Only unlock the banks that Nitro Engine uses.
+    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
     u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
                                        VRAM_D_LCD);
 
-    if (fmt == NE_RGB5)
+    if (fmt == NEA_RGB5)
     {
-        // NE_RGB5 is NE_A1RGB5 with each alpha bit manually set to 1 during the
+        // NEA_RGB5 is NEA_A1RGB5 with each alpha bit manually set to 1 during the
         // copy to VRAM.
         uint32_t *src = (uint32_t *)texture;
         uint32_t *dest = addr;
@@ -644,7 +644,7 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
         while (size--)
             *dest++ = *src++ | ((1 << 15) | (1 << 31));
 
-        fmt = NE_A1RGB5;
+        fmt = NEA_A1RGB5;
     }
     else
     {
@@ -659,38 +659,38 @@ int NE_MaterialTexLoad(NE_Material *tex, NE_TextureFormat fmt,
     return 1;
 }
 
-void NE_MaterialAutodeletePalette(NE_Material *mat)
+void NEA_MaterialAutodeletePalette(NEA_Material *mat)
 {
-    NE_AssertPointer(mat, "NULL material pointer");
+    NEA_AssertPointer(mat, "NULL material pointer");
 
     mat->palette_autodelete = true;
 }
 
-void NE_MaterialClone(NE_Material *source, NE_Material *dest)
+void NEA_MaterialClone(NEA_Material *source, NEA_Material *dest)
 {
-    NE_AssertPointer(source, "NULL source pointer");
-    NE_AssertPointer(dest, "NULL dest pointer");
-    NE_Assert(source->texindex != NE_NO_TEXTURE,
+    NEA_AssertPointer(source, "NULL source pointer");
+    NEA_AssertPointer(dest, "NULL dest pointer");
+    NEA_Assert(source->texindex != NEA_NO_TEXTURE,
               "No texture asigned to source material");
     // Increase count of materials using this texture
-    NE_Texture[source->texindex].uses++;
-    memcpy(dest, source, sizeof(NE_Material));
+    NEA_Texture[source->texindex].uses++;
+    memcpy(dest, source, sizeof(NEA_Material));
 }
 
-void NE_MaterialSetPalette(NE_Material *tex, NE_Palette *pal)
+void NEA_MaterialSetPalette(NEA_Material *tex, NEA_Palette *pal)
 {
-    NE_AssertPointer(tex, "NULL material pointer");
-    NE_AssertPointer(pal, "NULL palette pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(pal, "NULL palette pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
     tex->palette = pal;
 }
 
-void NE_MaterialUse(const NE_Material *tex)
+void NEA_MaterialUse(const NEA_Material *tex)
 {
     if (tex == NULL)
     {
         GFX_TEX_FORMAT = 0;
-        GFX_COLOR = NE_White;
+        GFX_COLOR = NEA_White;
         GFX_DIFFUSE_AMBIENT = ne_default_diffuse_ambient;
         GFX_SPECULAR_EMISSION = ne_default_specular_emission;
         return;
@@ -699,96 +699,96 @@ void NE_MaterialUse(const NE_Material *tex)
     GFX_DIFFUSE_AMBIENT = tex->diffuse_ambient;
     GFX_SPECULAR_EMISSION = tex->specular_emission;
 
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
 
     if (tex->palette)
-        NE_PaletteUse(tex->palette);
+        NEA_PaletteUse(tex->palette);
 
     GFX_COLOR = tex->color;
-    GFX_TEX_FORMAT = NE_Texture[tex->texindex].param;
+    GFX_TEX_FORMAT = NEA_Texture[tex->texindex].param;
 }
 
-int NE_TextureSystemReset(int max_textures, int max_palettes,
-                          NE_VRAMBankFlags bank_flags)
+int NEA_TextureSystemReset(int max_textures, int max_palettes,
+                          NEA_VRAMBankFlags bank_flags)
 {
     if (ne_texture_system_inited)
-        NE_TextureSystemEnd();
+        NEA_TextureSystemEnd();
 
-    NE_Assert((bank_flags & 0xF) != 0, "No VRAM banks selected");
+    NEA_Assert((bank_flags & 0xF) != 0, "No VRAM banks selected");
 
     if (max_textures < 1)
-        NE_MAX_TEXTURES = NE_DEFAULT_TEXTURES;
+        NEA_MAX_TEXTURES = NEA_DEFAULT_TEXTURES;
     else
-        NE_MAX_TEXTURES = max_textures;
+        NEA_MAX_TEXTURES = max_textures;
 
-    if (NE_PaletteSystemReset(max_palettes) != 0)
+    if (NEA_PaletteSystemReset(max_palettes) != 0)
         return -1;
 
-    NE_Texture = calloc(NE_MAX_TEXTURES, sizeof(ne_textureinfo_t));
-    NE_UserMaterials = calloc(NE_MAX_TEXTURES, sizeof(NE_UserMaterials));
-    if ((NE_Texture == NULL) || (NE_UserMaterials == NULL))
+    NEA_Texture = calloc(NEA_MAX_TEXTURES, sizeof(ne_textureinfo_t));
+    NEA_UserMaterials = calloc(NEA_MAX_TEXTURES, sizeof(NEA_UserMaterials));
+    if ((NEA_Texture == NULL) || (NEA_UserMaterials == NULL))
         goto cleanup;
 
-    if (NE_AllocInit(&NE_TexAllocList, VRAM_A, VRAM_E) != 0)
+    if (NEA_AllocInit(&NEA_TexAllocList, VRAM_A, VRAM_E) != 0)
         goto cleanup;
 
     // Prevent user from not selecting any bank
     if ((bank_flags & 0xF) == 0)
-        bank_flags = NE_VRAM_ABCD;
+        bank_flags = NEA_VRAM_ABCD;
 
     // VRAM_C and VRAM_D can't be used in dual 3D mode (they are used for
     // framebuffers). In two-pass FIFO/DMA modes, only VRAM_D is reserved (for
     // capture), so VRAM_C is available for textures. In two-pass FB mode,
     // both VRAM_C and VRAM_D alternate as framebuffers/capture destinations.
-    NE_ExecutionModes mode = NE_CurrentExecutionMode();
-    if (mode == NE_ModeSingle3D_TwoPass
-        || mode == NE_ModeSingle3D_TwoPass_DMA)
-        bank_flags &= ~NE_VRAM_D;
-    else if (mode != NE_ModeSingle3D)
-        bank_flags &= ~NE_VRAM_CD;
+    NEA_ExecutionModes mode = NEA_CurrentExecutionMode();
+    if (mode == NEA_ModeSingle3D_TwoPass
+        || mode == NEA_ModeSingle3D_TwoPass_DMA)
+        bank_flags &= ~NEA_VRAM_D;
+    else if (mode != NEA_ModeSingle3D)
+        bank_flags &= ~NEA_VRAM_CD;
 
     // Now, configure allocation system. The buffer size always sees the
     // four banks of VRAM. It is needed to allocate and lock one chunk per bank
-    // that isn't allocated to Nitro Engine.
+    // that isn't allocated to Nitro Engine Advanced.
 
-    if (bank_flags & NE_VRAM_A)
+    if (bank_flags & NEA_VRAM_A)
     {
         vramSetBankA(VRAM_A_TEXTURE_SLOT0);
     }
     else
     {
-        NE_AllocAddress(NE_TexAllocList, VRAM_A, 128 * 1024);
-        NE_Lock(NE_TexAllocList, VRAM_A);
+        NEA_AllocAddress(NEA_TexAllocList, VRAM_A, 128 * 1024);
+        NEA_Lock(NEA_TexAllocList, VRAM_A);
     }
 
-    if (bank_flags & NE_VRAM_B)
+    if (bank_flags & NEA_VRAM_B)
     {
         vramSetBankB(VRAM_B_TEXTURE_SLOT1);
     }
     else
     {
-        NE_AllocAddress(NE_TexAllocList, VRAM_B, 128 * 1024);
-        NE_Lock(NE_TexAllocList, VRAM_B);
+        NEA_AllocAddress(NEA_TexAllocList, VRAM_B, 128 * 1024);
+        NEA_Lock(NEA_TexAllocList, VRAM_B);
     }
 
-    if (bank_flags & NE_VRAM_C)
+    if (bank_flags & NEA_VRAM_C)
     {
         vramSetBankC(VRAM_C_TEXTURE_SLOT2);
     }
     else
     {
-        NE_AllocAddress(NE_TexAllocList, VRAM_C, 128 * 1024);
-        NE_Lock(NE_TexAllocList, VRAM_C);
+        NEA_AllocAddress(NEA_TexAllocList, VRAM_C, 128 * 1024);
+        NEA_Lock(NEA_TexAllocList, VRAM_C);
     }
 
-    if (bank_flags & NE_VRAM_D)
+    if (bank_flags & NEA_VRAM_D)
     {
         vramSetBankD(VRAM_D_TEXTURE_SLOT3);
     }
     else
     {
-        NE_AllocAddress(NE_TexAllocList, VRAM_D, 128 * 1024);
-        NE_Lock(NE_TexAllocList, VRAM_D);
+        NEA_AllocAddress(NEA_TexAllocList, VRAM_D, 128 * 1024);
+        NEA_Lock(NEA_TexAllocList, VRAM_D);
     }
 
     GFX_TEX_FORMAT = 0;
@@ -797,63 +797,63 @@ int NE_TextureSystemReset(int max_textures, int max_palettes,
     return 0;
 
 cleanup:
-    NE_DebugPrint("Not enough memory");
-    NE_PaletteSystemEnd();
-    free(NE_Texture);
-    free(NE_UserMaterials);
+    NEA_DebugPrint("Not enough memory");
+    NEA_PaletteSystemEnd();
+    free(NEA_Texture);
+    free(NEA_UserMaterials);
     return -1;
 }
 
-void NE_MaterialDelete(NE_Material *tex)
+void NEA_MaterialDelete(NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
+    NEA_AssertPointer(tex, "NULL pointer");
 
     // Delete the palette if it has been flagged to be autodeleted
     if (tex->palette_autodelete)
-        NE_PaletteDelete(tex->palette);
+        NEA_PaletteDelete(tex->palette);
 
     // If there is an asigned texture
-    if (tex->texindex != NE_NO_TEXTURE)
+    if (tex->texindex != NEA_NO_TEXTURE)
         ne_texture_delete(tex->texindex);
 
-    for (int i = 0; i < NE_MAX_TEXTURES; i++)
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
-        if (NE_UserMaterials[i] == tex)
+        if (NEA_UserMaterials[i] == tex)
         {
-            NE_UserMaterials[i] = NULL;
+            NEA_UserMaterials[i] = NULL;
             free(tex);
             return;
         }
     }
 
-    NE_DebugPrint("Object not found");
+    NEA_DebugPrint("Object not found");
 }
 
-int NE_TextureFreeMem(void)
+int NEA_TextureFreeMem(void)
 {
     if (!ne_texture_system_inited)
         return 0;
 
-    NEMemInfo info;
-    NE_MemGetInformation(NE_TexAllocList, &info);
+    NEAMemInfo info;
+    NEA_MemGetInformation(NEA_TexAllocList, &info);
 
     return info.free;
 }
 
-int NE_TextureFreeMemPercent(void)
+int NEA_TextureFreeMemPercent(void)
 {
     if (!ne_texture_system_inited)
         return 0;
 
-    NEMemInfo info;
-    NE_MemGetInformation(NE_TexAllocList, &info);
+    NEAMemInfo info;
+    NEA_MemGetInformation(NEA_TexAllocList, &info);
 
     return info.free_percent;
 }
 
-void NE_TextureDefragMem(void)
+void NEA_TextureDefragMem(void)
 {
-    NE_Assert(0, "This function doesn't work");
+    NEA_Assert(0, "This function doesn't work");
     return;
     /*
     // REALLY OLD CODE -- DOESN'T WORK
@@ -869,21 +869,21 @@ void NE_TextureDefragMem(void)
     {
         ok = true;
         int i;
-        for (i = 0; i < NE_MAX_TEXTURES; i++)
+        for (i = 0; i < NEA_MAX_TEXTURES; i++)
         {
-            int size = NE_GetSize(NE_TexAllocList, (void*)NE_Texture[i].address);
-            NE_Free(NE_TexAllocList,(void*)NE_Texture[i].address);
-            void *pointer = NE_Alloc(NE_TexAllocList, size);
+            int size = NEA_GetSize(NEA_TexAllocList, (void*)NEA_Texture[i].address);
+            NEA_Free(NEA_TexAllocList,(void*)NEA_Texture[i].address);
+            void *pointer = NEA_Alloc(NEA_TexAllocList, size);
             // Aligned to 8 bytes
 
-            NE_AssertPointer(pointer, "Couldn't reallocate texture");
+            NEA_AssertPointer(pointer, "Couldn't reallocate texture");
 
-            if (pointer != NE_Texture[i].address)
+            if (pointer != NEA_Texture[i].address)
             {
-                dmaCopy((void *)NE_Texture[i].address, pointer, size);
-                NE_Texture[i].address = pointer;
-                NE_Texture[i].param &= 0xFFFF0000;
-                NE_Texture[i].param |= ((uint32_t)pointer >> 3) & 0xFFFF;
+                dmaCopy((void *)NEA_Texture[i].address, pointer, size);
+                NEA_Texture[i].address = pointer;
+                NEA_Texture[i].param &= 0xFFFF0000;
+                NEA_Texture[i].param |= ((uint32_t)pointer >> 3) & 0xFFFF;
                 ok = false;
             }
         }
@@ -892,85 +892,85 @@ void NE_TextureDefragMem(void)
     */
 }
 
-void NE_TextureSystemEnd(void)
+void NEA_TextureSystemEnd(void)
 {
     if (!ne_texture_system_inited)
         return;
 
-    NE_AllocEnd(&NE_TexAllocList);
+    NEA_AllocEnd(&NEA_TexAllocList);
 
-    free(NE_Texture);
+    free(NEA_Texture);
 
-    for (int i = 0; i < NE_MAX_TEXTURES; i++)
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
-        if (NE_UserMaterials[i])
-            free(NE_UserMaterials[i]);
+        if (NEA_UserMaterials[i])
+            free(NEA_UserMaterials[i]);
     }
 
-    free(NE_UserMaterials);
+    free(NEA_UserMaterials);
 
-    NE_Texture = NULL;
+    NEA_Texture = NULL;
 
-    NE_PaletteSystemEnd();
+    NEA_PaletteSystemEnd();
 
     ne_texture_system_inited = false;
 }
 
 // Internal use
-int __NE_TextureGetRawX(const NE_Material *tex)
+int __NEA_TextureGetRawX(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE,
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE,
           "No texture asigned to material");
-    return (NE_Texture[tex->texindex].param & (0x7 << 20)) >> 20;
+    return (NEA_Texture[tex->texindex].param & (0x7 << 20)) >> 20;
 }
 
 // Internal use
-int __NE_TextureGetRawY(const NE_Material *tex)
+int __NEA_TextureGetRawY(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-    return (NE_Texture[tex->texindex].param & (0x7 << 23)) >> 23;
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    return (NEA_Texture[tex->texindex].param & (0x7 << 23)) >> 23;
 }
 
-int NE_TextureGetRealSizeX(const NE_Material *tex)
+int NEA_TextureGetRealSizeX(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-    return 8 << __NE_TextureGetRawX(tex);
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    return 8 << __NEA_TextureGetRawX(tex);
 }
 
-int NE_TextureGetRealSizeY(const NE_Material *tex)
+int NEA_TextureGetRealSizeY(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-    return 8 << __NE_TextureGetRawY(tex);
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    return 8 << __NEA_TextureGetRawY(tex);
 }
 
-int NE_TextureGetSizeX(const NE_Material *tex)
+int NEA_TextureGetSizeX(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-    return NE_Texture[tex->texindex].sizex;
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    return NEA_Texture[tex->texindex].sizex;
 }
 
-int NE_TextureGetSizeY(const NE_Material *tex)
+int NEA_TextureGetSizeY(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
-    return NE_Texture[tex->texindex].sizey;
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    return NEA_Texture[tex->texindex].sizey;
 }
 
-void NE_MaterialSetProperties(NE_Material *tex, u32 diffuse,
+void NEA_MaterialSetProperties(NEA_Material *tex, u32 diffuse,
                               u32 ambient, u32 specular, u32 emission,
                               bool vtxcolor, bool useshininess)
 {
-    NE_AssertPointer(tex, "NULL pointer");
+    NEA_AssertPointer(tex, "NULL pointer");
     tex->diffuse_ambient = diffuse | (ambient << 16) | (vtxcolor << 15);
     tex->specular_emission = specular | (emission << 16) | (useshininess << 15);
 }
 
-void NE_MaterialSetDefaultProperties(u32 diffuse, u32 ambient,
+void NEA_MaterialSetDefaultProperties(u32 diffuse, u32 ambient,
                                      u32 specular, u32 emission,
                                      bool vtxcolor, bool useshininess)
 {
@@ -988,20 +988,20 @@ static int drawingtexture_type;
 static int drawingtexture_realx;
 static u32 ne_vram_saved;
 
-void *NE_TextureDrawingStart(const NE_Material *tex)
+void *NEA_TextureDrawingStart(const NEA_Material *tex)
 {
-    NE_AssertPointer(tex, "NULL pointer");
-    NE_Assert(tex->texindex != NE_NO_TEXTURE, "No texture asigned to material");
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
 
-    NE_Assert(drawingtexture_address == NULL,
+    NEA_Assert(drawingtexture_address == NULL,
               "Another texture is already active");
 
-    drawingtexture_x = NE_TextureGetSizeX(tex);
-    drawingtexture_realx = NE_TextureGetRealSizeX(tex);
-    drawingtexture_y = NE_TextureGetSizeY(tex);
+    drawingtexture_x = NEA_TextureGetSizeX(tex);
+    drawingtexture_realx = NEA_TextureGetRealSizeX(tex);
+    drawingtexture_y = NEA_TextureGetSizeY(tex);
     drawingtexture_address = (u16 *) ((uintptr_t)VRAM_A
-                          + ((NE_Texture[tex->texindex].param & 0xFFFF) << 3));
-    drawingtexture_type = ((NE_Texture[tex->texindex].param >> 26) & 0x7);
+                          + ((NEA_Texture[tex->texindex].param & 0xFFFF) << 3));
+    drawingtexture_type = ((NEA_Texture[tex->texindex].param >> 26) & 0x7);
 
     ne_vram_saved = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
                                         VRAM_D_LCD);
@@ -1009,12 +1009,12 @@ void *NE_TextureDrawingStart(const NE_Material *tex)
     return drawingtexture_address;
 }
 
-void NE_TexturePutPixelRGBA(u32 x, u32 y, u16 color)
+void NEA_TexturePutPixelRGBA(u32 x, u32 y, u16 color)
 {
-    NE_AssertPointer(drawingtexture_address,
+    NEA_AssertPointer(drawingtexture_address,
                      "No texture active for drawing");
-    NE_Assert(drawingtexture_type == NE_A1RGB5,
-              "Ative texture isn't NE_A1RGB5");
+    NEA_Assert(drawingtexture_type == NEA_A1RGB5,
+              "Ative texture isn't NEA_A1RGB5");
 
     if (x >= drawingtexture_x || y >= drawingtexture_y)
         return;
@@ -1022,12 +1022,12 @@ void NE_TexturePutPixelRGBA(u32 x, u32 y, u16 color)
     drawingtexture_address[x + (y * drawingtexture_realx)] = color;
 }
 
-void NE_TexturePutPixelRGB256(u32 x, u32 y, u8 palettecolor)
+void NEA_TexturePutPixelRGB256(u32 x, u32 y, u8 palettecolor)
 {
-    NE_AssertPointer(drawingtexture_address,
+    NEA_AssertPointer(drawingtexture_address,
                      "No texture active for drawing.");
-    NE_Assert(drawingtexture_type == NE_PAL256,
-              "Active texture isn't NE_PAL256");
+    NEA_Assert(drawingtexture_type == NEA_PAL256,
+              "Active texture isn't NEA_PAL256");
 
     if (x >= drawingtexture_x || y >= drawingtexture_y)
         return;
@@ -1039,9 +1039,9 @@ void NE_TexturePutPixelRGB256(u32 x, u32 y, u8 palettecolor)
     drawingtexture_address[position] |= ((u16) palettecolor) << desp;
 }
 
-void NE_TextureDrawingEnd(void)
+void NEA_TextureDrawingEnd(void)
 {
-    NE_Assert(drawingtexture_address != NULL, "No active texture");
+    NEA_Assert(drawingtexture_address != NULL, "No active texture");
 
     vramRestorePrimaryBanks(ne_vram_saved);
 

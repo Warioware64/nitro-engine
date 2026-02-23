@@ -12,8 +12,8 @@ ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
 # ===========
 
 NAME		:= $(shell basename $(CURDIR))
-GAME_TITLE	:= NFlib + Nitro Engine template
-GAME_SUBTITLE	:= Nitro Engine example
+GAME_TITLE	:= NFlib + Nitro Engine Advanced template
+GAME_SUBTITLE	:= Nitro Engine Advanced example
 GAME_AUTHOR	:= blocksds.skylyrac.net
 GAME_ICON	:= $(BLOCKSDS)/sys/icon.gif
 
@@ -44,8 +44,8 @@ DEFINES		:=
 # Libraries
 # ---------
 
-LIBS		:= -lNE -lnflib -lnds9 -lc
-LIBDIRS		:= $(BLOCKSDSEXT)/nitro-engine \
+LIBS		:= -lNEA -lnflib -lnds9 -lc
+LIBDIRS		:= $(BLOCKSDSEXT)/nitro-engine-advanced \
 		   $(BLOCKSDSEXT)/nflib \
 		   $(BLOCKSDS)/libs/libnds
 

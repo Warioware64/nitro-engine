@@ -2,16 +2,16 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2022
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-// Nitro Engine comes with a general-purpose memory allocator. This file
+// Nitro Engine Advanced comes with a general-purpose memory allocator. This file
 // contains several tests for it.
 
 #include <stdio.h>
 
 #include <nds.h>
 
-#include <NEAlloc.h>
+#include <NEAAlloc.h>
 
 #define POOL_START_ADDR     0x1000000
 #define POOL_END_ADDR       0x2000000
@@ -21,11 +21,11 @@
 #define POOL_END            (void *)POOL_END_ADDR
 
 #define POOL_INITIALIZE()                           \
-    NEChunk *alloc;                                 \
-    NE_AllocInit(&alloc, POOL_START, POOL_END);
+    NEAChunk *alloc;                                 \
+    NEA_AllocInit(&alloc, POOL_START, POOL_END);
 
 #define POOL_DEINITIALIZE()                         \
-    NE_AllocEnd(&alloc);
+    NEA_AllocEnd(&alloc);
 
 #define ASSERT(cond)                                \
     if (!(cond)) {                                  \
@@ -55,27 +55,27 @@ void test_alloc_align(void)
     uintptr_t addr = POOL_START_ADDR;
     void *ptr;
 
-    ptr = NE_Alloc(alloc, 64);
+    ptr = NEA_Alloc(alloc, 64);
     ASSERT(A(ptr) == addr);
     addr += 64;
 
-    ptr = NE_Alloc(alloc, 32);
+    ptr = NEA_Alloc(alloc, 32);
     ASSERT(A(ptr) == addr);
     addr += 32;
 
-    ptr = NE_Alloc(alloc, 16);
+    ptr = NEA_Alloc(alloc, 16);
     ASSERT(A(ptr) == addr);
     addr += 16;
 
-    ASSERT_MSG(16 == NE_ALLOC_MIN_SIZE, "Unexpected NE_ALLOC_MIN_SIZE");
+    ASSERT_MSG(16 == NEA_ALLOC_MIN_SIZE, "Unexpected NEA_ALLOC_MIN_SIZE");
 
-    ptr = NE_Alloc(alloc, 8);
+    ptr = NEA_Alloc(alloc, 8);
     ASSERT(A(ptr) == addr);
-    addr += NE_ALLOC_MIN_SIZE;
+    addr += NEA_ALLOC_MIN_SIZE;
 
-    ptr = NE_Alloc(alloc, 4);
+    ptr = NEA_Alloc(alloc, 4);
     ASSERT(A(ptr) == addr);
-    addr += NE_ALLOC_MIN_SIZE;
+    addr += NEA_ALLOC_MIN_SIZE;
 
     POOL_DEINITIALIZE();
 }
@@ -92,25 +92,25 @@ void test_alloc_from_end_align(void)
     void *ptr;
 
     addr -= 64;
-    ptr = NE_AllocFromEnd(alloc, 64);
+    ptr = NEA_AllocFromEnd(alloc, 64);
     ASSERT(A(ptr) == addr);
 
     addr -= 32;
-    ptr = NE_AllocFromEnd(alloc, 32);
+    ptr = NEA_AllocFromEnd(alloc, 32);
     ASSERT(A(ptr) == addr);
 
     addr -= 16;
-    ptr = NE_AllocFromEnd(alloc, 16);
+    ptr = NEA_AllocFromEnd(alloc, 16);
     ASSERT(A(ptr) == addr);
 
-    ASSERT_MSG(16 == NE_ALLOC_MIN_SIZE, "Unexpected NE_ALLOC_MIN_SIZE");
+    ASSERT_MSG(16 == NEA_ALLOC_MIN_SIZE, "Unexpected NEA_ALLOC_MIN_SIZE");
 
-    addr -= NE_ALLOC_MIN_SIZE;
-    ptr = NE_AllocFromEnd(alloc, 8);
+    addr -= NEA_ALLOC_MIN_SIZE;
+    ptr = NEA_AllocFromEnd(alloc, 8);
     ASSERT(A(ptr) == addr);
 
-    addr -= NE_ALLOC_MIN_SIZE;
-    ptr = NE_AllocFromEnd(alloc, 4);
+    addr -= NEA_ALLOC_MIN_SIZE;
+    ptr = NEA_AllocFromEnd(alloc, 4);
     ASSERT(A(ptr) == addr);
 
     POOL_DEINITIALIZE();
@@ -125,18 +125,18 @@ void test_free(void)
 
     uintptr_t addr = POOL_START_ADDR;
 
-    void *ptr1 = NE_Alloc(alloc, 256);
+    void *ptr1 = NEA_Alloc(alloc, 256);
     ASSERT(A(ptr1) == addr);
     addr += 256;
 
-    void *ptr2 = NE_Alloc(alloc, 256);
+    void *ptr2 = NEA_Alloc(alloc, 256);
     ASSERT(A(ptr2) == addr);
 
     // Free the first chunk
-    int ret = NE_Free(alloc, ptr1);
+    int ret = NEA_Free(alloc, ptr1);
     ASSERT(ret == 0);
 
-    void *ptr3 = NE_Alloc(alloc, 256);
+    void *ptr3 = NEA_Alloc(alloc, 256);
     ASSERT(A(ptr3) == A(ptr1));
 
     POOL_DEINITIALIZE();
@@ -152,18 +152,18 @@ void test_free_from_end(void)
     uintptr_t addr = POOL_END_ADDR;
 
     addr -= 256;
-    void *ptr1 = NE_AllocFromEnd(alloc, 256);
+    void *ptr1 = NEA_AllocFromEnd(alloc, 256);
     ASSERT(A(ptr1) == addr);
 
     addr -= 256;
-    void *ptr2 = NE_AllocFromEnd(alloc, 256);
+    void *ptr2 = NEA_AllocFromEnd(alloc, 256);
     ASSERT(A(ptr2) == addr);
 
     // Free the first chunk
-    int ret = NE_Free(alloc, ptr1);
+    int ret = NEA_Free(alloc, ptr1);
     ASSERT(ret == 0);
 
-    void *ptr3 = NE_AllocFromEnd(alloc, 256);
+    void *ptr3 = NEA_AllocFromEnd(alloc, 256);
     ASSERT(A(ptr3) == A(ptr1));
 
     POOL_DEINITIALIZE();
@@ -181,56 +181,56 @@ void test_lock_unlock(void)
 
     // Try locking a chunk that is used
 
-    void *ptr = NE_Alloc(alloc, 256);
+    void *ptr = NEA_Alloc(alloc, 256);
     ASSERT(A(ptr) == addr);
 
-    ret = NE_Lock(alloc, ptr);
+    ret = NEA_Lock(alloc, ptr);
     ASSERT(ret == 0);
 
     // Try to free a locked chunk
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == -3);
 
     // Unlock a chunk that is locked
 
-    ret = NE_Unlock(alloc, ptr);
+    ret = NEA_Unlock(alloc, ptr);
     ASSERT(ret == 0);
 
     // Try unlocking a chunk that is used
 
-    ret = NE_Unlock(alloc, ptr);
+    ret = NEA_Unlock(alloc, ptr);
     ASSERT(ret == -2);
 
     // Try unlocking a chunk that has just been freed
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
-    ret = NE_Unlock(alloc, ptr);
+    ret = NEA_Unlock(alloc, ptr);
     ASSERT(ret == -2);
 
     // Try locking a chunk that has just been freed
 
-    ret = NE_Lock(alloc, ptr);
+    ret = NEA_Lock(alloc, ptr);
     ASSERT(ret == -2);
 
     // Now, allocate a new chunk that uses half of the memory and lock it. Then,
     // try to allocate more than half of memory and check it fails.
 
-    ptr = NE_Alloc(alloc, POOL_SIZE / 2);
+    ptr = NEA_Alloc(alloc, POOL_SIZE / 2);
     ASSERT(A(ptr) == POOL_START_ADDR);
 
-    ret = NE_Lock(alloc, ptr);
+    ret = NEA_Lock(alloc, ptr);
     ASSERT(ret == 0);
 
-    void *fail = NE_Alloc(alloc, (POOL_SIZE / 2) + 1024);
+    void *fail = NEA_Alloc(alloc, (POOL_SIZE / 2) + 1024);
     ASSERT(fail == NULL);
 
-    ret = NE_Unlock(alloc, ptr);
+    ret = NEA_Unlock(alloc, ptr);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
     POOL_DEINITIALIZE();
@@ -249,56 +249,56 @@ void test_alloc_fail(void)
 
     // Try to allocate zero bytes
 
-    ptr = NE_Alloc(alloc, 0);
+    ptr = NEA_Alloc(alloc, 0);
     ASSERT(ptr == NULL);
 
-    ptr = NE_AllocFromEnd(alloc, 0);
+    ptr = NEA_AllocFromEnd(alloc, 0);
     ASSERT(ptr == NULL);
 
     // Try to allocate the maximum size
 
-    ptr = NE_Alloc(alloc, POOL_SIZE);
+    ptr = NEA_Alloc(alloc, POOL_SIZE);
     ASSERT(A(ptr) == addr);
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
-    ptr = NE_AllocFromEnd(alloc, POOL_SIZE);
+    ptr = NEA_AllocFromEnd(alloc, POOL_SIZE);
     ASSERT(A(ptr) == addr);
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
     // Try to allocate more than the limit
 
-    void *fail = NE_Alloc(alloc, POOL_SIZE + 1);
+    void *fail = NEA_Alloc(alloc, POOL_SIZE + 1);
     ASSERT(fail == NULL);
 
-    fail = NE_AllocFromEnd(alloc, POOL_SIZE + 1);
+    fail = NEA_AllocFromEnd(alloc, POOL_SIZE + 1);
     ASSERT(fail == NULL);
 
     // Fragment the memory pool and try to allocate the remaining space, which
     // should fail.
 
-    ptr = NE_Alloc(alloc, POOL_SIZE / 4);
+    ptr = NEA_Alloc(alloc, POOL_SIZE / 4);
     ASSERT(A(ptr) == addr);
 
-    void *ptr2 = NE_Alloc(alloc, POOL_SIZE / 2);
+    void *ptr2 = NEA_Alloc(alloc, POOL_SIZE / 2);
     ASSERT(A(ptr2) == (addr + (POOL_SIZE / 4)));
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
-    NEMemInfo info; // Get information about the remaining free memory
-    ret = NE_MemGetInformation(alloc, &info);
+    NEAMemInfo info; // Get information about the remaining free memory
+    ret = NEA_MemGetInformation(alloc, &info);
     ASSERT(ret == 0);
 
     ASSERT(info.free == (POOL_SIZE / 2));
 
-    fail = NE_Alloc(alloc, info.free);
+    fail = NEA_Alloc(alloc, info.free);
     ASSERT(fail == NULL);
 
-    fail = NE_AllocFromEnd(alloc, info.free);
+    fail = NEA_AllocFromEnd(alloc, info.free);
     ASSERT(fail == NULL);
 
     POOL_DEINITIALIZE();
@@ -318,35 +318,35 @@ void test_statistics(void)
 
     // Allocate a few chunks
 
-    void *ptr1 = NE_Alloc(alloc, size);
+    void *ptr1 = NEA_Alloc(alloc, size);
     ASSERT(A(ptr1) == addr);
     addr += size;
 
-    void *ptr2 = NE_Alloc(alloc, size);
+    void *ptr2 = NEA_Alloc(alloc, size);
     ASSERT(A(ptr2) == addr);
     addr += size;
 
-    void *ptr3 = NE_Alloc(alloc, size);
+    void *ptr3 = NEA_Alloc(alloc, size);
     ASSERT(A(ptr3) == addr);
     addr += size;
 
-    void *ptr4 = NE_AllocFromEnd(alloc, size);
+    void *ptr4 = NEA_AllocFromEnd(alloc, size);
     ASSERT(A(ptr4) == POOL_END_ADDR - size);
 
     // Free one of them
 
-    ret = NE_Free(alloc, ptr2);
+    ret = NEA_Free(alloc, ptr2);
     ASSERT(ret == 0);
 
     // Lock one of them
 
-    ret = NE_Lock(alloc, ptr4);
+    ret = NEA_Lock(alloc, ptr4);
     ASSERT(ret == 0);
 
     // Get statistics
 
-    NEMemInfo info;
-    ret = NE_MemGetInformation(alloc, &info);
+    NEAMemInfo info;
+    ret = NEA_MemGetInformation(alloc, &info);
     ASSERT(ret == 0);
 
     ASSERT(info.free == (5 * POOL_SIZE / 8));
@@ -361,7 +361,7 @@ void test_statistics(void)
 }
 
 // Count the number of chunks present in the linked list.
-int count_num_chunks(NEChunk *list)
+int count_num_chunks(NEAChunk *list)
 {
     int count = 0;
 
@@ -372,7 +372,7 @@ int count_num_chunks(NEChunk *list)
 }
 
 // Verify that the linked list of chunks has consistent start and end addresses.
-int verify_consistency(NEChunk *list, void *start, void *end)
+int verify_consistency(NEAChunk *list, void *start, void *end)
 {
     if (list == NULL)
         return 0;
@@ -388,7 +388,7 @@ int verify_consistency(NEChunk *list, void *start, void *end)
             return -2;
 
         // Two free chunks should never be together
-        if ((list->state == NE_STATE_FREE) && (list->next->state == NE_STATE_FREE))
+        if ((list->state == NEA_STATE_FREE) && (list->next->state == NEA_STATE_FREE))
             return -3;
     }
 
@@ -399,7 +399,7 @@ int verify_consistency(NEChunk *list, void *start, void *end)
     return 0;
 }
 
-void print_list(NEChunk *list)
+void print_list(NEAChunk *list)
 {
     if (list == NULL)
     {
@@ -417,22 +417,22 @@ void print_list(NEChunk *list)
 // Test that the internal linked list is in the expected state
 void test_internal_list_state(void)
 {
-    NEChunk *alloc;
+    NEAChunk *alloc;
     int ret, count;
 
     // Test with invalid linked list
 
-    ret = NE_AllocInit(NULL, POOL_START, POOL_END);
+    ret = NEA_AllocInit(NULL, POOL_START, POOL_END);
     ASSERT(ret == -1);
 
     // Test with switched start and end
 
-    ret = NE_AllocInit(&alloc, POOL_END, POOL_START);
+    ret = NEA_AllocInit(&alloc, POOL_END, POOL_START);
     ASSERT(ret == -2);
 
     // Initialize a valid list
 
-    ret = NE_AllocInit(&alloc, POOL_START, POOL_END);
+    ret = NEA_AllocInit(&alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -443,7 +443,7 @@ void test_internal_list_state(void)
     void *ptr[10];
     for (int i = 0; i < 10; i++)
     {
-        ptr[i] = NE_Alloc(alloc, 1024);
+        ptr[i] = NEA_Alloc(alloc, 1024);
         ASSERT(A(ptr[i]) == POOL_START_ADDR + (1024 * i));
     }
 
@@ -453,13 +453,13 @@ void test_internal_list_state(void)
     // Free the first chunk and then the second one so that it is merged with
     // the first one.
 
-    ret = NE_Free(alloc, ptr[0]);
+    ret = NEA_Free(alloc, ptr[0]);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
     ASSERT(count == 11);
 
-    ret = NE_Free(alloc, ptr[1]);
+    ret = NEA_Free(alloc, ptr[1]);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -470,7 +470,7 @@ void test_internal_list_state(void)
 
     // Free the last chunk so that it is merged with the remaining free memory
 
-    ret = NE_Free(alloc, ptr[9]);
+    ret = NEA_Free(alloc, ptr[9]);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -479,7 +479,7 @@ void test_internal_list_state(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, ptr[8]); // Do it again to test it
+    ret = NEA_Free(alloc, ptr[8]); // Do it again to test it
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -491,15 +491,15 @@ void test_internal_list_state(void)
     // Free two chunks with one chunk the middle. Then, free that chunk and see
     // if the three chunks are merged into one.
 
-    ret = NE_Free(alloc, ptr[3]);
+    ret = NEA_Free(alloc, ptr[3]);
     ASSERT(ret == 0);
-    ret = NE_Free(alloc, ptr[5]);
+    ret = NEA_Free(alloc, ptr[5]);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
     ASSERT(count == 8);
 
-    ret = NE_Free(alloc, ptr[4]);
+    ret = NEA_Free(alloc, ptr[4]);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -510,12 +510,12 @@ void test_internal_list_state(void)
 
     // Deallocate invalid list
 
-    ret = NE_AllocEnd(NULL);
+    ret = NEA_AllocEnd(NULL);
     ASSERT(ret == -1);
 
     // Deallocate list correctly
 
-    ret = NE_AllocEnd(&alloc);
+    ret = NEA_AllocEnd(&alloc);
     ASSERT(ret == 0);
 }
 
@@ -529,18 +529,18 @@ void test_alloc_fill(void)
     int ret;
     int count;
     size_t size = POOL_SIZE / 32;
-    NEMemInfo info;
+    NEAMemInfo info;
 
     // Allocate forwards
 
     for (int i = 0; i < 32; i++)
     {
         uintptr_t addr = POOL_START_ADDR + size * i;
-        void *ptr = NE_Alloc(alloc, size);
+        void *ptr = NEA_Alloc(alloc, size);
         ASSERT(ptr == (void *)addr);
     }
 
-    ret = NE_MemGetInformation(alloc, &info);
+    ret = NEA_MemGetInformation(alloc, &info);
     ASSERT(ret == 0);
     ASSERT(info.free == 0);
     ASSERT(info.used == POOL_SIZE);
@@ -554,7 +554,7 @@ void test_alloc_fill(void)
     for (int i = 0; i < 32; i++)
     {
         uintptr_t addr = POOL_START_ADDR + size * i;
-        ret = NE_Free(alloc, (void *)addr);
+        ret = NEA_Free(alloc, (void *)addr);
         ASSERT(ret == 0);
     }
 
@@ -569,11 +569,11 @@ void test_alloc_fill(void)
     for (int i = 0; i < 32; i++)
     {
         uintptr_t addr = POOL_START_ADDR + size * (31 - i);
-        void *ptr = NE_AllocFromEnd(alloc, size);
+        void *ptr = NEA_AllocFromEnd(alloc, size);
         ASSERT(ptr == (void *)addr);
     }
 
-    ret = NE_MemGetInformation(alloc, &info);
+    ret = NEA_MemGetInformation(alloc, &info);
     ASSERT(ret == 0);
     ASSERT(info.free == 0);
     ASSERT(info.used == POOL_SIZE);
@@ -587,7 +587,7 @@ void test_alloc_fill(void)
     for (int i = 0; i < 32; i++)
     {
         uintptr_t addr = POOL_START_ADDR + size * i;
-        ret = NE_Free(alloc, (void *)addr);
+        ret = NEA_Free(alloc, (void *)addr);
         ASSERT(ret == 0);
     }
 
@@ -612,34 +612,34 @@ void test_alloc_range(void)
 
     // Try to allocate with invalid list
 
-    ret = NE_AllocAddress(NULL, POOL_START, 1024);
+    ret = NEA_AllocAddress(NULL, POOL_START, 1024);
     ASSERT(ret == -1);
 
     // Try to allocate invalid addresses
 
-    ret = NE_AllocAddress(alloc, NULL, 1024);
+    ret = NEA_AllocAddress(alloc, NULL, 1024);
     ASSERT(ret == -1);
 
-    ret = NE_AllocAddress(alloc, (void *)(POOL_START_ADDR - 1), 1024);
+    ret = NEA_AllocAddress(alloc, (void *)(POOL_START_ADDR - 1), 1024);
     ASSERT(ret == -2);
 
-    ret = NE_AllocAddress(alloc, POOL_END, 1024);
+    ret = NEA_AllocAddress(alloc, POOL_END, 1024);
     ASSERT(ret == -2);
 
     // Try to allocate zero bytes
 
-    ret = NE_AllocAddress(alloc, POOL_START, 0);
+    ret = NEA_AllocAddress(alloc, POOL_START, 0);
     ASSERT(ret == -1);
 
     // Try to allocate too many bytes
 
-    ret = NE_AllocAddress(alloc, POOL_START, POOL_SIZE + 1);
+    ret = NEA_AllocAddress(alloc, POOL_START, POOL_SIZE + 1);
     ASSERT(ret == -2);
 
     // Try to allocate the maximum size, ensure that the list is one chunk long
     // (it isn't needed to split it).
 
-    ret = NE_AllocAddress(alloc, POOL_START, POOL_SIZE);
+    ret = NEA_AllocAddress(alloc, POOL_START, POOL_SIZE);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -648,7 +648,7 @@ void test_alloc_range(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, POOL_START);
+    ret = NEA_Free(alloc, POOL_START);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -659,7 +659,7 @@ void test_alloc_range(void)
 
     // Try to allocate a chunk that leaves free space after the chunk
 
-    ret = NE_AllocAddress(alloc, POOL_START, POOL_SIZE / 2);
+    ret = NEA_AllocAddress(alloc, POOL_START, POOL_SIZE / 2);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -668,7 +668,7 @@ void test_alloc_range(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, POOL_START);
+    ret = NEA_Free(alloc, POOL_START);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -680,7 +680,7 @@ void test_alloc_range(void)
     // Try to allocate a chunk that leaves free space before the chunk
 
     void *half = (void *)(POOL_START_ADDR + (POOL_SIZE / 2));
-    ret = NE_AllocAddress(alloc, half, POOL_SIZE / 2);
+    ret = NEA_AllocAddress(alloc, half, POOL_SIZE / 2);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -689,7 +689,7 @@ void test_alloc_range(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, half);
+    ret = NEA_Free(alloc, half);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -702,7 +702,7 @@ void test_alloc_range(void)
 
     void *quarter = (void *)(POOL_START_ADDR + (POOL_SIZE / 4));
 
-    ret = NE_AllocAddress(alloc, quarter, POOL_SIZE / 2);
+    ret = NEA_AllocAddress(alloc, quarter, POOL_SIZE / 2);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -711,7 +711,7 @@ void test_alloc_range(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, quarter);
+    ret = NEA_Free(alloc, quarter);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -722,24 +722,24 @@ void test_alloc_range(void)
 
     // Try to allocate in a chunk that is used
 
-    void *ptr = NE_Alloc(alloc, POOL_SIZE / 2);
+    void *ptr = NEA_Alloc(alloc, POOL_SIZE / 2);
     ASSERT(ptr == POOL_START);
 
-    ret = NE_AllocAddress(alloc, POOL_START, POOL_SIZE / 4);
+    ret = NEA_AllocAddress(alloc, POOL_START, POOL_SIZE / 4);
     ASSERT(ret == -2);
 
-    ret = NE_Free(alloc, ptr);
+    ret = NEA_Free(alloc, ptr);
     ASSERT(ret == 0);
 
     // Try to allocate in a chunk that is free, but small
 
-    ptr = NE_AllocFromEnd(alloc, POOL_SIZE / 2);
+    ptr = NEA_AllocFromEnd(alloc, POOL_SIZE / 2);
     ASSERT(ptr == half);
 
-    ret = NE_AllocAddress(alloc, POOL_START, 3 * POOL_SIZE / 4);
+    ret = NEA_AllocAddress(alloc, POOL_START, 3 * POOL_SIZE / 4);
     ASSERT(ret == -2);
 
-    ret = NE_Free(alloc, half);
+    ret = NEA_Free(alloc, half);
     ASSERT(ret == 0);
 
     // Try to allocate in a free chunk surrounded by used chunks, to verify that
@@ -747,13 +747,13 @@ void test_alloc_range(void)
 
     void *three_quarters = (void *)(POOL_START_ADDR + (3 * POOL_SIZE / 4));
 
-    ptr = NE_Alloc(alloc, POOL_SIZE / 4);
+    ptr = NEA_Alloc(alloc, POOL_SIZE / 4);
     ASSERT(ptr == POOL_START);
 
-    ptr = NE_AllocFromEnd(alloc, POOL_SIZE / 4);
+    ptr = NEA_AllocFromEnd(alloc, POOL_SIZE / 4);
     ASSERT(ptr == three_quarters);
 
-    ret = NE_AllocAddress(alloc, half, POOL_SIZE / 8);
+    ret = NEA_AllocAddress(alloc, half, POOL_SIZE / 8);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -762,13 +762,13 @@ void test_alloc_range(void)
     ret = verify_consistency(alloc, POOL_START, POOL_END);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, half);
+    ret = NEA_Free(alloc, half);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, POOL_START);
+    ret = NEA_Free(alloc, POOL_START);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, three_quarters);
+    ret = NEA_Free(alloc, three_quarters);
     ASSERT(ret == 0);
 
     count = count_num_chunks(alloc);
@@ -780,7 +780,7 @@ void test_alloc_range(void)
     POOL_DEINITIALIZE();
 }
 
-// Tests for NE_AllocFindInRange()
+// Tests for NEA_AllocFindInRange()
 void test_find_range(void)
 {
     printf("%s\n", __func__);
@@ -794,16 +794,16 @@ void test_find_range(void)
 
     // Invalid arguments
 
-    found = NE_AllocFindInRange(NULL, POOL_START, POOL_END, 1024);
+    found = NEA_AllocFindInRange(NULL, POOL_START, POOL_END, 1024);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, NULL, POOL_END, 1024);
+    found = NEA_AllocFindInRange(alloc, NULL, POOL_END, 1024);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, NULL, 1024);
+    found = NEA_AllocFindInRange(alloc, POOL_START, NULL, 1024);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, 0);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, 0);
     ASSERT(found == NULL);
 
     // A few tests with a completely empty pool
@@ -811,39 +811,39 @@ void test_find_range(void)
 
     // Get memory from the start of a chunk
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, 1024);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, 1024);
     ASSERT(found == POOL_START);
 
     // Get memory from the middle of a chunk
 
-    found = NE_AllocFindInRange(alloc, half, POOL_END, 1024);
+    found = NEA_AllocFindInRange(alloc, half, POOL_END, 1024);
     ASSERT(found == half);
 
     // Ask for too much memory with an empty pool
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE + 1);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE + 1);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, half, POOL_END, POOL_SIZE);
+    found = NEA_AllocFindInRange(alloc, half, POOL_END, POOL_SIZE);
     ASSERT(found == NULL);
 
     // The user requests to search in a range that starts before the memory pool
 
     void *before_start = (void *)(POOL_START_ADDR - 1024);
 
-    found = NE_AllocFindInRange(alloc, before_start, POOL_END, POOL_SIZE);
+    found = NEA_AllocFindInRange(alloc, before_start, POOL_END, POOL_SIZE);
     ASSERT(found == POOL_START);
 
     // The range requested by the user ends before the memory pool
 
-    found = NE_AllocFindInRange(alloc, before_start, POOL_START, 64);
+    found = NEA_AllocFindInRange(alloc, before_start, POOL_START, 64);
     ASSERT(found == NULL);
 
     // The range requested by the user starts after the memory pool
 
     void *after_end = (void *)(POOL_END_ADDR + 1024);
 
-    found = NE_AllocFindInRange(alloc, POOL_END, after_end, 64);
+    found = NEA_AllocFindInRange(alloc, POOL_END, after_end, 64);
     ASSERT(found == NULL);
 
     // Now, fill the memory pool with a few chunks of data and run more tests
@@ -861,68 +861,68 @@ void test_find_range(void)
     // |                 |      USED       |                 |      USED       |
     // +-----------------+-----------------+-----------------+-----------------+
 
-    ret = NE_AllocAddress(alloc, one_quarter, quarter);
+    ret = NEA_AllocAddress(alloc, one_quarter, quarter);
     ASSERT(ret == 0);
 
-    ret = NE_AllocAddress(alloc, three_quarters, quarter);
+    ret = NEA_AllocAddress(alloc, three_quarters, quarter);
     ASSERT(ret == 0);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, quarter);
     ASSERT(found == POOL_START);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE / 2);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE / 2);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, one_eight, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, one_eight, POOL_END, quarter);
     ASSERT(found == half);
 
-    found = NE_AllocFindInRange(alloc, three_eights, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, three_eights, POOL_END, quarter);
     ASSERT(found == half);
 
-    found = NE_AllocFindInRange(alloc, three_eights, POOL_END, POOL_SIZE / 2);
+    found = NEA_AllocFindInRange(alloc, three_eights, POOL_END, POOL_SIZE / 2);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, five_eights, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, five_eights, POOL_END, quarter);
     ASSERT(found == NULL);
 
-    ret = NE_Free(alloc, one_quarter);
+    ret = NEA_Free(alloc, one_quarter);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, three_quarters);
+    ret = NEA_Free(alloc, three_quarters);
     ASSERT(ret == 0);
 
     // +-----------------+-----------------+-----------------+-----------------+
     // |      USED       |                 |      USED       |                 |
     // +-----------------+-----------------+-----------------+-----------------+
 
-    ret = NE_AllocAddress(alloc, POOL_START, quarter);
+    ret = NEA_AllocAddress(alloc, POOL_START, quarter);
     ASSERT(ret == 0);
 
-    ret = NE_AllocAddress(alloc, half, quarter);
+    ret = NEA_AllocAddress(alloc, half, quarter);
     ASSERT(ret == 0);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, quarter);
     ASSERT(found == one_quarter);
 
-    found = NE_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE / 2);
+    found = NEA_AllocFindInRange(alloc, POOL_START, POOL_END, POOL_SIZE / 2);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, one_eight, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, one_eight, POOL_END, quarter);
     ASSERT(found == one_quarter);
 
-    found = NE_AllocFindInRange(alloc, three_eights, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, three_eights, POOL_END, quarter);
     ASSERT(found == three_quarters);
 
-    found = NE_AllocFindInRange(alloc, three_eights, POOL_END, POOL_SIZE / 2);
+    found = NEA_AllocFindInRange(alloc, three_eights, POOL_END, POOL_SIZE / 2);
     ASSERT(found == NULL);
 
-    found = NE_AllocFindInRange(alloc, five_eights, POOL_END, quarter);
+    found = NEA_AllocFindInRange(alloc, five_eights, POOL_END, quarter);
     ASSERT(found == three_quarters);
 
-    ret = NE_Free(alloc, POOL_START);
+    ret = NEA_Free(alloc, POOL_START);
     ASSERT(ret == 0);
 
-    ret = NE_Free(alloc, half);
+    ret = NEA_Free(alloc, half);
     ASSERT(ret == 0);
 
     POOL_DEINITIALIZE();
@@ -967,9 +967,9 @@ void test_stress(void)
             void *p;
 
             if (size & 1)
-                p = NE_Alloc(alloc, size);
+                p = NEA_Alloc(alloc, size);
             else
-                p = NE_AllocFromEnd(alloc, size);
+                p = NEA_AllocFromEnd(alloc, size);
 
             ASSERT(p != NULL);
 
@@ -978,7 +978,7 @@ void test_stress(void)
         else
         {
             // Allocated pointer. Deallocate it.
-            ret = NE_Free(alloc, ptr[selected]);
+            ret = NEA_Free(alloc, ptr[selected]);
             ASSERT(ret == 0);
             ptr[selected] = NULL;
         }
@@ -998,7 +998,7 @@ void test_stress(void)
 
 int main(int argc, char *argv[])
 {
-    // This test doesn't use Nitro Engine at all. Initialize the default console
+    // This test doesn't use Nitro Engine Advanced at all. Initialize the default console
     // of libnds to print the results of the tests.
     consoleDemoInit();
 

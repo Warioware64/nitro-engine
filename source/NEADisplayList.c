@@ -2,21 +2,21 @@
 //
 // Copyright (c) 2023 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 #include <nds.h>
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-void NE_DisplayListDrawDMA_GFX_FIFO(const void *list)
+void NEA_DisplayListDrawDMA_GFX_FIFO(const void *list)
 {
     const uint32_t *p = list;
 
-    NE_AssertPointer(p, "NULL display list pointer");
+    NEA_AssertPointer(p, "NULL display list pointer");
 
     uint32_t words = *p++;
 
-    NE_Assert(words > 0, "Empty display list");
+    NEA_Assert(words > 0, "Empty display list");
 
     DC_FlushRange(p, words * 4);
 
@@ -25,7 +25,7 @@ void NE_DisplayListDrawDMA_GFX_FIFO(const void *list)
     // conditions, simply ensure that there are no DMA channels active.
     while (dmaBusy(0) || dmaBusy(1) || dmaBusy(2) || dmaBusy(3));
 
-#ifdef NE_BLOCKSDS
+#ifdef NEA_BLOCKSDS
     dmaSetParams(0, p, (void *)&GFX_FIFO, DMA_FIFO | words);
 #else
     DMA_SRC(0) = (uint32_t)p;
@@ -36,15 +36,15 @@ void NE_DisplayListDrawDMA_GFX_FIFO(const void *list)
     while (dmaBusy(0));
 }
 
-void NE_DisplayListDrawCPU(const void *list)
+void NEA_DisplayListDrawCPU(const void *list)
 {
     const uint32_t *p = list;
 
-    NE_AssertPointer(p, "NULL display list pointer");
+    NEA_AssertPointer(p, "NULL display list pointer");
 
     uint32_t words = *p++;
 
-    NE_Assert(words > 0, "Empty display list");
+    NEA_Assert(words > 0, "Empty display list");
 
     while (words--)
         GFX_FIFO = *p++;
@@ -52,26 +52,26 @@ void NE_DisplayListDrawCPU(const void *list)
 
 typedef void (*ne_display_list_draw_fn)(const void *);
 
-static ne_display_list_draw_fn ne_display_list_draw = NE_DisplayListDrawDMA_GFX_FIFO;
+static ne_display_list_draw_fn ne_display_list_draw = NEA_DisplayListDrawDMA_GFX_FIFO;
 
-void NE_DisplayListSetDefaultFunction(NE_DisplayListDrawFunction type)
+void NEA_DisplayListSetDefaultFunction(NEA_DisplayListDrawFunction type)
 {
-    if (type == NE_DL_CPU)
+    if (type == NEA_DL_CPU)
     {
-        ne_display_list_draw = NE_DisplayListDrawCPU;
+        ne_display_list_draw = NEA_DisplayListDrawCPU;
     }
-    else if (type == NE_DL_DMA_GFX_FIFO)
+    else if (type == NEA_DL_DMA_GFX_FIFO)
     {
-        ne_display_list_draw = NE_DisplayListDrawDMA_GFX_FIFO;
+        ne_display_list_draw = NEA_DisplayListDrawDMA_GFX_FIFO;
     }
     else
     {
-        NE_Assert(0, "Invalid display list function type");
-        ne_display_list_draw = NE_DisplayListDrawDMA_GFX_FIFO;
+        NEA_Assert(0, "Invalid display list function type");
+        ne_display_list_draw = NEA_DisplayListDrawDMA_GFX_FIFO;
     }
 }
 
-void NE_DisplayListDrawDefault(const void *list)
+void NEA_DisplayListDrawDefault(const void *list)
 {
     ne_display_list_draw(list);
 }

@@ -2,12 +2,12 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 typedef struct {
-    NE_Camera *Camera;
+    NEA_Camera *Camera;
 } SceneData;
 
 void Draw3DScene(void *arg)
@@ -15,24 +15,24 @@ void Draw3DScene(void *arg)
     SceneData *Scene = arg;
 
     // Use camera and draw polygon.
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
     // Begin drawing
-    NE_PolyBegin(GL_QUAD);
+    NEA_PolyBegin(GL_QUAD);
 
-        NE_PolyColor(NE_Red);    // Set next vertices color
-        NE_PolyVertex(-1, 1, 0); // Send vertex
+        NEA_PolyColor(NEA_Red);    // Set next vertices color
+        NEA_PolyVertex(-1, 1, 0); // Send vertex
 
-        NE_PolyColor(NE_Green);
-        NE_PolyVertex(-1, -1, 0);
+        NEA_PolyColor(NEA_Green);
+        NEA_PolyVertex(-1, -1, 0);
 
-        NE_PolyColor(NE_Yellow);
-        NE_PolyVertex(1, -1, 0);
+        NEA_PolyColor(NEA_Yellow);
+        NEA_PolyVertex(1, -1, 0);
 
-        NE_PolyColor(NE_Blue);
-        NE_PolyVertex(1, 1, 0);
+        NEA_PolyColor(NEA_Blue);
+        NEA_PolyVertex(1, 1, 0);
 
-    NE_PolyEnd();
+    NEA_PolyEnd();
 }
 
 int main(int argc, char *argv[])
@@ -40,23 +40,23 @@ int main(int argc, char *argv[])
     SceneData Scene = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
-    NE_Init3D();
+    NEA_Init3D();
 
-    Scene.Camera = NE_CameraCreate();
+    Scene.Camera = NEA_CameraCreate();
 
-    NE_CameraSet(Scene.Camera,
+    NEA_CameraSet(Scene.Camera,
                  0, 0, 2,
                  0, 0, 0,
                  0, 1, 0);
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
-        NE_ProcessArg(Draw3DScene, &Scene);
+        NEA_ProcessArg(Draw3DScene, &Scene);
     }
 
     return 0;

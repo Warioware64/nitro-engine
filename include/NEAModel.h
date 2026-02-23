@@ -2,12 +2,12 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_MODEL_H__
-#define NE_MODEL_H__
+#ifndef NEA_MODEL_H__
+#define NEA_MODEL_H__
 
-/// @file   NEModel.h
+/// @file   NEAModel.h
 /// @brief  Functions to draw and handle models.
 
 /// @defgroup model_system Model handling system
@@ -16,39 +16,39 @@
 ///
 /// @{
 
-#define NE_NO_TEXTURE       -1 ///< Value that represents not having a texture
-#define NE_NO_MESH          -1 ///< Value that represents not having a mesh
+#define NEA_NO_TEXTURE       -1 ///< Value that represents not having a texture
+#define NEA_NO_MESH          -1 ///< Value that represents not having a mesh
 
-#define NE_DEFAULT_MODELS   512 ///< Default max number of models
+#define NEA_DEFAULT_MODELS   512 ///< Default max number of models
 
 /// Possible animation types.
 typedef enum {
-    NE_ANIM_LOOP,    ///< When the end is reached it jumps to the start.
-    NE_ANIM_ONESHOT, ///< When the end is reached it stops.
-} NE_AnimationType;
+    NEA_ANIM_LOOP,    ///< When the end is reached it jumps to the start.
+    NEA_ANIM_ONESHOT, ///< When the end is reached it stops.
+} NEA_AnimationType;
 
 /// Holds information of the animation of a model.
 typedef struct {
-    NE_Animation *animation; ///< Pointer to animation file
-    NE_AnimationType type;   ///< Animation type.
+    NEA_Animation *animation; ///< Pointer to animation file
+    NEA_AnimationType type;   ///< Animation type.
     int32_t speed;           ///< Animation speed (f32).
     int32_t currframe;       ///< Current frame. It can be between frames (f32).
     int32_t numframes;       ///< Number of frames in the animation (int).
-} NE_AnimInfo;
+} NEA_AnimInfo;
 
 /// Possible model types.
 typedef enum {
-    NE_Static,  ///< Not animated.
-    NE_Animated ///< Animated.
-} NE_ModelType;
+    NEA_Static,  ///< Not animated.
+    NEA_Animated ///< Animated.
+} NEA_ModelType;
 
 /// Holds information of a model.
 typedef struct {
-    NE_ModelType modeltype;   ///< Model type (static or animated)
+    NEA_ModelType modeltype;   ///< Model type (static or animated)
     int meshindex;            ///< Index of mesh (static or DSM)
-    NE_AnimInfo *animinfo[2]; ///< Animation information (two can be blended)
+    NEA_AnimInfo *animinfo[2]; ///< Animation information (two can be blended)
     int32_t anim_blend;       ///< Animation blend factor
-    NE_Material *texture;     ///< Material used by this model
+    NEA_Material *texture;     ///< Material used by this model
     int x;                    ///< X position of the model (f32)
     int y;                    ///< Y position of the model (f32)
     int z;                    ///< Z position of the model (f32)
@@ -59,65 +59,65 @@ typedef struct {
     int sy;                   ///< Y scale of the model (f32)
     int sz;                   ///< Z scale of the model (f32)
     m4x3 *mat;                ///< Transformation matrix assigned by the user.
-} NE_Model;
+} NEA_Model;
 
 /// Creates a new model object.
 ///
 /// @param type Model type (static or animated).
 /// @return Pointer to the newly created camera.
-NE_Model *NE_ModelCreate(NE_ModelType type);
+NEA_Model *NEA_ModelCreate(NEA_ModelType type);
 
 /// Deletes a model.
 ///
 /// @param model Pointer to the model.
-void NE_ModelDelete(NE_Model *model);
+void NEA_ModelDelete(NEA_Model *model);
 
 /// Marks the mesh of a model to be freed when the model is deleted.
 ///
-/// When a model is loaded with NE_ModelLoadStaticMeshFAT() or
-/// NE_ModelLoadDSMFAT(), the mesh is read from storage into RAM to a buffer
+/// When a model is loaded with NEA_ModelLoadStaticMeshFAT() or
+/// NEA_ModelLoadDSMFAT(), the mesh is read from storage into RAM to a buffer
 /// allocated witn malloc(). This buffer is freed with free() when
-/// NE_ModelDelete() is called.
+/// NEA_ModelDelete() is called.
 ///
-/// If the mesh is loaded using NE_ModelLoadStaticMesh() or NE_ModelLoadDSM(),
-/// Nitro Engine can't tell if the user has loaded it from storage, or if it has
+/// If the mesh is loaded using NEA_ModelLoadStaticMesh() or NEA_ModelLoadDSM(),
+/// Nitro Engine Advanced can't tell if the user has loaded it from storage, or if it has
 /// been included in the NDS file as data. If the user has loaded the mesh into
 /// a buffer allocated with malloc(), the user is responsible for calling free()
-/// after NE_ModelDelete().
+/// after NEA_ModelDelete().
 ///
-/// NE_ModelFreeMeshWhenDeleted() gives you the option of skipping that last
-/// free(). After you call this function, NE_ModelDelete() will call free() for
+/// NEA_ModelFreeMeshWhenDeleted() gives you the option of skipping that last
+/// free(). After you call this function, NEA_ModelDelete() will call free() for
 /// you automatically so that you don't have to keep track of the pointer in the
 /// logic of your program.
 ///
 /// @param model Pointer to the model.
-void NE_ModelFreeMeshWhenDeleted(NE_Model *model);
+void NEA_ModelFreeMeshWhenDeleted(NEA_Model *model);
 
 /// Assign a display list in RAM to a static model.
 ///
 /// @param model Pointer to the model.
 /// @param pointer Pointer to the display list.
 /// @return It returns 1 on success, 0 on error.
-int NE_ModelLoadStaticMesh(NE_Model *model, const void *pointer);
+int NEA_ModelLoadStaticMesh(NEA_Model *model, const void *pointer);
 
 /// Loads a display list from a filesystem and assigns it to a static model.
 ///
 /// @param model Pointer to the model.
 /// @param path Path to the display list.
 /// @return It returns 1 on success, 0 on error.
-int NE_ModelLoadStaticMeshFAT(NE_Model *model, const char *path);
+int NEA_ModelLoadStaticMeshFAT(NEA_Model *model, const char *path);
 
 /// Assign a material to a model.
 ///
 /// @param model Pointer to the model.
 /// @param material Pointer to the material.
-void NE_ModelSetMaterial(NE_Model *model, NE_Material *material);
+void NEA_ModelSetMaterial(NEA_Model *model, NEA_Material *material);
 
 /// Assign an animation to a model.
 ///
 /// @param model Pointer to the model.
 /// @param anim Pointer to the animation.
-void NE_ModelSetAnimation(NE_Model *model, NE_Animation *anim);
+void NEA_ModelSetAnimation(NEA_Model *model, NEA_Animation *anim);
 
 /// Assign a secondary animation to a model.
 ///
@@ -126,34 +126,34 @@ void NE_ModelSetAnimation(NE_Model *model, NE_Animation *anim);
 /// bit more of CPU to display, though.
 ///
 /// Whenever you want to go back to having one animation, you have to use
-/// NE_ModelAnimSecondaryClear(). This function lets you stop blending
+/// NEA_ModelAnimSecondaryClear(). This function lets you stop blending
 /// animations, and it gives you the option to preserve the main or the
 /// secondary animation.
 ///
-/// Function NE_ModelAnimSecondarySetFactor() lets you specify a value to
+/// Function NEA_ModelAnimSecondarySetFactor() lets you specify a value to
 /// specify the blending factor, where 0.0 means "display the main animation
 /// only" and 1.0 means "display the secondary animation only". The initial
-/// value after calling NE_ModelAnimSecondaryStart() is 0.0.
+/// value after calling NEA_ModelAnimSecondaryStart() is 0.0.
 ///
 /// @param model Pointer to the model.
 /// @param anim Pointer to the animation.
-void NE_ModelSetAnimationSecondary(NE_Model *model, NE_Animation *anim);
+void NEA_ModelSetAnimationSecondary(NEA_Model *model, NEA_Animation *anim);
 
 /// Draw a model.
 ///
 /// @param model Pointer to the model.
-void NE_ModelDraw(const NE_Model *model);
+void NEA_ModelDraw(const NEA_Model *model);
 
 /// Clone model.
 ///
 /// This clones the mesh, including the animation, the material it uses. It
 /// doesn't actually duplicate the memory used in RAM to store the mesh, and it
-/// keeps track of how many models use the same mesh. NE_ModelDelete() only
+/// keeps track of how many models use the same mesh. NEA_ModelDelete() only
 /// frees the mesh when the user deletes the last model that uses it.
 ///
 /// @param dest Pointer to the destination model.
 /// @param source Pointer to the source model.
-void NE_ModelClone(NE_Model *dest, NE_Model *source);
+void NEA_ModelClone(NEA_Model *dest, NEA_Model *source);
 
 /// Set position of a model.
 ///
@@ -161,7 +161,7 @@ void NE_ModelClone(NE_Model *dest, NE_Model *source);
 /// @param x (x, y, z) Coordinates (f32).
 /// @param y (x, y, z) Coordinates (f32).
 /// @param z (x, y, z) Coordinates (f32).
-void NE_ModelSetCoordI(NE_Model *model, int x, int y, int z);
+void NEA_ModelSetCoordI(NEA_Model *model, int x, int y, int z);
 
 /// Set position of a model.
 ///
@@ -169,8 +169,8 @@ void NE_ModelSetCoordI(NE_Model *model, int x, int y, int z);
 /// @param x (x, y, z) Coordinates (float).
 /// @param y (x, y, z) Coordinates (float).
 /// @param z (x, y, z) Coordinates (float).
-#define NE_ModelSetCoord(m, x, y, z) \
-    NE_ModelSetCoordI(m, floattof32(x), floattof32(y), floattof32(z))
+#define NEA_ModelSetCoord(m, x, y, z) \
+    NEA_ModelSetCoordI(m, floattof32(x), floattof32(y), floattof32(z))
 
 /// Set scale of a model.
 ///
@@ -178,7 +178,7 @@ void NE_ModelSetCoordI(NE_Model *model, int x, int y, int z);
 /// @param x (x, y, z) Scale (f32).
 /// @param y (x, y, z) Scale (f32).
 /// @param z (x, y, z) Scale (f32).
-void NE_ModelScaleI(NE_Model *model, int x, int y, int z);
+void NEA_ModelScaleI(NEA_Model *model, int x, int y, int z);
 
 /// Set scale of a model.
 ///
@@ -186,8 +186,8 @@ void NE_ModelScaleI(NE_Model *model, int x, int y, int z);
 /// @param x (x, y, z) Scale (float).
 /// @param y (x, y, z) Scale (float).
 /// @param z (x, y, z) Scale (float).
-#define NE_ModelScale(m, x, y, z) \
-    NE_ModelScaleI(m, floattof32(x), floattof32(y), floattof32(z))
+#define NEA_ModelScale(m, x, y, z) \
+    NEA_ModelScaleI(m, floattof32(x), floattof32(y), floattof32(z))
 
 /// Translate a model.
 ///
@@ -195,7 +195,7 @@ void NE_ModelScaleI(NE_Model *model, int x, int y, int z);
 /// @param x (x, y, z) Translate vector (f32).
 /// @param y (x, y, z) Translate vector (f32).
 /// @param z (x, y, z) Translate vector (f32).
-void NE_ModelTranslateI(NE_Model *model, int x, int y, int z);
+void NEA_ModelTranslateI(NEA_Model *model, int x, int y, int z);
 
 /// Translate a model.
 ///
@@ -203,8 +203,8 @@ void NE_ModelTranslateI(NE_Model *model, int x, int y, int z);
 /// @param x (x, y, z) Translate vector (float).
 /// @param y (x, y, z) Translate vector (float).
 /// @param z (x, y, z) Translate vector (float).
-#define NE_ModelTranslate(m, x, y, z) \
-    NE_ModelTranslateI(m, floattof32(x), floattof32(y), floattof32(z))
+#define NEA_ModelTranslate(m, x, y, z) \
+    NEA_ModelTranslateI(m, floattof32(x), floattof32(y), floattof32(z))
 
 /// Set rotation of a model.
 ///
@@ -214,7 +214,7 @@ void NE_ModelTranslateI(NE_Model *model, int x, int y, int z);
 /// @param rx Rotation by X axis (0 - 511).
 /// @param ry Rotation by Y axis (0 - 511).
 /// @param rz Rotation by Z axis (0 - 511).
-void NE_ModelSetRot(NE_Model *model, int rx, int ry, int rz);
+void NEA_ModelSetRot(NEA_Model *model, int rx, int ry, int rz);
 
 /// Rotate a model.
 ///
@@ -224,7 +224,7 @@ void NE_ModelSetRot(NE_Model *model, int rx, int ry, int rz);
 /// @param rx Rotation by X axis (0 - 511).
 /// @param ry Rotation by Y axis (0 - 511).
 /// @param rz Rotation by Z axis (0 - 511).
-void NE_ModelRotate(NE_Model *model, int rx, int ry, int rz);
+void NEA_ModelRotate(NEA_Model *model, int rx, int ry, int rz);
 
 /// Assigns a 4x3 transformation matrix to a model.
 ///
@@ -237,7 +237,7 @@ void NE_ModelRotate(NE_Model *model, int rx, int ry, int rz);
 /// @param model Pointer to the model.
 /// @param mat Matrix to be used.
 /// @return Returns 1 on success, 0 on failure.
-int NE_ModelSetMatrix(NE_Model *model, m4x3 *mat);
+int NEA_ModelSetMatrix(NEA_Model *model, m4x3 *mat);
 
 /// Clears the 4x3 transformation matrix of a model.
 ///
@@ -245,10 +245,10 @@ int NE_ModelSetMatrix(NE_Model *model, m4x3 *mat);
 /// values.
 ///
 /// @param model Pointer to the model.
-void NE_ModelClearMatrix(NE_Model *model);
+void NEA_ModelClearMatrix(NEA_Model *model);
 
 /// Update internal state of the animation of all models.
-void NE_ModelAnimateAll(void);
+void NEA_ModelAnimateAll(void);
 
 /// Starts the animation of an animated model.
 ///
@@ -258,16 +258,16 @@ void NE_ModelAnimateAll(void);
 /// frame.
 ///
 /// @param model Pointer to the model.
-/// @param type Animation type (NE_ANIM_LOOP / NE_ANIM_ONESHOT).
+/// @param type Animation type (NEA_ANIM_LOOP / NEA_ANIM_ONESHOT).
 /// @param speed Animation speed. (f32)
-void NE_ModelAnimStart(NE_Model *model, NE_AnimationType type, int32_t speed);
+void NEA_ModelAnimStart(NEA_Model *model, NEA_AnimationType type, int32_t speed);
 
 /// Starts the secondary animation of an animated model.
 ///
 /// @param model Pointer to the model.
-/// @param type Animation type (NE_ANIM_LOOP / NE_ANIM_ONESHOT).
+/// @param type Animation type (NEA_ANIM_LOOP / NEA_ANIM_ONESHOT).
 /// @param speed Animation speed. (f32)
-void NE_ModelAnimSecondaryStart(NE_Model *model, NE_AnimationType type,
+void NEA_ModelAnimSecondaryStart(NEA_Model *model, NEA_AnimationType type,
                                 int32_t speed);
 
 /// Sets animation speed.
@@ -279,37 +279,37 @@ void NE_ModelAnimSecondaryStart(NE_Model *model, NE_AnimationType type,
 ///
 /// @param model Pointer to the model.
 /// @param speed New speed. (f32)
-void NE_ModelAnimSetSpeed(NE_Model *model, int32_t speed);
+void NEA_ModelAnimSetSpeed(NEA_Model *model, int32_t speed);
 
 /// Sets animation speed of the secondary animation.
 ///
 /// @param model Pointer to the model.
 /// @param speed New speed. (f32)
-void NE_ModelAnimSecondarySetSpeed(NE_Model *model, int32_t speed);
+void NEA_ModelAnimSecondarySetSpeed(NEA_Model *model, int32_t speed);
 
 /// Returns the current frame of an animated model.
 ///
 /// @param model Pointer to the model.
 /// @return Returns the frame in f32 format.
-int32_t NE_ModelAnimGetFrame(const NE_Model *model);
+int32_t NEA_ModelAnimGetFrame(const NEA_Model *model);
 
 /// Returns the current frame of the secondary animation of an animated model.
 ///
 /// @param model Pointer to the model.
 /// @return Returns the frame in f32 format.
-int32_t NE_ModelAnimSecondaryGetFrame(const NE_Model *model);
+int32_t NEA_ModelAnimSecondaryGetFrame(const NEA_Model *model);
 
 /// Sets the current frame of an animated model.
 ///
 /// @param model Pointer to the model.
 /// @param frame Frame to set. (f32)
-void NE_ModelAnimSetFrame(NE_Model *model, int32_t frame);
+void NEA_ModelAnimSetFrame(NEA_Model *model, int32_t frame);
 
 /// Sets the current frame of the secondary animation of an animated model.
 ///
 /// @param model Pointer to the model.
 /// @param frame Frame to set. (f32)
-void NE_ModelAnimSecondarySetFrame(NE_Model *model, int32_t frame);
+void NEA_ModelAnimSecondarySetFrame(NEA_Model *model, int32_t frame);
 
 /// Sets the current blending factor between animations.
 ///
@@ -318,7 +318,7 @@ void NE_ModelAnimSecondarySetFrame(NE_Model *model, int32_t frame);
 ///
 /// @param model Pointer to the model.
 /// @param factor Blending factor to set. (f32)
-void NE_ModelAnimSecondarySetFactor(NE_Model *model, int32_t factor);
+void NEA_ModelAnimSecondarySetFactor(NEA_Model *model, int32_t factor);
 
 /// Clears the secondary animation of a model.
 ///
@@ -329,35 +329,35 @@ void NE_ModelAnimSecondarySetFactor(NE_Model *model, int32_t factor);
 /// @param model Pointer to the model.
 /// @param replace_base_anim Set to true to replace the base animation by the
 ///                          secondary animation.
-void NE_ModelAnimSecondaryClear(NE_Model *model, bool replace_base_anim);
+void NEA_ModelAnimSecondaryClear(NEA_Model *model, bool replace_base_anim);
 
 /// Loads a DSM file stored in RAM to a model.
 ///
 /// @param model Pointer to the model.
 /// @param pointer Pointer to the file.
 /// @return It returns 1 on success, 0 on error.
-int NE_ModelLoadDSM(NE_Model *model, const void *pointer);
+int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer);
 
 /// Loads a DSM file stored in a filesystem to a model.
 ///
 /// @param model Pointer to the model.
 /// @param path Path to the file.
 /// @return It returns 1 on success, 0 on error.
-int NE_ModelLoadDSMFAT(NE_Model *model, const char *path);
+int NEA_ModelLoadDSMFAT(NEA_Model *model, const char *path);
 
 /// Deletes all models and frees all memory used by them.
-void NE_ModelDeleteAll(void);
+void NEA_ModelDeleteAll(void);
 
 /// Resets the model system and sets the maximun number of models.
 ///
 /// @param max_models Number of models. If it is lower than 1, it will create
-///                   space for NE_DEFAULT_MODELS.
+///                   space for NEA_DEFAULT_MODELS.
 /// @return Returns 0 on success.
-int NE_ModelSystemReset(int max_models);
+int NEA_ModelSystemReset(int max_models);
 
 /// Ends model system and frees all memory used by it.
-void NE_ModelSystemEnd(void);
+void NEA_ModelSystemEnd(void);
 
 /// @}
 
-#endif // NE_MODEL_H__
+#endif // NEA_MODEL_H__

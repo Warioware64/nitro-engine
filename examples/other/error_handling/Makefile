@@ -1,7 +1,7 @@
 # This is a minimal makefile only used for the examples. If you want a makefile
 # for your project, take one from the templates inside examples/templates.
 
-DEFINES		:= -DNE_DEBUG
-LIBS		:= -lNE_debug -lnds9 -lc
+DEFINES		:= -DNEA_DEBUG
+LIBS		:= -lNEA_debug -lnds9 -lc
 
 include ../../Makefile.example

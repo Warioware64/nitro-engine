@@ -2,28 +2,28 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 #include <stdbool.h>
 #include <stdio.h>
 
 #include <filesystem.h>
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Model;
+    NEA_Camera *Camera;
+    NEA_Model *Model;
 } SceneData;
 
 void Draw3DScene(void *arg)
 {
     SceneData *Scene = arg;
 
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
-    NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_NONE, 0);
-    NE_ModelDraw(Scene->Model);
+    NEA_PolyFormat(31, 0, NEA_LIGHT_0, NEA_CULL_NONE, 0);
+    NEA_ModelDraw(Scene->Model);
 }
 
 void WaitLoop(void)
@@ -42,12 +42,12 @@ int main(int argc, char *argv[])
     SceneData Scene = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
-    NE_Init3D();
+    NEA_Init3D();
     // libnds uses VRAM_C for the text console, reserve A and B only
-    NE_TextureSystemReset(0, 0, NE_VRAM_AB);
+    NEA_TextureSystemReset(0, 0, NEA_VRAM_AB);
     // Init console in non-3D screen
     consoleDemoInit();
 
@@ -59,32 +59,32 @@ int main(int argc, char *argv[])
     }
 
     // Allocate space for objects...
-    Scene.Model = NE_ModelCreate(NE_Animated);
-    Scene.Camera = NE_CameraCreate();
-    NE_Material *Material = NE_MaterialCreate();
-    NE_Animation *Animation = NE_AnimationCreate();
+    Scene.Model = NEA_ModelCreate(NEA_Animated);
+    Scene.Camera = NEA_CameraCreate();
+    NEA_Material *Material = NEA_MaterialCreate();
+    NEA_Animation *Animation = NEA_AnimationCreate();
 
     // Setup camera
-    NE_CameraSet(Scene.Camera,
+    NEA_CameraSet(Scene.Camera,
                  6, 3, -4,
                  0, 3, 0,
                  0, 1, 0);
 
-    if (NE_ModelLoadDSMFAT(Scene.Model, "robot.dsm") == 0)
+    if (NEA_ModelLoadDSMFAT(Scene.Model, "robot.dsm") == 0)
     {
         printf("Couldn't load model...");
         WaitLoop();
         return 0;
     }
 
-    if (NE_AnimationLoadFAT(Animation, "robot_wave.dsa") == 0)
+    if (NEA_AnimationLoadFAT(Animation, "robot_wave.dsa") == 0)
     {
         printf("Couldn't load animation...");
         WaitLoop();
         return 0;
     }
 
-    if (NE_MaterialTexLoadFAT(Material, NE_A1RGB5, 256, 256, NE_TEXGEN_TEXCOORD,
+    if (NEA_MaterialTexLoadFAT(Material, NEA_A1RGB5, 256, 256, NEA_TEXGEN_TEXCOORD,
                               "texture.img.bin") == 0)
     {
         printf("Couldn't load texture...");
@@ -93,20 +93,20 @@ int main(int argc, char *argv[])
     }
 
     // Assign material to the model
-    NE_ModelSetMaterial(Scene.Model, Material);
+    NEA_ModelSetMaterial(Scene.Model, Material);
 
-    NE_ModelSetAnimation(Scene.Model, Animation);
-    NE_ModelAnimStart(Scene.Model, NE_ANIM_LOOP, floattof32(0.1));
+    NEA_ModelSetAnimation(Scene.Model, Animation);
+    NEA_ModelAnimStart(Scene.Model, NEA_ANIM_LOOP, floattof32(0.1));
 
-    NE_LightSet(0, NE_White, 0, -1, -1);
+    NEA_LightSet(0, NEA_White, 0, -1, -1);
 
-    NE_ClearColorSet(NE_Black, 31, 63);
+    NEA_ClearColorSet(NEA_Black, 31, 63);
 
     printf("\x1b[0;0HPad: Rotate\nSTART: Exit");
 
     while (1)
     {
-        NE_WaitForVBL(NE_UPDATE_ANIMATIONS);
+        NEA_WaitForVBL(NEA_UPDATE_ANIMATIONS);
 
         scanKeys();
         uint32_t keys = keysHeld();
@@ -115,15 +115,15 @@ int main(int argc, char *argv[])
             break;
 
         if (keys & KEY_RIGHT)
-            NE_ModelRotate(Scene.Model, 0, 2, 0);
+            NEA_ModelRotate(Scene.Model, 0, 2, 0);
         if (keys & KEY_LEFT)
-            NE_ModelRotate(Scene.Model, 0, -2, 0);
+            NEA_ModelRotate(Scene.Model, 0, -2, 0);
         if (keys & KEY_UP)
-            NE_ModelRotate(Scene.Model, 0, 0, 2);
+            NEA_ModelRotate(Scene.Model, 0, 0, 2);
         if (keys & KEY_DOWN)
-            NE_ModelRotate(Scene.Model, 0, 0, -2);
+            NEA_ModelRotate(Scene.Model, 0, 0, -2);
 
-        NE_ProcessArg(Draw3DScene, &Scene);
+        NEA_ProcessArg(Draw3DScene, &Scene);
     }
 
     return 0;

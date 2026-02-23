@@ -2,101 +2,101 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NE2D.c
+/// @file NEA2D.c
 
-static NE_Sprite **NE_spritepointers = NULL;
+static NEA_Sprite **NEA_spritepointers = NULL;
 
-static int NE_MAX_SPRITES;
+static int NEA_MAX_SPRITES;
 
 static bool ne_sprite_system_inited = false;
 
-NE_Sprite *NE_SpriteCreate(void)
+NEA_Sprite *NEA_SpriteCreate(void)
 {
     if (!ne_sprite_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_MAX_SPRITES; i++)
+    for (int i = 0; i < NEA_MAX_SPRITES; i++)
     {
-        if (NE_spritepointers[i] != NULL)
+        if (NEA_spritepointers[i] != NULL)
             continue;
 
-        NE_Sprite *sprite = calloc(1, sizeof(NE_Sprite));
+        NEA_Sprite *sprite = calloc(1, sizeof(NEA_Sprite));
         if (sprite == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
         sprite->visible = true;
         sprite->xscale = inttof32(1);
         sprite->yscale = inttof32(1);
-        sprite->color = NE_White;
+        sprite->color = NEA_White;
         sprite->mat = NULL;
         sprite->alpha = 31;
 
-        NE_spritepointers[i] = sprite;
+        NEA_spritepointers[i] = sprite;
 
         return sprite;
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
     return NULL;
 }
 
-void NE_SpriteSetPos(NE_Sprite *sprite, int x, int y)
+void NEA_SpriteSetPos(NEA_Sprite *sprite, int x, int y)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->x = x;
     sprite->y = y;
 }
 
-void NE_SpriteSetSize(NE_Sprite *sprite, int w, int h)
+void NEA_SpriteSetSize(NEA_Sprite *sprite, int w, int h)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->w = w;
     sprite->h = h;
 }
 
-void NE_SpriteSetRot(NE_Sprite *sprite, int angle)
+void NEA_SpriteSetRot(NEA_Sprite *sprite, int angle)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->rot_angle = angle;
 }
 
-void NE_SpriteSetScaleI(NE_Sprite *sprite, int scale)
+void NEA_SpriteSetScaleI(NEA_Sprite *sprite, int scale)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->xscale = scale;
     sprite->yscale = scale;
 }
 
-void NE_SpriteSetXScaleI(NE_Sprite *sprite, int scale)
+void NEA_SpriteSetXScaleI(NEA_Sprite *sprite, int scale)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->xscale = scale;
 }
 
-void NE_SpriteSetYScaleI(NE_Sprite *sprite, int scale)
+void NEA_SpriteSetYScaleI(NEA_Sprite *sprite, int scale)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->yscale = scale;
 }
 
-void NE_SpriteSetMaterial(NE_Sprite *sprite, NE_Material *mat)
+void NEA_SpriteSetMaterial(NEA_Sprite *sprite, NEA_Material *mat)
 {
-    NE_AssertPointer(sprite, "NULL sprite pointer");
-    NE_AssertPointer(mat, "NULL material pointer");
+    NEA_AssertPointer(sprite, "NULL sprite pointer");
+    NEA_AssertPointer(mat, "NULL material pointer");
     sprite->mat = mat;
 
-    int mat_w = NE_TextureGetSizeX(mat);
-    int mat_h = NE_TextureGetSizeY(mat);
+    int mat_w = NEA_TextureGetSizeX(mat);
+    int mat_h = NEA_TextureGetSizeY(mat);
 
     sprite->w = mat_w;
     sprite->h = mat_h;
@@ -107,10 +107,10 @@ void NE_SpriteSetMaterial(NE_Sprite *sprite, NE_Material *mat)
     sprite->tb = mat_h;
 }
 
-void NE_SpriteSetMaterialCanvas(NE_Sprite *sprite, int tl, int tt, int tr, int tb)
+void NEA_SpriteSetMaterialCanvas(NEA_Sprite *sprite, int tl, int tt, int tr, int tb)
 {
-    NE_AssertPointer(sprite, "NULL sprite pointer");
-    NE_AssertPointer(sprite->mat, "Sprite doesn't have a material");
+    NEA_AssertPointer(sprite, "NULL sprite pointer");
+    NEA_AssertPointer(sprite->mat, "Sprite doesn't have a material");
 
     sprite->tl = tl;
     sprite->tr = tr;
@@ -118,74 +118,74 @@ void NE_SpriteSetMaterialCanvas(NE_Sprite *sprite, int tl, int tt, int tr, int t
     sprite->tb = tb;
 }
 
-void NE_SpriteSetPriority(NE_Sprite *sprite, int priority)
+void NEA_SpriteSetPriority(NEA_Sprite *sprite, int priority)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->priority = priority;
 }
 
-void NE_SpriteVisible(NE_Sprite *sprite, bool visible)
+void NEA_SpriteVisible(NEA_Sprite *sprite, bool visible)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
     sprite->visible = visible;
 }
 
-void NE_SpriteSetParams(NE_Sprite *sprite, u8 alpha, u8 id, u32 color)
+void NEA_SpriteSetParams(NEA_Sprite *sprite, u8 alpha, u8 id, u32 color)
 {
-    NE_AssertPointer(sprite, "NULL pointer");
-    NE_AssertMinMax(0, alpha, 31, "Invalid alpha value %d", alpha);
-    NE_AssertMinMax(0, id, 63, "Invalid polygon ID %d", id);
+    NEA_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertMinMax(0, alpha, 31, "Invalid alpha value %d", alpha);
+    NEA_AssertMinMax(0, id, 63, "Invalid polygon ID %d", id);
 
     sprite->alpha = alpha;
     sprite->id = id;
     sprite->color = color;
 }
 
-void NE_SpriteDelete(NE_Sprite *sprite)
+void NEA_SpriteDelete(NEA_Sprite *sprite)
 {
     if (!ne_sprite_system_inited)
         return;
 
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
 
-    for (int i = 0; i < NE_MAX_SPRITES; i++)
+    for (int i = 0; i < NEA_MAX_SPRITES; i++)
     {
-        if (NE_spritepointers[i] != sprite)
+        if (NEA_spritepointers[i] != sprite)
             continue;
 
-        NE_spritepointers[i] = NULL;
+        NEA_spritepointers[i] = NULL;
         free((void *)sprite);
 
         return;
     }
 
-    NE_DebugPrint("Object not found");
+    NEA_DebugPrint("Object not found");
     return;
 }
 
-void NE_SpriteDeleteAll(void)
+void NEA_SpriteDeleteAll(void)
 {
     if (!ne_sprite_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_SPRITES; i++)
-        NE_SpriteDelete(NE_spritepointers[i]);
+    for (int i = 0; i < NEA_MAX_SPRITES; i++)
+        NEA_SpriteDelete(NEA_spritepointers[i]);
 }
 
-int NE_SpriteSystemReset(int max_sprites)
+int NEA_SpriteSystemReset(int max_sprites)
 {
     if (ne_sprite_system_inited)
-        NE_SpriteSystemEnd();
+        NEA_SpriteSystemEnd();
 
     if (max_sprites < 1)
-        NE_MAX_SPRITES = NE_DEFAULT_SPRITES;
+        NEA_MAX_SPRITES = NEA_DEFAULT_SPRITES;
     else
-        NE_MAX_SPRITES = max_sprites;
+        NEA_MAX_SPRITES = max_sprites;
 
-    NE_spritepointers = calloc(NE_MAX_SPRITES, sizeof(NE_spritepointers));
-    if (NE_spritepointers == NULL)
+    NEA_spritepointers = calloc(NEA_MAX_SPRITES, sizeof(NEA_spritepointers));
+    if (NEA_spritepointers == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -193,24 +193,24 @@ int NE_SpriteSystemReset(int max_sprites)
     return 0;
 }
 
-void NE_SpriteSystemEnd(void)
+void NEA_SpriteSystemEnd(void)
 {
     if (!ne_sprite_system_inited)
         return;
 
-    NE_SpriteDeleteAll();
+    NEA_SpriteDeleteAll();
 
-    free(NE_spritepointers);
+    free(NEA_spritepointers);
 
     ne_sprite_system_inited = false;
 }
 
-void NE_SpriteDraw(const NE_Sprite *sprite)
+void NEA_SpriteDraw(const NEA_Sprite *sprite)
 {
     if (!ne_sprite_system_inited)
         return;
 
-    NE_AssertPointer(sprite, "NULL pointer");
+    NEA_AssertPointer(sprite, "NULL pointer");
 
     if (!sprite->visible)
         return;
@@ -219,22 +219,22 @@ void NE_SpriteDraw(const NE_Sprite *sprite)
     {
         MATRIX_PUSH = 0;
 
-        NE_2DViewRotateScaleByPositionXYI(sprite->x + (sprite->w >> 1),
+        NEA_2DViewRotateScaleByPositionXYI(sprite->x + (sprite->w >> 1),
                                         sprite->y + (sprite->h >> 1),
                                         sprite->rot_angle,
                                         sprite->xscale, sprite->yscale);
     }
     else
     {
-        NE_2DViewScaleByPositionXYI(sprite->x + (sprite->w >> 1),
+        NEA_2DViewScaleByPositionXYI(sprite->x + (sprite->w >> 1),
                                   sprite->y + (sprite->h >> 1),
                                   sprite->xscale, sprite->yscale);
     }
 
     GFX_POLY_FORMAT = POLY_ALPHA(sprite->alpha) | POLY_ID(sprite->id) |
-                      NE_CULL_NONE;
+                      NEA_CULL_NONE;
 
-    NE_2DDrawTexturedQuadColorCanvas(sprite->x, sprite->y,
+    NEA_2DDrawTexturedQuadColorCanvas(sprite->x, sprite->y,
                                      sprite->x + sprite->w,
                                      sprite->y + sprite->h,
                                      sprite->priority,
@@ -246,17 +246,17 @@ void NE_SpriteDraw(const NE_Sprite *sprite)
         MATRIX_POP = 1;
 }
 
-void NE_SpriteDrawAll(void)
+void NEA_SpriteDrawAll(void)
 {
     if (!ne_sprite_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_SPRITES; i++)
+    for (int i = 0; i < NEA_MAX_SPRITES; i++)
     {
-        if (NE_spritepointers[i] == NULL)
+        if (NEA_spritepointers[i] == NULL)
             continue;
 
-        NE_Sprite *sprite = NE_spritepointers[i];
+        NEA_Sprite *sprite = NEA_spritepointers[i];
 
         if (!sprite->visible)
             continue;
@@ -265,22 +265,22 @@ void NE_SpriteDrawAll(void)
         {
             MATRIX_PUSH = 0;
 
-            NE_2DViewRotateScaleByPositionXYI(sprite->x + (sprite->w >> 1),
+            NEA_2DViewRotateScaleByPositionXYI(sprite->x + (sprite->w >> 1),
                                             sprite->y + (sprite->h >> 1),
                                             sprite->rot_angle,
                                             sprite->xscale, sprite->yscale);
         }
         else
         {
-            NE_2DViewScaleByPositionXYI(sprite->x + (sprite->w >> 1),
+            NEA_2DViewScaleByPositionXYI(sprite->x + (sprite->w >> 1),
                                       sprite->y + (sprite->h >> 1),
                                       sprite->xscale, sprite->yscale);
         }
 
         GFX_POLY_FORMAT = POLY_ALPHA(sprite->alpha) |
-                          POLY_ID(sprite->id) | NE_CULL_NONE;
+                          POLY_ID(sprite->id) | NEA_CULL_NONE;
 
-        NE_2DDrawTexturedQuadColorCanvas(sprite->x, sprite->y,
+        NEA_2DDrawTexturedQuadColorCanvas(sprite->x, sprite->y,
                                          sprite->x + sprite->w,
                                          sprite->y + sprite->h,
                                          sprite->priority,
@@ -299,14 +299,14 @@ void NE_SpriteDrawAll(void)
 //
 //----------------------------------------------------------
 
-// Internal use. See NETexture.c
+// Internal use. See NEATexture.c
 
-int __NE_TextureGetRawX(const NE_Material *tex);
-int __NE_TextureGetRawY(const NE_Material *tex);
+int __NEA_TextureGetRawX(const NEA_Material *tex);
+int __NEA_TextureGetRawY(const NEA_Material *tex);
 
 //--------------------------------------------
 
-void NE_2DViewInit(void)
+void NEA_2DViewInit(void)
 {
     GFX_VIEWPORT = 0 | (0 << 8) | (255 << 16) | (191 << 24);
 
@@ -351,12 +351,12 @@ void NE_2DViewInit(void)
     MATRIX_SCALE = inttof32(1 << factor);
     MATRIX_SCALE = inttof32(1);
 
-    NE_PolyFormat(31, 0, 0, NE_CULL_NONE, 0);
+    NEA_PolyFormat(31, 0, 0, NEA_CULL_NONE, 0);
 }
 
-void NE_2DViewRotateScaleByPositionXYI(int x, int y, int rotz, int xscale, int yscale)
+void NEA_2DViewRotateScaleByPositionXYI(int x, int y, int rotz, int xscale, int yscale)
 {
-    NE_ViewMoveI(x, y, 0);
+    NEA_ViewMoveI(x, y, 0);
 
     MATRIX_SCALE = xscale;
     MATRIX_SCALE = yscale;
@@ -364,38 +364,38 @@ void NE_2DViewRotateScaleByPositionXYI(int x, int y, int rotz, int xscale, int y
 
     glRotateZi(rotz << 6);
 
-    NE_ViewMoveI(-x, -y, 0);
+    NEA_ViewMoveI(-x, -y, 0);
 }
 
-void NE_2DViewScaleByPositionI(int x, int y, int scale) {
-    NE_2DViewScaleByPositionXYI(x, y, scale, scale);
+void NEA_2DViewScaleByPositionI(int x, int y, int scale) {
+    NEA_2DViewScaleByPositionXYI(x, y, scale, scale);
 }
 
-void NE_2DViewRotateByPosition(int x, int y, int rotz)
+void NEA_2DViewRotateByPosition(int x, int y, int rotz)
 {
-    NE_ViewMoveI(x, y, 0);
+    NEA_ViewMoveI(x, y, 0);
 
     glRotateZi(rotz << 6);
 
-    NE_ViewMoveI(-x, -y, 0);
+    NEA_ViewMoveI(-x, -y, 0);
 }
 
-void NE_2DViewScaleByPositionXYI(int x, int y, int xscale, int yscale)
+void NEA_2DViewScaleByPositionXYI(int x, int y, int xscale, int yscale)
 {
-    NE_ViewMoveI(x, y, 0);
+    NEA_ViewMoveI(x, y, 0);
 
     MATRIX_SCALE = xscale;
     MATRIX_SCALE = yscale;
     MATRIX_SCALE = inttof32(1);
 
-    NE_ViewMoveI(-x, -y, 0);
+    NEA_ViewMoveI(-x, -y, 0);
 }
 
-void NE_2DViewRotateScaleByPositionI(int x, int y, int rotz, int scale) {
-    NE_2DViewRotateScaleByPositionXYI(x, y, rotz, scale, scale);
+void NEA_2DViewRotateScaleByPositionI(int x, int y, int rotz, int scale) {
+    NEA_2DViewRotateScaleByPositionXYI(x, y, rotz, scale, scale);
 }
 
-void NE_2DDrawQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color)
+void NEA_2DDrawQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color)
 {
     GFX_BEGIN = GL_QUADS;
 
@@ -413,7 +413,7 @@ void NE_2DDrawQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color)
     GFX_VERTEX_XY = (y1 << 16) | (x2 & 0xFFFF); // Up-right
 }
 
-void NE_2DDrawQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color1,
+void NEA_2DDrawQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color1,
                            u32 color2, u32 color3, u32 color4)
 {
     GFX_BEGIN = GL_QUADS;
@@ -434,15 +434,15 @@ void NE_2DDrawQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z, u32 color1,
     GFX_VERTEX_XY = (y1 << 16) | (x2 & 0xFFFF); // Up-right
 }
 
-void NE_2DDrawTexturedQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
-                           const NE_Material *mat)
+void NEA_2DDrawTexturedQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
+                           const NEA_Material *mat)
 {
-    NE_AssertPointer(mat, "NULL pointer");
-    NE_Assert(mat->texindex != NE_NO_TEXTURE, "No texture");
+    NEA_AssertPointer(mat, "NULL pointer");
+    NEA_Assert(mat->texindex != NEA_NO_TEXTURE, "No texture");
 
-    int x = NE_TextureGetSizeX(mat), y = NE_TextureGetSizeY(mat);
+    int x = NEA_TextureGetSizeX(mat), y = NEA_TextureGetSizeY(mat);
 
-    NE_MaterialUse(mat);
+    NEA_MaterialUse(mat);
 
     GFX_BEGIN = GL_QUADS;
 
@@ -460,15 +460,15 @@ void NE_2DDrawTexturedQuad(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
     GFX_VERTEX_XY = (y1 << 16) | (x2 & 0xFFFF); // Up-right
 }
 
-void NE_2DDrawTexturedQuadColor(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
-                                const NE_Material *mat, u32 color)
+void NEA_2DDrawTexturedQuadColor(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
+                                const NEA_Material *mat, u32 color)
 {
-    NE_AssertPointer(mat, "NULL pointer");
-    NE_Assert(mat->texindex != NE_NO_TEXTURE, "No texture");
+    NEA_AssertPointer(mat, "NULL pointer");
+    NEA_Assert(mat->texindex != NEA_NO_TEXTURE, "No texture");
 
-    int x = NE_TextureGetSizeX(mat), y = NE_TextureGetSizeY(mat);
+    int x = NEA_TextureGetSizeX(mat), y = NEA_TextureGetSizeY(mat);
 
-    NE_MaterialUse(mat);
+    NEA_MaterialUse(mat);
 
     GFX_COLOR = color;
 
@@ -488,16 +488,16 @@ void NE_2DDrawTexturedQuadColor(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
     GFX_VERTEX_XY = (y1 << 16) | (x2 & 0xFFFF); // Up-right
 }
 
-void NE_2DDrawTexturedQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
-                                   const NE_Material *mat, u32 color1,
+void NEA_2DDrawTexturedQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
+                                   const NEA_Material *mat, u32 color1,
                                    u32 color2, u32 color3, u32 color4)
 {
-    NE_AssertPointer(mat, "NULL pointer");
-    NE_Assert(mat->texindex != NE_NO_TEXTURE, "No texture");
+    NEA_AssertPointer(mat, "NULL pointer");
+    NEA_Assert(mat->texindex != NEA_NO_TEXTURE, "No texture");
 
-    int x = NE_TextureGetSizeX(mat), y = NE_TextureGetSizeY(mat);
+    int x = NEA_TextureGetSizeX(mat), y = NEA_TextureGetSizeY(mat);
 
-    NE_MaterialUse(mat);
+    NEA_MaterialUse(mat);
 
     GFX_BEGIN = GL_QUADS;
 
@@ -519,14 +519,14 @@ void NE_2DDrawTexturedQuadGradient(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
     GFX_VERTEX_XY = (y1 << 16) | (x2 & 0xFFFF); // Up-right
 }
 
-void NE_2DDrawTexturedQuadColorCanvas(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
+void NEA_2DDrawTexturedQuadColorCanvas(s16 x1, s16 y1, s16 x2, s16 y2, s16 z,
                                       int tl, int tt, int tr, int tb,
-                                      const NE_Material *mat, u32 color)
+                                      const NEA_Material *mat, u32 color)
 {
-    NE_AssertPointer(mat, "NULL pointer");
-    NE_Assert(mat->texindex != NE_NO_TEXTURE, "No texture");
+    NEA_AssertPointer(mat, "NULL pointer");
+    NEA_Assert(mat->texindex != NEA_NO_TEXTURE, "No texture");
 
-    NE_MaterialUse(mat);
+    NEA_MaterialUse(mat);
 
     GFX_COLOR = color;
 

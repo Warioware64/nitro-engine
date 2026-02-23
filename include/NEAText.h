@@ -2,12 +2,12 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_TEXT_H__
-#define NE_TEXT_H__
+#ifndef NEA_TEXT_H__
+#define NEA_TEXT_H__
 
-/// @file  NEText.h
+/// @file  NEAText.h
 /// @brief Text system.
 
 /// @defgroup text_system Text system
@@ -18,20 +18,20 @@
 /// The functions accept '\n', but not things like '%d', '%s', etc. You'll need
 /// to use snprintf() or similar for that.
 ///
-/// You need to call NE_2DViewInit() before using any of the text drawing
+/// You need to call NEA_2DViewInit() before using any of the text drawing
 /// functions.
 ///
 /// @{
 
-#define NE_MAX_TEXT_FONTS 8 ///< Default max number of text fonts
+#define NEA_MAX_TEXT_FONTS 8 ///< Default max number of text fonts
 
 /// Change the priority of text drawn after this function call.
 ///
 /// @param priority New priority.
-void NE_TextPrioritySet(int priority);
+void NEA_TextPrioritySet(int priority);
 
 /// Set to 0 the priority of text drawn after this function call.
-void NE_TextPriorityReset(void);
+void NEA_TextPriorityReset(void);
 
 /// Assigns a material as a font in a font slot.
 ///
@@ -39,15 +39,15 @@ void NE_TextPriorityReset(void);
 /// @param mat Font texture.
 /// @param sizex (sizex, sizey) Size of one character.
 /// @param sizey (sizex, sizey) Size of one character.
-void NE_TextInit(int slot, const NE_Material *mat, int sizex, int sizey);
+void NEA_TextInit(int slot, const NEA_Material *mat, int sizex, int sizey);
 
 /// Clears the given text font slot.
 ///
 /// @param slot Text font slot.
-void NE_TextEnd(int slot);
+void NEA_TextEnd(int slot);
 
 /// Clears all text font slots.
-void NE_TextResetSystem(void);
+void NEA_TextResetSystem(void);
 
 /// Prints text.
 ///
@@ -59,7 +59,7 @@ void NE_TextResetSystem(void);
 /// @param color Text color.
 /// @param text Text to print.
 /// @return Returns the number of characters printed.
-int NE_TextPrint(int slot, int x, int y, u32 color, const char *text);
+int NEA_TextPrint(int slot, int x, int y, u32 color, const char *text);
 
 /// Prints text within the limits of a rectangle.
 ///
@@ -74,7 +74,7 @@ int NE_TextPrint(int slot, int x, int y, u32 color, const char *text);
 /// @param charnum Number of characters to print. If -1 it prints everything.
 /// @param text Text to print.
 /// @return Returns the number of characters printed.
-int NE_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
+int NEA_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
                     int charnum, const char *text);
 
 /// Prints text which isn't restricted to any row or column.
@@ -87,7 +87,7 @@ int NE_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
 /// @param color Text color.
 /// @param text Text to print.
 /// @return Returns the number of characters printed.
-int NE_TextPrintFree(int slot, int x, int y, u32 color, const char *text);
+int NEA_TextPrintFree(int slot, int x, int y, u32 color, const char *text);
 
 /// Prints text which isn't restricted to any row or column, within a rectangle.
 ///
@@ -100,9 +100,9 @@ int NE_TextPrintFree(int slot, int x, int y, u32 color, const char *text);
 /// @param charnum Number of characters to print. If -1 it prints everything.
 /// @param text Text to print.
 /// @return Returns the number of characters printed.
-int NE_TextPrintBoxFree(int slot, int x, int y, int endx, int endy, u32 color,
+int NEA_TextPrintBoxFree(int slot, int x, int y, int endx, int endy, u32 color,
             int charnum, const char *text);
 
 /// @}
 
-#endif // NE_TEXT_H__
+#endif // NEA_TEXT_H__

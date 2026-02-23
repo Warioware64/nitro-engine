@@ -2,7 +2,7 @@
 //
 // SPDX-FileContributor: 2024-2026
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 //
 // Two-pass 3D rendering example. This mode doubles the polygon budget by
 // splitting the screen into left and right halves, rendering each half in a
@@ -12,7 +12,7 @@
 // polygon budget that two-pass mode provides. Press A/X/Y to switch between
 // the three two-pass modes.
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "teapot_bin.h"
 #include "teapot.h"
@@ -20,9 +20,9 @@
 #define NUM_MODELS 6
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Model[NUM_MODELS];
-    NE_Material *Material;
+    NEA_Camera *Camera;
+    NEA_Model *Model[NUM_MODELS];
+    NEA_Material *Material;
     int ram_poly_pass0;
     int ram_vertex_pass0;
     int ram_poly_pass1;
@@ -33,49 +33,49 @@ void Draw3DScene(void *arg)
 {
     SceneData *Scene = arg;
 
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
     for (int i = 0; i < NUM_MODELS; i++)
-        NE_ModelDraw(Scene->Model[i]);
+        NEA_ModelDraw(Scene->Model[i]);
 
-    if (NE_TwoPassGetPass() == 0)
+    if (NEA_TwoPassGetPass() == 0)
     {
-        Scene->ram_poly_pass0 = NE_GetPolygonCount();
-        Scene->ram_vertex_pass0 = NE_GetVertexCount();
+        Scene->ram_poly_pass0 = NEA_GetPolygonCount();
+        Scene->ram_vertex_pass0 = NEA_GetVertexCount();
     }
     else
     {
-        Scene->ram_poly_pass1 = NE_GetPolygonCount();
-        Scene->ram_vertex_pass1 = NE_GetVertexCount();
+        Scene->ram_poly_pass1 = NEA_GetPolygonCount();
+        Scene->ram_vertex_pass1 = NEA_GetVertexCount();
     }
 }
 
 void init_all(SceneData *Scene)
 {
     for (int i = 0; i < NUM_MODELS; i++)
-        Scene->Model[i] = NE_ModelCreate(NE_Static);
+        Scene->Model[i] = NEA_ModelCreate(NEA_Static);
 
-    Scene->Camera = NE_CameraCreate();
-    Scene->Material = NE_MaterialCreate();
+    Scene->Camera = NEA_CameraCreate();
+    Scene->Material = NEA_MaterialCreate();
 
-    NE_CameraSet(Scene->Camera,
+    NEA_CameraSet(Scene->Camera,
                  0, 3, -8,  // Position
                  0, 0, 0,   // Look at
                  0, 1, 0);  // Up direction
 
-    NE_ModelLoadStaticMesh(Scene->Model[0], teapot_bin);
+    NEA_ModelLoadStaticMesh(Scene->Model[0], teapot_bin);
 
-    NE_MaterialTexLoad(Scene->Material, NE_A1RGB5, 256, 256,
-                       NE_TEXGEN_TEXCOORD | NE_TEXTURE_WRAP_S
-                       | NE_TEXTURE_WRAP_T,
+    NEA_MaterialTexLoad(Scene->Material, NEA_A1RGB5, 256, 256,
+                       NEA_TEXGEN_TEXCOORD | NEA_TEXTURE_WRAP_S
+                       | NEA_TEXTURE_WRAP_T,
                        teapotBitmap);
 
     // Set material BEFORE cloning so clones inherit the material reference
-    NE_ModelSetMaterial(Scene->Model[0], Scene->Material);
+    NEA_ModelSetMaterial(Scene->Model[0], Scene->Material);
 
     // Clone model 0 to the rest (copies mesh and material references)
     for (int i = 1; i < NUM_MODELS; i++)
-        NE_ModelClone(Scene->Model[i], Scene->Model[0]);
+        NEA_ModelClone(Scene->Model[i], Scene->Model[0]);
 
     // Arrange models in a 2x3 grid
     int idx = 0;
@@ -83,12 +83,12 @@ void init_all(SceneData *Scene)
     {
         for (int col = -1; col <= 1; col++)
         {
-            NE_ModelSetCoord(Scene->Model[idx], col * 3, row * 3, 0);
+            NEA_ModelSetCoord(Scene->Model[idx], col * 3, row * 3, 0);
             idx++;
         }
     }
 
-    NE_LightSet(0, NE_White, -0.5, -0.5, -0.5);
+    NEA_LightSet(0, NEA_White, -0.5, -0.5, -0.5);
 }
 
 int main(int argc, char *argv[])
@@ -96,19 +96,19 @@ int main(int argc, char *argv[])
     SceneData Scene = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
     // Start in DMA mode (no line artifacts, 75% texture VRAM)
-    NE_Init3D_TwoPass_DMA();
-    NE_InitConsole();
+    NEA_Init3D_TwoPass_DMA();
+    NEA_InitConsole();
     init_all(&Scene);
 
     while (1)
     {
-        NE_WaitForVBL(NE_TwoPassGetPass() == 1 ? NE_UPDATE_ANIMATIONS : 0);
+        NEA_WaitForVBL(NEA_TwoPassGetPass() == 1 ? NEA_UPDATE_ANIMATIONS : 0);
 
-        NE_ProcessTwoPassArg(Draw3DScene, &Scene);
+        NEA_ProcessTwoPassArg(Draw3DScene, &Scene);
 
         printf("\x1b[0;0H"
                "Two-pass 3D mode demo\n"
@@ -137,42 +137,42 @@ int main(int argc, char *argv[])
         // Switch two-pass modes
         if (kdown & KEY_A)
         {
-            NE_Init3D_TwoPass_DMA();
-            NE_InitConsole();
+            NEA_Init3D_TwoPass_DMA();
+            NEA_InitConsole();
             init_all(&Scene);
         }
         if (kdown & KEY_X)
         {
-            NE_Init3D_TwoPass_FB();
-            NE_InitConsole();
+            NEA_Init3D_TwoPass_FB();
+            NEA_InitConsole();
             init_all(&Scene);
         }
         if (kdown & KEY_Y)
         {
-            NE_Init3D_TwoPass();
-            NE_InitConsole();
+            NEA_Init3D_TwoPass();
+            NEA_InitConsole();
             init_all(&Scene);
         }
 
         // Update rotations only after both passes are done
-        if (NE_TwoPassGetPass() == 1)
+        if (NEA_TwoPassGetPass() == 1)
         {
             if (keys & KEY_UP)
                 for (int i = 0; i < NUM_MODELS; i++)
-                    NE_ModelRotate(Scene.Model[i], 2, 0, 0);
+                    NEA_ModelRotate(Scene.Model[i], 2, 0, 0);
             if (keys & KEY_DOWN)
                 for (int i = 0; i < NUM_MODELS; i++)
-                    NE_ModelRotate(Scene.Model[i], -2, 0, 0);
+                    NEA_ModelRotate(Scene.Model[i], -2, 0, 0);
             if (keys & KEY_RIGHT)
                 for (int i = 0; i < NUM_MODELS; i++)
-                    NE_ModelRotate(Scene.Model[i], 0, 4, 0);
+                    NEA_ModelRotate(Scene.Model[i], 0, 4, 0);
             if (keys & KEY_LEFT)
                 for (int i = 0; i < NUM_MODELS; i++)
-                    NE_ModelRotate(Scene.Model[i], 0, -4, 0);
+                    NEA_ModelRotate(Scene.Model[i], 0, -4, 0);
         }
     }
 
-    NE_End();
+    NEA_End();
 
     return 0;
 }

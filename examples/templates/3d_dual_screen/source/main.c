@@ -2,9 +2,9 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 typedef struct {
     int placeholder;
@@ -34,16 +34,16 @@ int main(int argc, char *argv[])
     SceneData2 Scene2 = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_VBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_VBLANK, NEA_HBLFunc);
 
-    NE_InitDual3D_DMA();
-    NE_InitConsole();
+    NEA_InitDual3D_DMA();
+    NEA_InitConsole();
 
     while (1)
     {
-        NE_WaitForVBL(0);
-        NE_ProcessDualArg(Draw3DScene1, Draw3DScene2, &Scene1, &Scene2);
+        NEA_WaitForVBL(0);
+        NEA_ProcessDualArg(Draw3DScene1, Draw3DScene2, &Scene1, &Scene2);
 
         scanKeys();
 

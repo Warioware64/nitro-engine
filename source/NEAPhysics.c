@@ -2,56 +2,56 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEPhysics.c
+/// @file NEAPhysics.c
 
-static NE_Physics **NE_PhysicsPointers;
+static NEA_Physics **NEA_PhysicsPointers;
 static bool ne_physics_system_inited = false;
 
-static int NE_MAX_PHYSICS;
+static int NEA_MAX_PHYSICS;
 
-NE_Physics *NE_PhysicsCreate(NE_PhysicsTypes type)
+NEA_Physics *NEA_PhysicsCreate(NEA_PhysicsTypes type)
 {
     if (!ne_physics_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
     // TODO
-    if (type == NE_BoundingSphere)
+    if (type == NEA_BoundingSphere)
     {
-        NE_DebugPrint("Bounding spheres not supported");
+        NEA_DebugPrint("Bounding spheres not supported");
         return NULL;
     }
-    if (type == NE_Dot)
+    if (type == NEA_Dot)
     {
-        NE_DebugPrint("Dots not supported");
+        NEA_DebugPrint("Dots not supported");
         return NULL;
     }
 
-    NE_Physics *temp = calloc(1, sizeof(NE_Physics));
+    NEA_Physics *temp = calloc(1, sizeof(NEA_Physics));
     if (temp == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return NULL;
     }
 
     int i = 0;
     while (1)
     {
-        if (i == NE_MAX_PHYSICS)
+        if (i == NEA_MAX_PHYSICS)
         {
             free(temp);
-            NE_DebugPrint("No free slots");
+            NEA_DebugPrint("No free slots");
             return NULL;
         }
-        if (NE_PhysicsPointers[i] == NULL)
+        if (NEA_PhysicsPointers[i] == NULL)
         {
-            NE_PhysicsPointers[i] = temp;
+            NEA_PhysicsPointers[i] = temp;
             break;
         }
         i++;
@@ -61,30 +61,30 @@ NE_Physics *NE_PhysicsCreate(NE_PhysicsTypes type)
     temp->keptpercent = 50;
     temp->enabled = true;
     temp->physicsgroup = 0;
-    temp->oncollision = NE_ColNothing;
+    temp->oncollision = NEA_ColNothing;
 
     return temp;
 }
 
-void NE_PhysicsDelete(NE_Physics *pointer)
+void NEA_PhysicsDelete(NEA_Physics *pointer)
 {
     if (!ne_physics_system_inited)
         return;
 
-    NE_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer, "NULL pointer");
 
     int i = 0;
     while (1)
     {
-        if (i == NE_MAX_PHYSICS)
+        if (i == NEA_MAX_PHYSICS)
         {
-            NE_DebugPrint("Object not found");
+            NEA_DebugPrint("Object not found");
             return;
         }
 
-        if (NE_PhysicsPointers[i] == pointer)
+        if (NEA_PhysicsPointers[i] == pointer)
         {
-            NE_PhysicsPointers[i] = NULL;
+            NEA_PhysicsPointers[i] = NULL;
             free(pointer);
             return;
         }
@@ -92,29 +92,29 @@ void NE_PhysicsDelete(NE_Physics *pointer)
     }
 }
 
-void NE_PhysicsDeleteAll(void)
+void NEA_PhysicsDeleteAll(void)
 {
     if (!ne_physics_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_PHYSICS; i++)
-        NE_PhysicsDelete(NE_PhysicsPointers[i]);
+    for (int i = 0; i < NEA_MAX_PHYSICS; i++)
+        NEA_PhysicsDelete(NEA_PhysicsPointers[i]);
 }
 
-int NE_PhysicsSystemReset(int max_objects)
+int NEA_PhysicsSystemReset(int max_objects)
 {
     if (ne_physics_system_inited)
-        NE_PhysicsSystemEnd();
+        NEA_PhysicsSystemEnd();
 
     if (max_objects < 1)
-        NE_MAX_PHYSICS = NE_DEFAULT_PHYSICS;
+        NEA_MAX_PHYSICS = NEA_DEFAULT_PHYSICS;
     else
-        NE_MAX_PHYSICS = max_objects;
+        NEA_MAX_PHYSICS = max_objects;
 
-    NE_PhysicsPointers = calloc(NE_MAX_PHYSICS, sizeof(NE_PhysicsPointers));
-    if (NE_PhysicsPointers == NULL)
+    NEA_PhysicsPointers = calloc(NEA_MAX_PHYSICS, sizeof(NEA_PhysicsPointers));
+    if (NEA_PhysicsPointers == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -122,115 +122,115 @@ int NE_PhysicsSystemReset(int max_objects)
     return 0;
 }
 
-void NE_PhysicsSystemEnd(void)
+void NEA_PhysicsSystemEnd(void)
 {
     if (!ne_physics_system_inited)
         return;
 
-    NE_PhysicsDeleteAll();
+    NEA_PhysicsDeleteAll();
 
-    free(NE_PhysicsPointers);
+    free(NEA_PhysicsPointers);
 
     ne_physics_system_inited = false;
 }
 
-void NE_PhysicsSetRadiusI(NE_Physics *pointer, int radius)
+void NEA_PhysicsSetRadiusI(NEA_Physics *pointer, int radius)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
-    NE_Assert(pointer->type == NE_BoundingSphere, "Not a bounding shpere");
-    NE_Assert(radius >= 0, "Radius must be positive");
+    NEA_AssertPointer(pointer, "NULL pointer");
+    NEA_Assert(pointer->type == NEA_BoundingSphere, "Not a bounding shpere");
+    NEA_Assert(radius >= 0, "Radius must be positive");
     pointer->radius = radius;
 }
 
-void NE_PhysicsSetSpeedI(NE_Physics *pointer, int x, int y, int z)
+void NEA_PhysicsSetSpeedI(NEA_Physics *pointer, int x, int y, int z)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer, "NULL pointer");
     pointer->xspeed = x;
     pointer->yspeed = y;
     pointer->zspeed = z;
 }
 
-void NE_PhysicsSetSizeI(NE_Physics *pointer, int x, int y, int z)
+void NEA_PhysicsSetSizeI(NEA_Physics *pointer, int x, int y, int z)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
-    NE_Assert(pointer->type == NE_BoundingBox, "Not a bounding box");
-    NE_Assert(x >= 0 && y >= 0 && z >= 0, "Size must be positive!!");
+    NEA_AssertPointer(pointer, "NULL pointer");
+    NEA_Assert(pointer->type == NEA_BoundingBox, "Not a bounding box");
+    NEA_Assert(x >= 0 && y >= 0 && z >= 0, "Size must be positive!!");
     pointer->xsize = x;
     pointer->ysize = y;
     pointer->zsize = z;
 }
 
-void NE_PhysicsSetGravityI(NE_Physics *pointer, int gravity)
+void NEA_PhysicsSetGravityI(NEA_Physics *pointer, int gravity)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer, "NULL pointer");
     pointer->gravity = gravity;
 }
 
-void NE_PhysicsSetFrictionI(NE_Physics *pointer, int friction)
+void NEA_PhysicsSetFrictionI(NEA_Physics *pointer, int friction)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
-    NE_Assert(friction >= 0, "Friction must be positive");
+    NEA_AssertPointer(pointer, "NULL pointer");
+    NEA_Assert(friction >= 0, "Friction must be positive");
     pointer->friction = friction;
 }
 
-void NE_PhysicsSetBounceEnergy(NE_Physics *pointer, int percent)
+void NEA_PhysicsSetBounceEnergy(NEA_Physics *pointer, int percent)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
-    NE_Assert(percent >= 0, "Percentage must be positive");
+    NEA_AssertPointer(pointer, "NULL pointer");
+    NEA_Assert(percent >= 0, "Percentage must be positive");
     pointer->keptpercent = percent;
 }
 
-void NE_PhysicsEnable(NE_Physics *pointer, bool value)
+void NEA_PhysicsEnable(NEA_Physics *pointer, bool value)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer, "NULL pointer");
     pointer->enabled = value;
 }
 
-void NE_PhysicsSetModel(NE_Physics *physics, NE_Model *modelpointer)
+void NEA_PhysicsSetModel(NEA_Physics *physics, NEA_Model *modelpointer)
 {
-    NE_AssertPointer(physics, "NULL physics pointer");
-    NE_AssertPointer(modelpointer, "NULL model pointer");
+    NEA_AssertPointer(physics, "NULL physics pointer");
+    NEA_AssertPointer(modelpointer, "NULL model pointer");
     physics->model = modelpointer;
 }
 
-void NE_PhysicsSetGroup(NE_Physics *physics, int group)
+void NEA_PhysicsSetGroup(NEA_Physics *physics, int group)
 {
-    NE_AssertPointer(physics, "NULL pointer");
+    NEA_AssertPointer(physics, "NULL pointer");
     physics->physicsgroup = group;
 }
 
-void NE_PhysicsOnCollision(NE_Physics *physics, NE_OnCollision action)
+void NEA_PhysicsOnCollision(NEA_Physics *physics, NEA_OnCollision action)
 {
-    NE_AssertPointer(physics, "NULL pointer");
+    NEA_AssertPointer(physics, "NULL pointer");
     physics->oncollision = action;
 }
 
-bool NE_PhysicsIsColliding(const NE_Physics *pointer)
+bool NEA_PhysicsIsColliding(const NEA_Physics *pointer)
 {
-    NE_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer, "NULL pointer");
     return pointer->iscolliding;
 }
 
-void NE_PhysicsUpdateAll(void)
+void NEA_PhysicsUpdateAll(void)
 {
     if (!ne_physics_system_inited)
         return;
 
-    for (int i = 0; i < NE_MAX_PHYSICS; i++)
+    for (int i = 0; i < NEA_MAX_PHYSICS; i++)
     {
-        if (NE_PhysicsPointers[i] != NULL)
-            NE_PhysicsUpdate(NE_PhysicsPointers[i]);
+        if (NEA_PhysicsPointers[i] != NULL)
+            NEA_PhysicsUpdate(NEA_PhysicsPointers[i]);
     }
 }
 
-ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
+ARM_CODE void NEA_PhysicsUpdate(NEA_Physics *pointer)
 {
     if (!ne_physics_system_inited)
         return;
 
-    NE_AssertPointer(pointer, "NULL pointer");
-    NE_AssertPointer(pointer->model, "NULL model pointer");
-    NE_Assert(pointer->type != 0, "Object has no type");
+    NEA_AssertPointer(pointer, "NULL pointer");
+    NEA_AssertPointer(pointer->model, "NULL model pointer");
+    NEA_Assert(pointer->type != 0, "Object has no type");
 
     if (pointer->enabled == false)
         return;
@@ -247,7 +247,7 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
     // Position before movement
     int bposx = 0, bposy = 0, bposz = 0;
 
-    NE_Model *model = pointer->model;
+    NEA_Model *model = pointer->model;
     bposx = model->x;
     bposy = model->y;
     bposz = model->z;
@@ -264,20 +264,20 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
     if (bposz == posz)
         zenabled = false;
 
-    for (int i = 0; i < NE_MAX_PHYSICS; i++)
+    for (int i = 0; i < NEA_MAX_PHYSICS; i++)
     {
-        if (NE_PhysicsPointers[i] == NULL)
+        if (NEA_PhysicsPointers[i] == NULL)
             continue;
 
         // Check that we aren't checking an object with itself
-        if (NE_PhysicsPointers[i] == pointer)
+        if (NEA_PhysicsPointers[i] == pointer)
             continue;
 
         // Check that both objects are in the same group
-        if (NE_PhysicsPointers[i]->physicsgroup != pointer->physicsgroup)
+        if (NEA_PhysicsPointers[i]->physicsgroup != pointer->physicsgroup)
             continue;
 
-        NE_Physics *otherpointer = NE_PhysicsPointers[i];
+        NEA_Physics *otherpointer = NEA_PhysicsPointers[i];
         //Get coordinates
         int otherposx = 0, otherposy = 0, otherposz = 0;
 
@@ -287,7 +287,7 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
         otherposz = model->z;
 
         // Both are boxes
-        if (pointer->type == NE_BoundingBox && otherpointer->type == NE_BoundingBox)
+        if (pointer->type == NEA_BoundingBox && otherpointer->type == NEA_BoundingBox)
         {
             bool collision =
                 ((abs(posx - otherposx) < (pointer->xsize + otherpointer->xsize) >> 1) &&
@@ -299,7 +299,7 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
 
             pointer->iscolliding = true;
 
-            if (pointer->oncollision == NE_ColBounce)
+            if (pointer->oncollision == NEA_ColBounce)
             {
                 // Used to reduce speed:
                 int temp = (pointer->keptpercent << 12) / 100; // f32 format
@@ -320,7 +320,7 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
                     }
                     else
                     {
-                        if (abs(pointer->yspeed) > NE_MIN_BOUNCE_SPEED)
+                        if (abs(pointer->yspeed) > NEA_MIN_BOUNCE_SPEED)
                         {
                             pointer->yspeed = -mulf32(temp, pointer->yspeed - pointer->gravity);
                         }
@@ -353,7 +353,7 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
                     pointer->zspeed = -mulf32(temp, pointer->zspeed);
                 }
             }
-            else if (pointer->oncollision == NE_ColStop)
+            else if (pointer->oncollision == NEA_ColStop)
             {
                 if ((yenabled) && ((abs(bposy - otherposy) >= (pointer->ysize + otherpointer->ysize) >> 1)))
                 {
@@ -433,17 +433,17 @@ ARM_CODE void NE_PhysicsUpdate(NE_Physics *pointer)
     }
 }
 
-bool NE_PhysicsCheckCollision(const NE_Physics *pointer1,
-                              const NE_Physics *pointer2)
+bool NEA_PhysicsCheckCollision(const NEA_Physics *pointer1,
+                              const NEA_Physics *pointer2)
 {
-    NE_AssertPointer(pointer1, "NULL pointer 1");
-    NE_AssertPointer(pointer2, "NULL pointer 2");
-    NE_Assert(pointer1 != pointer2, "Both objects are the same one");
+    NEA_AssertPointer(pointer1, "NULL pointer 1");
+    NEA_AssertPointer(pointer2, "NULL pointer 2");
+    NEA_Assert(pointer1 != pointer2, "Both objects are the same one");
 
     // Get coordinates
     int posx = 0, posy = 0, posz = 0;
 
-    NE_Model *model = pointer1->model;
+    NEA_Model *model = pointer1->model;
     posx = model->x;
     posy = model->y;
     posz = model->z;
@@ -456,7 +456,7 @@ bool NE_PhysicsCheckCollision(const NE_Physics *pointer1,
     otherposz = model->z;
 
     // Both are boxes
-    //if(pointer->type == NE_BoundingBox && otherpointer->type == NE_BoundingBox)
+    //if(pointer->type == NEA_BoundingBox && otherpointer->type == NEA_BoundingBox)
     //{
     if ((abs(posx - otherposx) < (pointer1->xsize + pointer2->xsize) >> 1) &&
         (abs(posy - otherposy) < (pointer1->ysize + pointer2->ysize) >> 1) &&

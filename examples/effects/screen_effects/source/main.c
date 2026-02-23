@@ -2,15 +2,15 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "teapot_bin.h"
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Model;
+    NEA_Camera *Camera;
+    NEA_Model *Model;
 } SceneData;
 
 void Draw3DScene(void *arg)
@@ -18,10 +18,10 @@ void Draw3DScene(void *arg)
     SceneData *Scene = arg;
 
     // Set rear plane color
-    NE_ClearColorSet(NE_Red, 31, 63);
+    NEA_ClearColorSet(NEA_Red, 31, 63);
 
-    NE_CameraUse(Scene->Camera);
-    NE_ModelDraw(Scene->Model);
+    NEA_CameraUse(Scene->Camera);
+    NEA_ModelDraw(Scene->Model);
 }
 
 void Draw3DScene2(void *arg)
@@ -29,10 +29,10 @@ void Draw3DScene2(void *arg)
     SceneData *Scene = arg;
 
     // Set rear plane color
-    NE_ClearColorSet(NE_Green, 31, 63);
+    NEA_ClearColorSet(NEA_Green, 31, 63);
 
-    NE_CameraUse(Scene->Camera);
-    NE_ModelDraw(Scene->Model);
+    NEA_CameraUse(Scene->Camera);
+    NEA_ModelDraw(Scene->Model);
 }
 
 int main(int argc, char *argv[])
@@ -41,36 +41,36 @@ int main(int argc, char *argv[])
 
     // This is needed for special screen effects
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
     // Init dual 3D mode and console
-    NE_InitDual3D();
-    NE_InitConsole();
+    NEA_InitDual3D();
+    NEA_InitConsole();
 
     // Allocate objects...
-    Scene.Model = NE_ModelCreate(NE_Static);
-    Scene.Camera = NE_CameraCreate();
+    Scene.Model = NEA_ModelCreate(NEA_Static);
+    Scene.Camera = NEA_CameraCreate();
 
     // Setup camera
-    NE_CameraSet(Scene.Camera,
+    NEA_CameraSet(Scene.Camera,
                  0, 0, -3,
                  0, 0, 0,
                  0, 1, 0);
 
     // Load model
-    NE_ModelLoadStaticMesh(Scene.Model, teapot_bin);
+    NEA_ModelLoadStaticMesh(Scene.Model, teapot_bin);
 
     // Set light color and direction
-    NE_LightSet(0, NE_White, -0.5, -0.5, -0.5);
+    NEA_LightSet(0, NEA_White, -0.5, -0.5, -0.5);
 
     // Other test configurations
-    //NE_SpecialEffectNoiseConfig(31);
-    //NE_SpecialEffectSineConfig(3, 8);
+    //NEA_SpecialEffectNoiseConfig(31);
+    //NEA_SpecialEffectSineConfig(3, 8);
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
         // Refresh keys
         scanKeys();
@@ -83,31 +83,31 @@ int main(int argc, char *argv[])
 
         // Rotate model
         if (keys & KEY_UP)
-            NE_ModelRotate(Scene.Model, 0, 0, 2);
+            NEA_ModelRotate(Scene.Model, 0, 0, 2);
         if (keys & KEY_DOWN)
-            NE_ModelRotate(Scene.Model, 0, 0, -2);
+            NEA_ModelRotate(Scene.Model, 0, 0, -2);
         if (keys & KEY_RIGHT)
-            NE_ModelRotate(Scene.Model, 0, 2, 0);
+            NEA_ModelRotate(Scene.Model, 0, 2, 0);
         if (keys & KEY_LEFT)
-            NE_ModelRotate(Scene.Model, 0, -2, 0);
+            NEA_ModelRotate(Scene.Model, 0, -2, 0);
 
         // Activate effects
         if (kdown & KEY_B)
-            NE_SpecialEffectSet(NE_NOISE);
+            NEA_SpecialEffectSet(NEA_NOISE);
         if (kdown & KEY_A)
-            NE_SpecialEffectSet(NE_SINE);
+            NEA_SpecialEffectSet(NEA_SINE);
         // Deactivate effects
         if (kdown & KEY_X)
-            NE_SpecialEffectSet(0);
+            NEA_SpecialEffectSet(0);
 
         // Pause effects
         if (kdown & KEY_L)
-            NE_SpecialEffectPause(true);
+            NEA_SpecialEffectPause(true);
         if (kdown & KEY_R)
-            NE_SpecialEffectPause(false);
+            NEA_SpecialEffectPause(false);
 
         // Draw 3D scenes
-        NE_ProcessDualArg(Draw3DScene, Draw3DScene2, &Scene, &Scene);
+        NEA_ProcessDualArg(Draw3DScene, Draw3DScene2, &Scene, &Scene);
     }
 
     return 0;

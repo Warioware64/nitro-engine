@@ -2,57 +2,57 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEText.c
+/// @file NEAText.c
 
 typedef struct {
     int sizex, sizey;
-    const NE_Material *material;
+    const NEA_Material *material;
 } ne_textinfo_t;
 
-static ne_textinfo_t NE_TextInfo[NE_MAX_TEXT_FONTS];
+static ne_textinfo_t NEA_TextInfo[NEA_MAX_TEXT_FONTS];
 
-static int NE_TEXT_PRIORITY = 0;
+static int NEA_TEXT_PRIORITY = 0;
 
-void NE_TextPrioritySet(int priority)
+void NEA_TextPrioritySet(int priority)
 {
-    NE_TEXT_PRIORITY = priority;
+    NEA_TEXT_PRIORITY = priority;
 }
 
-void NE_TextPriorityReset(void)
+void NEA_TextPriorityReset(void)
 {
-    NE_TEXT_PRIORITY = 0;
+    NEA_TEXT_PRIORITY = 0;
 }
 
-void NE_TextInit(int slot, const NE_Material *mat, int sizex, int sizey)
+void NEA_TextInit(int slot, const NEA_Material *mat, int sizex, int sizey)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
-    NE_AssertPointer(mat, "NULL pointer");
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertPointer(mat, "NULL pointer");
 
-    NE_TextInfo[slot].sizex = sizex;
-    NE_TextInfo[slot].sizey = sizey;
-    NE_TextInfo[slot].material = mat;
+    NEA_TextInfo[slot].sizex = sizex;
+    NEA_TextInfo[slot].sizey = sizey;
+    NEA_TextInfo[slot].material = mat;
 }
 
-void NE_TextEnd(int slot)
+void NEA_TextEnd(int slot)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
 
-    NE_TextInfo[slot].sizex = 0;
-    NE_TextInfo[slot].sizey = 0;
-    NE_TextInfo[slot].material = NULL;
+    NEA_TextInfo[slot].sizex = 0;
+    NEA_TextInfo[slot].sizey = 0;
+    NEA_TextInfo[slot].material = NULL;
 }
 
-void NE_TextResetSystem(void)
+void NEA_TextResetSystem(void)
 {
-    for (int i = 0; i < NE_MAX_TEXT_FONTS; i++)
+    for (int i = 0; i < NEA_MAX_TEXT_FONTS; i++)
     {
-        NE_TextInfo[i].sizex = 0;
-        NE_TextInfo[i].sizey = 0;
-        NE_TextInfo[i].material = NULL;
+        NEA_TextInfo[i].sizex = 0;
+        NEA_TextInfo[i].sizey = 0;
+        NEA_TextInfo[i].material = NULL;
     }
 }
 
@@ -61,7 +61,7 @@ static void _ne_texturecuadprint(int xcrd1, int ycrd1, int xcrd2, int ycrd2,
 {
     GFX_TEX_COORD = TEXTURE_PACK(inttot16(xtx1), inttot16(ytx1));
     GFX_VERTEX16 = (ycrd1 << 16) | (xcrd1 & 0xFFFF);
-    GFX_VERTEX16 = NE_TEXT_PRIORITY;
+    GFX_VERTEX16 = NEA_TEXT_PRIORITY;
 
     GFX_TEX_COORD = TEXTURE_PACK(inttot16(xtx1), inttot16(ytx2));
     GFX_VERTEX_XY = (ycrd2 << 16) | (xcrd1 & 0xFFFF);
@@ -88,16 +88,16 @@ static void _ne_charprint(const ne_textinfo_t * textinfo, int xcrd1, int ycrd1,
                          xcoord, ycoord, xcoord2, ycoord2);
 }
 
-int NE_TextPrint(int slot, int x, int y, u32 color, const char *text)
+int NEA_TextPrint(int slot, int x, int y, u32 color, const char *text)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
 
-    const ne_textinfo_t *textinfo = &NE_TextInfo[slot];
+    const ne_textinfo_t *textinfo = &NEA_TextInfo[slot];
 
     if (textinfo->material == NULL)
         return -1;
 
-    NE_MaterialUse(textinfo->material);
+    NEA_MaterialUse(textinfo->material);
     GFX_COLOR = color;
 
     int count = 0;
@@ -137,17 +137,17 @@ int NE_TextPrint(int slot, int x, int y, u32 color, const char *text)
     return count;
 }
 
-int NE_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
+int NEA_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
                     int charnum, const char *text)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
 
-    const ne_textinfo_t *textinfo = &NE_TextInfo[slot];
+    const ne_textinfo_t *textinfo = &NEA_TextInfo[slot];
 
     if (textinfo->material == NULL)
         return -1;
 
-    NE_MaterialUse(textinfo->material);
+    NEA_MaterialUse(textinfo->material);
     GFX_COLOR = color;
 
     int count = 0;
@@ -195,16 +195,16 @@ int NE_TextPrintBox(int slot, int x, int y, int endx, int endy, u32 color,
     return count;
 }
 
-int NE_TextPrintFree(int slot, int x, int y, u32 color, const char *text)
+int NEA_TextPrintFree(int slot, int x, int y, u32 color, const char *text)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
 
-    const ne_textinfo_t *textinfo = &NE_TextInfo[slot];
+    const ne_textinfo_t *textinfo = &NEA_TextInfo[slot];
 
     if (textinfo->material == NULL)
         return -1;
 
-    NE_MaterialUse(textinfo->material);
+    NEA_MaterialUse(textinfo->material);
     GFX_COLOR = color;
 
     int count = 0;
@@ -232,17 +232,17 @@ int NE_TextPrintFree(int slot, int x, int y, u32 color, const char *text)
     return count;
 }
 
-int NE_TextPrintBoxFree(int slot, int x, int y, int endx, int endy, u32 color,
+int NEA_TextPrintBoxFree(int slot, int x, int y, int endx, int endy, u32 color,
                         int charnum, const char *text)
 {
-    NE_AssertMinMax(0, slot, NE_MAX_TEXT_FONTS, "Invalid slot %d", slot);
+    NEA_AssertMinMax(0, slot, NEA_MAX_TEXT_FONTS, "Invalid slot %d", slot);
 
-    ne_textinfo_t *textinfo = &NE_TextInfo[slot];
+    ne_textinfo_t *textinfo = &NEA_TextInfo[slot];
 
     if (textinfo->material == NULL)
         return -1;
 
-    NE_MaterialUse(textinfo->material);
+    NEA_MaterialUse(textinfo->material);
     GFX_COLOR = color;
 
     int count = 0;

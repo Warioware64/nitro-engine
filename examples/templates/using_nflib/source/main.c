@@ -3,10 +3,10 @@
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 // SPDX-FileContributor: NightFox, 2009-2011
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 // NightFox’s Lib (NFlib) is a library that can supports the 2D hardware of the
-// NDS. It's ideal to complement Nitro Engine, as it only supports the 3D
+// NDS. It's ideal to complement Nitro Engine Advanced, as it only supports the 3D
 // hardware. The latest version can be found at the following link:
 //
 //     https://github.com/knightfox75/nds_nflib
@@ -15,7 +15,7 @@
 //
 // - Remember to avoid using 3D features of NFlib.
 //
-// - Don't use the dual 3D mode in Nitro Engine.
+// - Don't use the dual 3D mode in Nitro Engine Advanced.
 //
 // - You are free to use any features of NFlib in the secondary screen, but you
 //   need to assign VRAM C and D to NFlib to get space for sprites and
@@ -32,24 +32,24 @@
 
 #include <filesystem.h>
 #include <nds.h>
-#include <NEMain.h>
+#include <NEAMain.h>
 #include <nf_lib.h>
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Model;
-    NE_Animation *Animation;
-    NE_Material *Material;
+    NEA_Camera *Camera;
+    NEA_Model *Model;
+    NEA_Animation *Animation;
+    NEA_Material *Material;
 } SceneData;
 
 void Draw3DScene(void *arg)
 {
     SceneData *Scene = arg;
 
-    NE_CameraUse(Scene->Camera);
+    NEA_CameraUse(Scene->Camera);
 
-    NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_NONE, 0);
-    NE_ModelDraw(Scene->Model);
+    NEA_PolyFormat(31, 0, NEA_LIGHT_0, NEA_CULL_NONE, 0);
+    NEA_ModelDraw(Scene->Model);
 }
 
 void WaitLoop(void)
@@ -61,38 +61,38 @@ void WaitLoop(void)
 void LoadAndSetupGraphics3D(SceneData *Scene)
 {
     // When using nflib for the 2D sub screen engine, banks C and H are used for
-    // backgrounds and banks D and I are used for sprites. Nitro Engine only
+    // backgrounds and banks D and I are used for sprites. Nitro Engine Advanced only
     // uses bank E for palettes, so the only thing we need to do is to tell
-    // Nitro Engine to only use banks A and B and leave C and D unused.
+    // Nitro Engine Advanced to only use banks A and B and leave C and D unused.
 
-    NE_Init3D();
-    NE_TextureSystemReset(0, 0, NE_VRAM_AB);
+    NEA_Init3D();
+    NEA_TextureSystemReset(0, 0, NEA_VRAM_AB);
 
     // Create objects
 
-    Scene->Model = NE_ModelCreate(NE_Animated);
-    Scene->Camera = NE_CameraCreate();
-    Scene->Material = NE_MaterialCreate();
-    Scene->Animation = NE_AnimationCreate();
+    Scene->Model = NEA_ModelCreate(NEA_Animated);
+    Scene->Camera = NEA_CameraCreate();
+    Scene->Material = NEA_MaterialCreate();
+    Scene->Animation = NEA_AnimationCreate();
 
     // Load assets from the filesystem
 
-    if (NE_ModelLoadDSMFAT(Scene->Model, "robot.dsm") == 0)
+    if (NEA_ModelLoadDSMFAT(Scene->Model, "robot.dsm") == 0)
     {
         consoleDemoInit();
         printf("Couldn't load model...");
         WaitLoop();
     }
 
-    if (NE_AnimationLoadFAT(Scene->Animation, "robot_wave.dsa") == 0)
+    if (NEA_AnimationLoadFAT(Scene->Animation, "robot_wave.dsa") == 0)
     {
         consoleDemoInit();
         printf("Couldn't load animation...");
         WaitLoop();
     }
 
-    if (NE_MaterialTexLoadFAT(Scene->Material, NE_A1RGB5, 256, 256,
-                              NE_TEXGEN_TEXCOORD, "texture_tex.bin") == 0)
+    if (NEA_MaterialTexLoadFAT(Scene->Material, NEA_A1RGB5, 256, 256,
+                              NEA_TEXGEN_TEXCOORD, "texture_tex.bin") == 0)
     {
         consoleDemoInit();
         printf("Couldn't load texture...");
@@ -100,20 +100,20 @@ void LoadAndSetupGraphics3D(SceneData *Scene)
     }
 
     // Assign material to the model
-    NE_ModelSetMaterial(Scene->Model, Scene->Material);
+    NEA_ModelSetMaterial(Scene->Model, Scene->Material);
 
     // Assign animation to the model and start it
-    NE_ModelSetAnimation(Scene->Model, Scene->Animation);
-    NE_ModelAnimStart(Scene->Model, NE_ANIM_LOOP, floattof32(0.1));
+    NEA_ModelSetAnimation(Scene->Model, Scene->Animation);
+    NEA_ModelAnimStart(Scene->Model, NEA_ANIM_LOOP, floattof32(0.1));
 
     // Setup light
-    NE_LightSet(0, NE_White, 0, -1, -1);
+    NEA_LightSet(0, NEA_White, 0, -1, -1);
 
     // Setup background color
-    NE_ClearColorSet(NE_Black, 31, 63);
+    NEA_ClearColorSet(NEA_Black, 31, 63);
 
     // Setup camera
-    NE_CameraSet(Scene->Camera,
+    NEA_CameraSet(Scene->Camera,
                  6, 3, -4,
                  0, 3, 0,
                  0, 1, 0);
@@ -190,8 +190,8 @@ int main(int argc, char *argv[])
 
     // Setup interrupt handlers
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
     // Load and setup graphics
     LoadAndSetupGraphics3D(&Scene);
@@ -215,7 +215,7 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NE_WaitForVBL(NE_UPDATE_ANIMATIONS);
+        NEA_WaitForVBL(NEA_UPDATE_ANIMATIONS);
 
         // At this point we are in the vertical blank period. This is where 2D
         // elements have to be updated to avoid flickering.
@@ -236,13 +236,13 @@ int main(int argc, char *argv[])
             break;
 
         if (keys & KEY_RIGHT)
-            NE_ModelRotate(Scene.Model, 0, 2, 0);
+            NEA_ModelRotate(Scene.Model, 0, 2, 0);
         if (keys & KEY_LEFT)
-            NE_ModelRotate(Scene.Model, 0, -2, 0);
+            NEA_ModelRotate(Scene.Model, 0, -2, 0);
         if (keys & KEY_UP)
-            NE_ModelRotate(Scene.Model, 0, 0, 2);
+            NEA_ModelRotate(Scene.Model, 0, 0, 2);
         if (keys & KEY_DOWN)
-            NE_ModelRotate(Scene.Model, 0, 0, -2);
+            NEA_ModelRotate(Scene.Model, 0, 0, -2);
 
         if (keys & KEY_L)
         {
@@ -289,7 +289,7 @@ int main(int argc, char *argv[])
         NF_SpriteOamSet(1);
 
         // Draw 3D scene
-        NE_ProcessArg(Draw3DScene, &Scene);
+        NEA_ProcessArg(Draw3DScene, &Scene);
     }
 
     return 0;

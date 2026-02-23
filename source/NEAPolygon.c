@@ -2,48 +2,48 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEPolygon.c
+/// @file NEAPolygon.c
 
-void NE_LightOff(int index)
+void NEA_LightOff(int index)
 {
-    NE_AssertMinMax(0, index, 3, "Invalid light index %d", index);
+    NEA_AssertMinMax(0, index, 3, "Invalid light index %d", index);
 
     GFX_LIGHT_VECTOR = (index & 3) << 30;
     GFX_LIGHT_COLOR = (index & 3) << 30;
 }
 
-void NE_LightSetColor(int index, u32 color)
+void NEA_LightSetColor(int index, u32 color)
 {
-    NE_AssertMinMax(0, index, 3, "Invalid light number %d", index);
+    NEA_AssertMinMax(0, index, 3, "Invalid light number %d", index);
 
     GFX_LIGHT_COLOR = ((index & 3) << 30) | color;
 }
 
-void NE_LightSetI(int index, u32 color, int x, int y, int z)
+void NEA_LightSetI(int index, u32 color, int x, int y, int z)
 {
-    NE_AssertMinMax(0, index, 3, "Invalid light number %d", index);
+    NEA_AssertMinMax(0, index, 3, "Invalid light number %d", index);
 
     GFX_LIGHT_VECTOR = ((index & 3) << 30)
                      | ((z & 0x3FF) << 20) | ((y & 0x3FF) << 10) | (x & 0x3FF);
     GFX_LIGHT_COLOR = ((index & 3) << 30) | color;
 }
 
-void NE_ShininessTableGenerate(NE_ShininessFunction function)
+void NEA_ShininessTableGenerate(NEA_ShininessFunction function)
 {
     uint32_t table[128 / 4];
     uint8_t *bytes = (uint8_t *)table;
 
-    if (function == NE_SHININESS_LINEAR)
+    if (function == NEA_SHININESS_LINEAR)
     {
         for (int i = 0; i < 128; i++)
             bytes[i] = i * 2;
             //bytes[i] = 128 - i;
     }
-    else if (function == NE_SHININESS_QUADRATIC)
+    else if (function == NEA_SHININESS_QUADRATIC)
     {
         for (int i = 0; i < 128; i++)
         {
@@ -52,7 +52,7 @@ void NE_ShininessTableGenerate(NE_ShininessFunction function)
             bytes[i] = v * 2 / div;
         }
     }
-    else if (function == NE_SHININESS_CUBIC)
+    else if (function == NEA_SHININESS_CUBIC)
     {
         for (int i = 0; i < 128; i++)
         {
@@ -61,7 +61,7 @@ void NE_ShininessTableGenerate(NE_ShininessFunction function)
             bytes[i] = v * 2 / div;
         }
     }
-    else if (function == NE_SHININESS_QUARTIC)
+    else if (function == NEA_SHININESS_QUARTIC)
     {
         for (int i = 0; i < 128; i++)
         {
@@ -82,24 +82,24 @@ void NE_ShininessTableGenerate(NE_ShininessFunction function)
         GFX_SHININESS = table[i];
 }
 
-void NE_PolyFormat(u32 alpha, u32 id, NE_LightEnum lights,
-                   NE_CullingEnum culling, NE_OtherFormatEnum other)
+void NEA_PolyFormat(u32 alpha, u32 id, NEA_LightEnum lights,
+                   NEA_CullingEnum culling, NEA_OtherFormatEnum other)
 {
-    NE_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
-    NE_AssertMinMax(0, id, 63, "Invalid polygon ID %lu", id);
+    NEA_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
+    NEA_AssertMinMax(0, id, 63, "Invalid polygon ID %lu", id);
 
     GFX_POLY_FORMAT = POLY_ALPHA(alpha) | POLY_ID(id)
                     | lights | culling | other;
 }
 
-void NE_OutliningSetColor(u32 index, u32 color)
+void NEA_OutliningSetColor(u32 index, u32 color)
 {
-    NE_AssertMinMax(0, index, 7, "Invalaid outlining color index %lu", index);
+    NEA_AssertMinMax(0, index, 7, "Invalaid outlining color index %lu", index);
 
     GFX_EDGE_TABLE[index] = color;
 }
 
-void NE_SetupToonShadingTables(bool value)
+void NEA_SetupToonShadingTables(bool value)
 {
     if (value)
     {
@@ -115,9 +115,9 @@ void NE_SetupToonShadingTables(bool value)
     }
 }
 
-void NE_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth)
+void NEA_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth)
 {
-    NE_FogDisable();
+    NEA_FogDisable();
 
     GFX_CONTROL |= GL_FOG | ((shift & 0xF) << 8);
 
@@ -144,7 +144,7 @@ void NE_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth)
 // order for the code to be able to modify individual fields.
 static u32 ne_clearcolor = 0;
 
-void NE_FogEnableBackground(bool value)
+void NEA_FogEnableBackground(bool value)
 {
     if (value)
         ne_clearcolor |= BIT(15);
@@ -154,10 +154,10 @@ void NE_FogEnableBackground(bool value)
     GFX_CLEAR_COLOR = ne_clearcolor;
 }
 
-void NE_ClearColorSet(u32 color, u32 alpha, u32 id)
+void NEA_ClearColorSet(u32 color, u32 alpha, u32 id)
 {
-    NE_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
-    NE_AssertMinMax(0, id, 63, "Invalid polygon ID %lu", id);
+    NEA_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
+    NEA_AssertMinMax(0, id, 63, "Invalid polygon ID %lu", id);
 
     ne_clearcolor &= BIT(15);
 
@@ -168,17 +168,17 @@ void NE_ClearColorSet(u32 color, u32 alpha, u32 id)
     GFX_CLEAR_COLOR = ne_clearcolor;
 }
 
-u32 NE_ClearColorGet(void)
+u32 NEA_ClearColorGet(void)
 {
     return ne_clearcolor;
 }
 
-void NE_ClearBMPEnable(bool value)
+void NEA_ClearBMPEnable(bool value)
 {
-    if (NE_CurrentExecutionMode() != NE_ModeSingle3D)
+    if (NEA_CurrentExecutionMode() != NEA_ModeSingle3D)
     {
         // It needs two banks that are used for the display capture
-        NE_DebugPrint("Not available in dual 3D mode");
+        NEA_DebugPrint("Not available in dual 3D mode");
         return;
     }
 

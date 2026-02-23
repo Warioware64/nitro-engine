@@ -2,22 +2,22 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include "NEMain.h"
+#include "NEAMain.h"
 
-/// @file NEGUI.c
+/// @file NEAGUI.c
 
-extern NE_Input ne_input;
+extern NEA_Input ne_input;
 
-static NE_GUIObj **NE_guipointers;
-static int NE_GUI_OBJECTS;
+static NEA_GUIObj **NEA_guipointers;
+static int NEA_GUI_OBJECTS;
 static bool ne_gui_system_inited = false;
 
 typedef struct {
     int x1, y1, x2, y2;
     int event; // 0 = nothing, 1 = just pressed, 2 = held, 3 = just released
-    NE_Material *tex_1, *tex_2;
+    NEA_Material *tex_1, *tex_2;
     // Colors when button isn't pressed / is pressed. The default is white
     u32 color1, color2;
     u32 alpha1, alpha2;
@@ -27,7 +27,7 @@ typedef struct {
     int x1, y1, x2, y2;
     int event;
     bool checked;
-    NE_Material *tex_1, *tex_2;
+    NEA_Material *tex_1, *tex_2;
     u32 color1, color2;
     u32 alpha1, alpha2;
 } ne_checkbox_t;
@@ -37,7 +37,7 @@ typedef struct {
     int event;
     bool checked;
     int group;
-    NE_Material *tex_1, *tex_2;
+    NEA_Material *tex_1, *tex_2;
     u32 color1, color2;
     u32 alpha1, alpha2;
 } ne_radiobutton_t;
@@ -48,7 +48,7 @@ typedef struct {
     int value;
     int range, desp; //range = max - min; value + desp = real value
     bool isvertical;
-    NE_Material *texbtn, *texbar, *texlong;
+    NEA_Material *texbtn, *texbar, *texlong;
     int totalsize, barsize;
     int coord; // helper to avoid some frequent operations
     // 1,2 used for buttons, barcolor used for background of slidebar
@@ -57,24 +57,24 @@ typedef struct {
 } ne_slidebar_t;
 
 // Internal use
-static void NE_ResetRadioButtonGroup(int group)
+static void NEA_ResetRadioButtonGroup(int group)
 {
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] == NULL)
+        if (NEA_guipointers[i] == NULL)
             continue;
 
-        if (NE_guipointers[i]->type != NE_RadioButton)
+        if (NEA_guipointers[i]->type != NEA_RadioButton)
             continue;
 
-        ne_radiobutton_t *rabtn = (void *)NE_guipointers[i]->pointer;
+        ne_radiobutton_t *rabtn = (void *)NEA_guipointers[i]->pointer;
 
         if (rabtn->group == group)
             rabtn->checked = false;
     }
 }
 
-static void NE_GUIUpdateButton(NE_GUIObj *obj)
+static void NEA_GUIUpdateButton(NEA_GUIObj *obj)
 {
     ne_button_t *button = (void *)obj;
 
@@ -105,7 +105,7 @@ static void NE_GUIUpdateButton(NE_GUIObj *obj)
     }
 }
 
-static void NE_GUIUpdateCheckBox(NE_GUIObj *obj)
+static void NEA_GUIUpdateCheckBox(NEA_GUIObj *obj)
 {
     ne_checkbox_t *chbox = (void *)obj;
 
@@ -137,7 +137,7 @@ static void NE_GUIUpdateCheckBox(NE_GUIObj *obj)
     }
 }
 
-static void NE_GUIUpdateRadioButton(NE_GUIObj *obj)
+static void NEA_GUIUpdateRadioButton(NEA_GUIObj *obj)
 {
     ne_radiobutton_t *rabtn = (void *)obj;
 
@@ -156,7 +156,7 @@ static void NE_GUIUpdateRadioButton(NE_GUIObj *obj)
         else if (ne_input.kup & KEY_TOUCH && rabtn->event == 2)
         {
             rabtn->event = 4;
-            NE_ResetRadioButtonGroup(rabtn->group);
+            NEA_ResetRadioButtonGroup(rabtn->group);
             rabtn->checked = true;
         }
         else
@@ -170,7 +170,7 @@ static void NE_GUIUpdateRadioButton(NE_GUIObj *obj)
     }
 }
 
-static void NE_GUIUpdateSlideBar(NE_GUIObj *obj)
+static void NEA_GUIUpdateSlideBar(NEA_GUIObj *obj)
 {
     ne_slidebar_t *sldbar = (void *)obj;
 
@@ -316,42 +316,42 @@ static void NE_GUIUpdateSlideBar(NE_GUIObj *obj)
     }
 }
 
-void NE_GUIUpdate(void)
+void NEA_GUIUpdate(void)
 {
     if (!ne_gui_system_inited)
         return;
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] == NULL)
+        if (NEA_guipointers[i] == NULL)
             continue;
 
-        NE_GUITypes type = NE_guipointers[i]->type;
+        NEA_GUITypes type = NEA_guipointers[i]->type;
 
-        if (type == NE_Button)
-            NE_GUIUpdateButton(NE_guipointers[i]->pointer);
-        else if (type == NE_CheckBox)
-            NE_GUIUpdateCheckBox(NE_guipointers[i]->pointer);
-        else if (type == NE_RadioButton)
-            NE_GUIUpdateRadioButton(NE_guipointers[i]->pointer);
-        else if (type == NE_SlideBar)
-            NE_GUIUpdateSlideBar(NE_guipointers[i]->pointer);
+        if (type == NEA_Button)
+            NEA_GUIUpdateButton(NEA_guipointers[i]->pointer);
+        else if (type == NEA_CheckBox)
+            NEA_GUIUpdateCheckBox(NEA_guipointers[i]->pointer);
+        else if (type == NEA_RadioButton)
+            NEA_GUIUpdateRadioButton(NEA_guipointers[i]->pointer);
+        else if (type == NEA_SlideBar)
+            NEA_GUIUpdateSlideBar(NEA_guipointers[i]->pointer);
         else
-            NE_DebugPrint("Unknown GUI object type: %d", type);
+            NEA_DebugPrint("Unknown GUI object type: %d", type);
     }
 }
 
-static void NE_GUIDrawButton(NE_GUIObj *obj, int priority)
+static void NEA_GUIDrawButton(NEA_GUIObj *obj, int priority)
 {
     ne_button_t *button = (void *)obj;
-    NE_Material *tex;
+    NEA_Material *tex;
     u32 color;
 
     if (button->event > 0)
     {
         // Pressed
         GFX_POLY_FORMAT = POLY_ALPHA(button->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         tex = button->tex_2;
         color = button->color2;
     }
@@ -359,24 +359,24 @@ static void NE_GUIDrawButton(NE_GUIObj *obj, int priority)
     {
         // Not-pressed
         GFX_POLY_FORMAT = POLY_ALPHA(button->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         tex = button->tex_1;
         color = button->color1;
     }
 
     if (tex == NULL)
     {
-        NE_2DDrawQuad(button->x1, button->y1, button->x2, button->y2,
+        NEA_2DDrawQuad(button->x1, button->y1, button->x2, button->y2,
                       priority, color);
     }
     else
     {
-        NE_2DDrawTexturedQuadColor(button->x1, button->y1, button->x2,
+        NEA_2DDrawTexturedQuadColor(button->x1, button->y1, button->x2,
                                    button->y2, priority, tex, color);
     }
 }
 
-static void NE_GUIDrawCheckBox(NE_GUIObj *obj, int priority)
+static void NEA_GUIDrawCheckBox(NEA_GUIObj *obj, int priority)
 {
     ne_checkbox_t *chbox = (void *)obj;
     u32 color;
@@ -384,31 +384,31 @@ static void NE_GUIDrawCheckBox(NE_GUIObj *obj, int priority)
     if (chbox->event > 0)
     {
         GFX_POLY_FORMAT = POLY_ALPHA(chbox->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = chbox->color2;
     }
     else
     {
         GFX_POLY_FORMAT = POLY_ALPHA(chbox->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = chbox->color1;
     }
 
-    NE_Material *tex = chbox->checked ? chbox->tex_2 : chbox->tex_1;
+    NEA_Material *tex = chbox->checked ? chbox->tex_2 : chbox->tex_1;
 
     if (tex == NULL)
     {
-        NE_2DDrawQuad(chbox->x1, chbox->y1, chbox->x2, chbox->y2,
+        NEA_2DDrawQuad(chbox->x1, chbox->y1, chbox->x2, chbox->y2,
                       priority, color);
     }
     else
     {
-        NE_2DDrawTexturedQuadColor(chbox->x1, chbox->y1, chbox->x2,
+        NEA_2DDrawTexturedQuadColor(chbox->x1, chbox->y1, chbox->x2,
                                    chbox->y2, priority, tex, color);
     }
 }
 
-static void NE_GUIDrawRadioButton(NE_GUIObj *obj, int priority)
+static void NEA_GUIDrawRadioButton(NEA_GUIObj *obj, int priority)
 {
     ne_radiobutton_t *rabtn = (void *)obj;
     u32 color;
@@ -416,31 +416,31 @@ static void NE_GUIDrawRadioButton(NE_GUIObj *obj, int priority)
     if (rabtn->event > 0)
     {
         GFX_POLY_FORMAT = POLY_ALPHA(rabtn->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = rabtn->color2;
     }
     else
     {
         GFX_POLY_FORMAT = POLY_ALPHA(rabtn->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = rabtn->color1;
     }
 
-    NE_Material *tex = rabtn->checked ?  rabtn->tex_2 : rabtn->tex_1;
+    NEA_Material *tex = rabtn->checked ?  rabtn->tex_2 : rabtn->tex_1;
 
     if (tex == NULL)
     {
-        NE_2DDrawQuad(rabtn->x1, rabtn->y1, rabtn->x2, rabtn->y2,
+        NEA_2DDrawQuad(rabtn->x1, rabtn->y1, rabtn->x2, rabtn->y2,
                   priority, color);
     }
     else
     {
-        NE_2DDrawTexturedQuadColor(rabtn->x1, rabtn->y1, rabtn->x2,
+        NEA_2DDrawTexturedQuadColor(rabtn->x1, rabtn->y1, rabtn->x2,
                        rabtn->y2, priority, tex, color);
     }
 }
 
-static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
+static void NEA_GUIDrawSlideBar(NEA_GUIObj *obj, int priority)
 {
     ne_slidebar_t *sldbar = (void *)obj;
     u32 color;
@@ -462,7 +462,7 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     }
 
     // Load texture of the two buttons
-    NE_Material *tex = sldbar->texbtn;
+    NEA_Material *tex = sldbar->texbtn;
 
     // Plus button
     // -----------
@@ -470,29 +470,29 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     if (sldbar->event_plus > 0)
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color2;
     }
     else
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color1;
     }
 
     if (sldbar->isvertical)
     {
         if (tex == NULL)
-            NE_2DDrawQuad(x1, tmp2, x2, y2, priority, color);
+            NEA_2DDrawQuad(x1, tmp2, x2, y2, priority, color);
         else
-            NE_2DDrawTexturedQuadColor(x1, tmp2, x2, y2, priority, tex, color);
+            NEA_2DDrawTexturedQuadColor(x1, tmp2, x2, y2, priority, tex, color);
     }
     else
     {
         if (tex == NULL)
-            NE_2DDrawQuad(tmp2, y1, x2, y2, priority, color);
+            NEA_2DDrawQuad(tmp2, y1, x2, y2, priority, color);
         else
-            NE_2DDrawTexturedQuadColor(tmp2, y1, x2, y2, priority, tex, color);
+            NEA_2DDrawTexturedQuadColor(tmp2, y1, x2, y2, priority, tex, color);
     }
 
     // Minus button
@@ -501,29 +501,29 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     if (sldbar->event_minus > 0)
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color2;
     }
     else
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color1;
     }
 
     if (sldbar->isvertical)
     {
         if (tex == NULL)
-            NE_2DDrawQuad(x1, y1, x2, tmp1, priority, color);
+            NEA_2DDrawQuad(x1, y1, x2, tmp1, priority, color);
         else
-            NE_2DDrawTexturedQuadColor(x1, y1, x2, tmp1, priority, tex, color);
+            NEA_2DDrawTexturedQuadColor(x1, y1, x2, tmp1, priority, tex, color);
     }
     else
     {
         if (tex == NULL)
-            NE_2DDrawQuad(x1, y1, tmp1, y2, priority, color);
+            NEA_2DDrawQuad(x1, y1, tmp1, y2, priority, color);
         else
-            NE_2DDrawTexturedQuadColor(x1, y1, tmp1, y2, priority, tex, color);
+            NEA_2DDrawTexturedQuadColor(x1, y1, tmp1, y2, priority, tex, color);
     }
 
     // Bar button
@@ -535,13 +535,13 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     if (sldbar->event_bar > 0)
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha2)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color2;
     }
     else
     {
         GFX_POLY_FORMAT = POLY_ALPHA(sldbar->alpha1)
-                        | POLY_ID(NE_GUI_POLY_ID) | NE_CULL_NONE;
+                        | POLY_ID(NEA_GUI_POLY_ID) | NEA_CULL_NONE;
         color = sldbar->color1;
     }
 
@@ -549,13 +549,13 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     {
         if (tex == NULL)
         {
-            NE_2DDrawQuad(x1, sldbar->coord,
+            NEA_2DDrawQuad(x1, sldbar->coord,
                           x2, sldbar->coord + sldbar->barsize,
                           priority, color);
         }
         else
         {
-            NE_2DDrawTexturedQuadColor(x1, sldbar->coord,
+            NEA_2DDrawTexturedQuadColor(x1, sldbar->coord,
                                        x2, sldbar->coord + sldbar->barsize,
                                        priority, tex, color);
         }
@@ -564,13 +564,13 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     {
         if (tex == NULL)
         {
-            NE_2DDrawQuad(sldbar->coord, y1,
+            NEA_2DDrawQuad(sldbar->coord, y1,
                           sldbar->coord + sldbar->barsize, y2,
                           priority, color);
         }
         else
         {
-            NE_2DDrawTexturedQuadColor(sldbar->coord, y1,
+            NEA_2DDrawTexturedQuadColor(sldbar->coord, y1,
                                        sldbar->coord + sldbar->barsize, y2,
                                        priority, tex, color);
         }
@@ -583,7 +583,7 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     tex = sldbar->texlong;
     color = sldbar->barcolor;
     GFX_POLY_FORMAT = POLY_ALPHA(sldbar->baralpha)
-                    | POLY_ID(NE_GUI_POLY_ID_ALT) | NE_CULL_NONE;
+                    | POLY_ID(NEA_GUI_POLY_ID_ALT) | NEA_CULL_NONE;
 
     // Now we need to use `priority + 1` as priority. The bar button must
     // be in front of bar. `priority + 1` is less priority than `priority`.
@@ -592,11 +592,11 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     {
         if (tex == NULL)
         {
-            NE_2DDrawQuad(x1, tmp1, x2, tmp2, priority + 1, color);
+            NEA_2DDrawQuad(x1, tmp1, x2, tmp2, priority + 1, color);
         }
         else
         {
-            NE_2DDrawTexturedQuadColor(x1, tmp1, x2, tmp2,
+            NEA_2DDrawTexturedQuadColor(x1, tmp1, x2, tmp2,
                                        priority + 1, tex, color);
         }
     }
@@ -604,73 +604,73 @@ static void NE_GUIDrawSlideBar(NE_GUIObj *obj, int priority)
     {
         if (tex == NULL)
         {
-            NE_2DDrawQuad(tmp1, y1, tmp2, y2, priority + 1, color);
+            NEA_2DDrawQuad(tmp1, y1, tmp2, y2, priority + 1, color);
         }
         else
         {
-            NE_2DDrawTexturedQuadColor(tmp1, y1, tmp2, y2,
+            NEA_2DDrawTexturedQuadColor(tmp1, y1, tmp2, y2,
                                        priority + 1, tex, color);
         }
     }
 }
 
-void NE_GUIDraw(void)
+void NEA_GUIDraw(void)
 {
     if (!ne_gui_system_inited)
         return;
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] == NULL)
+        if (NEA_guipointers[i] == NULL)
             continue;
 
-        NE_GUIObj *obj = NE_guipointers[i]->pointer;
-        NE_GUITypes type = NE_guipointers[i]->type;
-        int priority = i + NE_GUI_MIN_PRIORITY;
+        NEA_GUIObj *obj = NEA_guipointers[i]->pointer;
+        NEA_GUITypes type = NEA_guipointers[i]->type;
+        int priority = i + NEA_GUI_MIN_PRIORITY;
 
-        if (type == NE_Button)
-            NE_GUIDrawButton(obj, priority);
-        else if (type == NE_CheckBox)
-            NE_GUIDrawCheckBox(obj, priority);
-        else if (type == NE_RadioButton)
-            NE_GUIDrawRadioButton(obj, priority);
-        else if (type == NE_SlideBar)
-            NE_GUIDrawSlideBar(obj, priority);
+        if (type == NEA_Button)
+            NEA_GUIDrawButton(obj, priority);
+        else if (type == NEA_CheckBox)
+            NEA_GUIDrawCheckBox(obj, priority);
+        else if (type == NEA_RadioButton)
+            NEA_GUIDrawRadioButton(obj, priority);
+        else if (type == NEA_SlideBar)
+            NEA_GUIDrawSlideBar(obj, priority);
         else
-            NE_DebugPrint("Unknown GUI object type: %d", type);
+            NEA_DebugPrint("Unknown GUI object type: %d", type);
     }
 }
 
-NE_GUIObj *NE_GUIButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2)
+NEA_GUIObj *NEA_GUIButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2)
 {
     if (!ne_gui_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] != NULL)
+        if (NEA_guipointers[i] != NULL)
             continue;
 
         ne_button_t *ptr = malloc(sizeof(ne_button_t));
         if (ptr == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i] = malloc(sizeof(NE_GUIObj));
-        if (NE_guipointers[i] == NULL)
+        NEA_guipointers[i] = malloc(sizeof(NEA_GUIObj));
+        if (NEA_guipointers[i] == NULL)
         {
             free(ptr);
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i]->pointer = (void *)ptr;
-        NE_guipointers[i]->type = NE_Button;
+        NEA_guipointers[i]->pointer = (void *)ptr;
+        NEA_guipointers[i]->type = NEA_Button;
 
         ptr->x1 = x1;
         ptr->y1 = y1;
@@ -678,47 +678,47 @@ NE_GUIObj *NE_GUIButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2)
         ptr->y2 = y2;
         ptr->event = -1;
         ptr->tex_1 = ptr->tex_2 = NULL;
-        ptr->color1 = ptr->color2 = NE_White;
+        ptr->color1 = ptr->color2 = NEA_White;
         ptr->alpha1 = ptr->alpha2 = 31;
 
-        return NE_guipointers[i];
+        return NEA_guipointers[i];
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-NE_GUIObj *NE_GUICheckBoxCreate(s16 x1, s16 y1, s16 x2, s16 y2, bool initialvalue)
+NEA_GUIObj *NEA_GUICheckBoxCreate(s16 x1, s16 y1, s16 x2, s16 y2, bool initialvalue)
 {
     if (!ne_gui_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] != NULL)
+        if (NEA_guipointers[i] != NULL)
             continue;
 
         ne_checkbox_t *ptr = malloc(sizeof(ne_checkbox_t));
         if (ptr == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i] = malloc(sizeof(NE_GUIObj));
-        if (NE_guipointers[i] == NULL)
+        NEA_guipointers[i] = malloc(sizeof(NEA_GUIObj));
+        if (NEA_guipointers[i] == NULL)
         {
             free(ptr);
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i]->pointer = (void *)ptr;
-        NE_guipointers[i]->type = NE_CheckBox;
+        NEA_guipointers[i]->pointer = (void *)ptr;
+        NEA_guipointers[i]->type = NEA_CheckBox;
 
         ptr->x1 = x1;
         ptr->y1 = y1;
@@ -726,49 +726,49 @@ NE_GUIObj *NE_GUICheckBoxCreate(s16 x1, s16 y1, s16 x2, s16 y2, bool initialvalu
         ptr->y2 = y2;
         ptr->event = -1;
         ptr->tex_1 = ptr->tex_2 = NULL;
-        ptr->color1 = ptr->color2 = NE_White;
+        ptr->color1 = ptr->color2 = NEA_White;
         ptr->alpha1 = ptr->alpha2 = 31;
         ptr->checked = initialvalue;
 
-        return NE_guipointers[i];
+        return NEA_guipointers[i];
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-NE_GUIObj *NE_GUIRadioButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2, int group,
+NEA_GUIObj *NEA_GUIRadioButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2, int group,
                                    bool initialvalue)
 {
     if (!ne_gui_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] != NULL)
+        if (NEA_guipointers[i] != NULL)
             continue;
 
         ne_radiobutton_t *ptr = malloc(sizeof(ne_radiobutton_t));
         if (ptr == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i] = malloc(sizeof(NE_GUIObj));
-        if (NE_guipointers[i] == NULL)
+        NEA_guipointers[i] = malloc(sizeof(NEA_GUIObj));
+        if (NEA_guipointers[i] == NULL)
         {
             free(ptr);
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i]->pointer = (void *)ptr;
-        NE_guipointers[i]->type = NE_RadioButton;
+        NEA_guipointers[i]->pointer = (void *)ptr;
+        NEA_guipointers[i]->type = NEA_RadioButton;
 
         ptr->x1 = x1;
         ptr->y1 = y1;
@@ -776,53 +776,53 @@ NE_GUIObj *NE_GUIRadioButtonCreate(s16 x1, s16 y1, s16 x2, s16 y2, int group,
         ptr->y2 = y2;
         ptr->event = -1;
         ptr->tex_1 = ptr->tex_2 = NULL;
-        ptr->color1 = ptr->color2 = NE_White;
+        ptr->color1 = ptr->color2 = NEA_White;
         ptr->alpha1 = ptr->alpha2 = 31;
         ptr->group = group;
 
         if (initialvalue)
-            NE_ResetRadioButtonGroup(group);
+            NEA_ResetRadioButtonGroup(group);
 
         ptr->checked = initialvalue;
-        return NE_guipointers[i];
+        return NEA_guipointers[i];
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-NE_GUIObj *NE_GUISlideBarCreate(s16 x1, s16 y1, s16 x2, s16 y2, int min,
+NEA_GUIObj *NEA_GUISlideBarCreate(s16 x1, s16 y1, s16 x2, s16 y2, int min,
                                 int max, int initialvalue)
 {
     if (!ne_gui_system_inited)
     {
-        NE_DebugPrint("System not initialized");
+        NEA_DebugPrint("System not initialized");
         return NULL;
     }
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] != NULL)
+        if (NEA_guipointers[i] != NULL)
             continue;
 
         ne_slidebar_t *ptr = malloc(sizeof(ne_slidebar_t));
         if (ptr == NULL)
         {
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i] = malloc(sizeof(NE_GUIObj));
-        if (NE_guipointers[i] == NULL)
+        NEA_guipointers[i] = malloc(sizeof(NEA_GUIObj));
+        if (NEA_guipointers[i] == NULL)
         {
             free(ptr);
-            NE_DebugPrint("Not enough memory");
+            NEA_DebugPrint("Not enough memory");
             return NULL;
         }
 
-        NE_guipointers[i]->pointer = (void *)ptr;
-        NE_guipointers[i]->type = NE_SlideBar;
+        NEA_guipointers[i]->pointer = (void *)ptr;
+        NEA_guipointers[i]->type = NEA_SlideBar;
 
         ptr->x1 = x1;
         ptr->y1 = y1;
@@ -830,7 +830,7 @@ NE_GUIObj *NE_GUISlideBarCreate(s16 x1, s16 y1, s16 x2, s16 y2, int min,
         ptr->y2 = y2;
         ptr->event_minus = ptr->event_plus = ptr->event_bar = -1;
         ptr->texbtn = ptr->texbar = ptr->texlong = NULL;
-        ptr->color1 = ptr->color2 = ptr->barcolor = NE_White;
+        ptr->color1 = ptr->color2 = ptr->barcolor = NEA_White;
         ptr->alpha1 = ptr->alpha2 = ptr->baralpha = 31;
         ptr->value = initialvalue - min;
         ptr->desp = min;
@@ -853,20 +853,20 @@ NE_GUIObj *NE_GUISlideBarCreate(s16 x1, s16 y1, s16 x2, s16 y2, int min,
                             ptr->y1 + (ptr->x2 - ptr->x1) :
                             ptr->x1 + (ptr->y2 - ptr->y1);
 
-        return NE_guipointers[i];
+        return NEA_guipointers[i];
     }
 
-    NE_DebugPrint("No free slots");
+    NEA_DebugPrint("No free slots");
 
     return NULL;
 }
 
-void NE_GUIButtonConfig(NE_GUIObj *btn, NE_Material *material, u32 color,
-                        u32 alpha, NE_Material *pressedmaterial,
+void NEA_GUIButtonConfig(NEA_GUIObj *btn, NEA_Material *material, u32 color,
+                        u32 alpha, NEA_Material *pressedmaterial,
                         u32 pressedcolor, u32 pressedalpha)
 {
-    NE_AssertPointer(btn, "NULL pointer");
-    NE_Assert(btn->type == NE_Button, "Not a button");
+    NEA_AssertPointer(btn, "NULL pointer");
+    NEA_Assert(btn->type == NEA_Button, "Not a button");
 
     ne_button_t *button = btn->pointer;
 
@@ -878,12 +878,12 @@ void NE_GUIButtonConfig(NE_GUIObj *btn, NE_Material *material, u32 color,
     button->alpha2 = pressedalpha;
 }
 
-void NE_GUICheckBoxConfig(NE_GUIObj *chbx, NE_Material *materialtrue,
-                          NE_Material *materialfalse, u32 color, u32 alpha,
+void NEA_GUICheckBoxConfig(NEA_GUIObj *chbx, NEA_Material *materialtrue,
+                          NEA_Material *materialfalse, u32 color, u32 alpha,
                           u32 pressedcolor, u32 pressedalpha)
 {
-    NE_AssertPointer(chbx, "NULL pointer");
-    NE_Assert(chbx->type == NE_CheckBox, "Not a check box");
+    NEA_AssertPointer(chbx, "NULL pointer");
+    NEA_Assert(chbx->type == NEA_CheckBox, "Not a check box");
 
     ne_checkbox_t *checkbox = chbx->pointer;
 
@@ -895,12 +895,12 @@ void NE_GUICheckBoxConfig(NE_GUIObj *chbx, NE_Material *materialtrue,
     checkbox->alpha2 = pressedalpha;
 }
 
-void NE_GUIRadioButtonConfig(NE_GUIObj *rdbtn, NE_Material *materialtrue,
-                             NE_Material *materialfalse, u32 color, u32 alpha,
+void NEA_GUIRadioButtonConfig(NEA_GUIObj *rdbtn, NEA_Material *materialtrue,
+                             NEA_Material *materialfalse, u32 color, u32 alpha,
                              u32 pressedcolor, u32 pressedalpha)
 {
-    NE_AssertPointer(rdbtn, "NULL pointer");
-    NE_Assert(rdbtn->type == NE_RadioButton, "Not a radio button");
+    NEA_AssertPointer(rdbtn, "NULL pointer");
+    NEA_Assert(rdbtn->type == NEA_RadioButton, "Not a radio button");
 
     ne_radiobutton_t *radiobutton = rdbtn->pointer;
 
@@ -912,13 +912,13 @@ void NE_GUIRadioButtonConfig(NE_GUIObj *rdbtn, NE_Material *materialtrue,
     radiobutton->alpha2 = pressedalpha;
 }
 
-void NE_GUISlideBarConfig(NE_GUIObj *sldbar, NE_Material *matbtn,
-                          NE_Material *matbarbtn, NE_Material *matbar,
+void NEA_GUISlideBarConfig(NEA_GUIObj *sldbar, NEA_Material *matbtn,
+                          NEA_Material *matbarbtn, NEA_Material *matbar,
                           u32 normalcolor, u32 pressedcolor, u32 barcolor,
                           u32 alpha, u32 pressedalpha, u32 baralpha)
 {
-    NE_AssertPointer(sldbar, "NULL pointer");
-    NE_Assert(sldbar->type == NE_SlideBar, "Not a slide bar");
+    NEA_AssertPointer(sldbar, "NULL pointer");
+    NEA_Assert(sldbar->type == NEA_SlideBar, "Not a slide bar");
 
     ne_slidebar_t *slidebar = sldbar->pointer;
 
@@ -933,10 +933,10 @@ void NE_GUISlideBarConfig(NE_GUIObj *sldbar, NE_Material *matbtn,
     slidebar->baralpha = baralpha;
 }
 
-void NE_GUISlideBarSetMinMax(NE_GUIObj *sldbr, int min, int max)
+void NEA_GUISlideBarSetMinMax(NEA_GUIObj *sldbr, int min, int max)
 {
-    NE_AssertPointer(sldbr, "NULL pointer");
-    NE_Assert(sldbr->type == NE_SlideBar, "Not a slide bar");
+    NEA_AssertPointer(sldbr, "NULL pointer");
+    NEA_Assert(sldbr->type == NEA_SlideBar, "Not a slide bar");
 
     ne_slidebar_t *slidebar = sldbr->pointer;
 
@@ -960,99 +960,99 @@ void NE_GUISlideBarSetMinMax(NE_GUIObj *sldbr, int min, int max)
         slidebar->x1 + (slidebar->y2 - slidebar->y1);
 }
 
-NE_GUIState NE_GUIObjectGetEvent(const NE_GUIObj *obj)
+NEA_GUIState NEA_GUIObjectGetEvent(const NEA_GUIObj *obj)
 {
     ne_slidebar_t *ptr;
 
-    NE_AssertPointer(obj, "NULL pointer");
+    NEA_AssertPointer(obj, "NULL pointer");
 
     switch (obj->type)
     {
-        case NE_Button:
+        case NEA_Button:
             return ((ne_button_t *) (obj->pointer))->event;
-        case NE_CheckBox:
+        case NEA_CheckBox:
             return ((ne_checkbox_t *) (obj->pointer))->event;
-        case NE_RadioButton:
+        case NEA_RadioButton:
             return ((ne_radiobutton_t *) (obj->pointer))->event;
-        case NE_SlideBar:
+        case NEA_SlideBar:
             ptr = obj->pointer;
             return ptr->event_plus | ptr->event_minus | ptr->event_bar;
         default:
-            NE_DebugPrint("Unknown GUI object type: %d", obj->type);
+            NEA_DebugPrint("Unknown GUI object type: %d", obj->type);
             return -1;
     }
 }
 
-bool NE_GUICheckBoxGetValue(const NE_GUIObj *chbx)
+bool NEA_GUICheckBoxGetValue(const NEA_GUIObj *chbx)
 {
-    NE_AssertPointer(chbx, "NULL pointer");
-    NE_Assert(chbx->type == NE_CheckBox, "Not a check box");
+    NEA_AssertPointer(chbx, "NULL pointer");
+    NEA_Assert(chbx->type == NEA_CheckBox, "Not a check box");
     return ((ne_checkbox_t *)(chbx->pointer))->checked;
 }
 
-bool NE_GUIRadioButtonGetValue(const NE_GUIObj *rdbtn)
+bool NEA_GUIRadioButtonGetValue(const NEA_GUIObj *rdbtn)
 {
-    NE_AssertPointer(rdbtn, "NULL pointer");
-    NE_Assert(rdbtn->type == NE_RadioButton, "Not a radio button");
+    NEA_AssertPointer(rdbtn, "NULL pointer");
+    NEA_Assert(rdbtn->type == NEA_RadioButton, "Not a radio button");
     return ((ne_radiobutton_t *)(rdbtn->pointer))->checked;
 }
 
-int NE_GUISlideBarGetValue(const NE_GUIObj *sldbr)
+int NEA_GUISlideBarGetValue(const NEA_GUIObj *sldbr)
 {
-    NE_AssertPointer(sldbr, "NULL pointer");
-    NE_Assert(sldbr->type == NE_SlideBar, "Not a slide bar");
+    NEA_AssertPointer(sldbr, "NULL pointer");
+    NEA_Assert(sldbr->type == NEA_SlideBar, "Not a slide bar");
     ne_slidebar_t *slidebar = sldbr->pointer;
     return slidebar->value + slidebar->desp;
 }
 
-void NE_GUIDeleteObject(NE_GUIObj *obj)
+void NEA_GUIDeleteObject(NEA_GUIObj *obj)
 {
-    NE_AssertPointer(obj, "NULL pointer");
+    NEA_AssertPointer(obj, "NULL pointer");
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i] == obj)
+        if (NEA_guipointers[i] == obj)
         {
             free(obj->pointer);
             free(obj);
-            NE_guipointers[i] = NULL;
+            NEA_guipointers[i] = NULL;
             return;
         }
     }
 
-    NE_DebugPrint("Object not found");
+    NEA_DebugPrint("Object not found");
 }
 
-void NE_GUIDeleteAll(void)
+void NEA_GUIDeleteAll(void)
 {
     if (!ne_gui_system_inited)
         return;
 
-    for (int i = 0; i < NE_GUI_OBJECTS; i++)
+    for (int i = 0; i < NEA_GUI_OBJECTS; i++)
     {
-        if (NE_guipointers[i])
+        if (NEA_guipointers[i])
         {
-            free(NE_guipointers[i]->pointer);
-            free(NE_guipointers[i]);
-            NE_guipointers[i] = NULL;
+            free(NEA_guipointers[i]->pointer);
+            free(NEA_guipointers[i]);
+            NEA_guipointers[i] = NULL;
         }
     }
 }
 
-int NE_GUISystemReset(int max_objects)
+int NEA_GUISystemReset(int max_objects)
 {
     if (ne_gui_system_inited)
-        NE_GUISystemEnd();
+        NEA_GUISystemEnd();
 
     if (max_objects < 1)
-        NE_GUI_OBJECTS = NE_GUI_DEFAULT_OBJECTS;
+        NEA_GUI_OBJECTS = NEA_GUI_DEFAULT_OBJECTS;
     else
-        NE_GUI_OBJECTS = max_objects;
+        NEA_GUI_OBJECTS = max_objects;
 
-    NE_guipointers = calloc(NE_GUI_OBJECTS, sizeof(NE_guipointers));
-    if (NE_guipointers == NULL)
+    NEA_guipointers = calloc(NEA_GUI_OBJECTS, sizeof(NEA_guipointers));
+    if (NEA_guipointers == NULL)
     {
-        NE_DebugPrint("Not enough memory");
+        NEA_DebugPrint("Not enough memory");
         return -1;
     }
 
@@ -1060,14 +1060,14 @@ int NE_GUISystemReset(int max_objects)
     return 0;
 }
 
-void NE_GUISystemEnd(void)
+void NEA_GUISystemEnd(void)
 {
     if (!ne_gui_system_inited)
         return;
 
-    NE_GUIDeleteAll();
+    NEA_GUIDeleteAll();
 
-    free(NE_guipointers);
+    free(NEA_guipointers);
 
     ne_gui_system_inited = false;
 }

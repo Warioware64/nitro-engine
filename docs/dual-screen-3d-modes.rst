@@ -8,11 +8,11 @@ screens by using a special video capture circuit.
 This technique isn't straightforward. The video hardware of the NDS is very
 flexible, and there are several ways to achieve 3D graphics on both screens.
 
-This document is a very detailed explanation of how it works in Nitro Engine
+This document is a very detailed explanation of how it works in Nitro Engine Advanced
 I've explained the reasons why each mode may be used, as well as their
 limitations.
 
-If this document is too long for you to read, just use ``NE_InitDual3D_DMA()``
+If this document is too long for you to read, just use ``NEA_InitDual3D_DMA()``
 in your games and skip the read! However, feel free to keep reading if you care
 about the details about how all of it is implemented.
 
@@ -39,7 +39,7 @@ consider:
 
 - Compressed textures: They are the most efficient way to have textures in VRAM,
   and they need to be stored in a combination of VRAM A and B or VRAM B and C.
-  All the dual 3D modes of Nitro Engine leave VRAM banks A and B available for
+  All the dual 3D modes of Nitro Engine Advanced leave VRAM banks A and B available for
   textures, so compressed textures can be used.
 
 - Clear bitmap: It is possible to store a bitmap with its own depth map (sort of
@@ -49,7 +49,7 @@ consider:
   mode the developer can only use only 50% of the total memory available for
   textures, so clear bitmaps aren't useful.
 
-This is a comparative table of all modes supported by Nitro Engine and how the
+This is a comparative table of all modes supported by Nitro Engine Advanced and how the
 different VRAM banks are used. Each mode will be explained in each own section:
 
 +--------+-------------------+-------------------+-------------------+-------------------+
@@ -78,9 +78,9 @@ different VRAM banks are used. Each mode will be explained in each own section:
 
 |
 
-Note [1]: It is possible to tell Nitro Engine to not use specific VRAM banks out
-of A, B, C and D. This is useful when using Nitro Engine at the same time as
-some other library like NFlib. It is also possible to tell Nitro Engine to not
+Note [1]: It is possible to tell Nitro Engine Advanced to not use specific VRAM banks out
+of A, B, C and D. This is useful when using Nitro Engine Advanced at the same time as
+some other library like NFlib. It is also possible to tell Nitro Engine Advanced to not
 use VRAM banks A or B in dual 3D mode, but this isn't normally useful.
 
 Note [2]: The debug console isn't supported in this mode.
@@ -97,7 +97,7 @@ The capture unit allows you to capture the output of the main graphics engine.
 It is possible to capture the 3D output by itself before any layering effect,
 or the combined 2D+3D output. This last mode is useful if you want to display a
 2D background on top of the 3D output, and then display that on the other
-screen. In Nitro Engine this is used to display the debug console on top of the
+screen. In Nitro Engine Advanced this is used to display the debug console on top of the
 3D output.
 
 It is a very flexible unit. It lets you select the size of the capture, the VRAM
@@ -137,8 +137,8 @@ VRAM F is setup as main engine background memory, and:
 4. Dual screen 3D mode
 ----------------------
 
-The source code `for regular dual 3D mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L608>`__
-and `the source code for the console initialization is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L493>`__.
+The source code `for regular dual 3D mode is here <https://codeberg.org/SkyLyrac/nitro-engine-advanced/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEAGeneral.c#L608>`__
+and `the source code for the console initialization is here <https://codeberg.org/SkyLyrac/nitro-engine-advanced/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEAGeneral.c#L493>`__.
 
 This is the traditional way to handle dual 3D, and it is used in multiple
 examples that can be found `online <https://github.com/devkitPro/nds-examples/blob/6afa09b2054c9f47685514c32873b3905721c9ee/Graphics/3D/3D_Both_Screens/source/template.c>`_.
@@ -232,7 +232,7 @@ hit the issue where both screens will show the same output.
 5. Dual screen 3D FB mode
 -------------------------
 
-The source code `for dual 3D FB mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L670>`_.
+The source code `for dual 3D FB mode is here <https://codeberg.org/SkyLyrac/nitro-engine-advanced/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEAGeneral.c#L670>`_.
 
 This is another well-known way to handle dual 3D, but it prevents you from using
 the 2D engine in the screen that is being updated in that frame. This prevents
@@ -320,8 +320,8 @@ anything.
 6. Dual screen 3D DMA mode
 --------------------------
 
-The source code `for this mode is here <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L735>`_
-and `this is the code to initialize the debug console <https://codeberg.org/SkyLyrac/nitro-engine/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEGeneral.c#L518>`_.
+The source code `for this mode is here <https://codeberg.org/SkyLyrac/nitro-engine-advanced/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEAGeneral.c#L735>`_
+and `this is the code to initialize the debug console <https://codeberg.org/SkyLyrac/nitro-engine-advanced/src/commit/8c323c7e2c29bf0b52951ac2756139026f09f269/source/NEAGeneral.c#L518>`_.
 
 Thanks to `Gericom <https://github.com/Gericom>`_ for all the advice regarding
 this system!
@@ -339,7 +339,7 @@ drawn it is possible to use VRAM I as a 16 bit bitmap.
 The main problem is that VRAM I isn't big enough to hold a full 256x192. The
 workaround is to either write out of bounds and rely on the mirroring of
 addresses of VRAM I, or to only copy to the first line of VRAM I, and to stretch
-it to fill the whole screen. Nitro Engine uses this last system so that the rest
+it to fill the whole screen. Nitro Engine Advanced uses this last system so that the rest
 of VRAM I can be used for other things.
 
 VRAM banks are used like this:
@@ -373,7 +373,7 @@ be drawn on the screen. If the DMA is setup to copy from VRAM C to VRAM I right
 after each line is written to VRAM C, it is possible to display the captured
 image right away. The only problem with this is that there is a one scanline
 delay in the copy, so the first line of the screen won't be able to show
-anything useful. In Nitro Engine, the vertical blank interrupt handler sets it
+anything useful. In Nitro Engine Advanced, the vertical blank interrupt handler sets it
 to black so that it doesn't show different values every frame.
 
 Finally, that one line is stretched to fill the whole screen, and that's how by
@@ -411,7 +411,7 @@ Note that VRAM D doesn't require a copy of the console, only VRAM C and I. Also,
 libnds only supports printing to one console at a time, so it is needed to load
 the font to both VRAM C and I, setup the map there, and then synchronize both
 maps manually. Which bank to use as main console bank? VRAM I, because it is
-always mapped as sub background RAM. Nitro Engine copies the map from VRAM I to
+always mapped as sub background RAM. Nitro Engine Advanced copies the map from VRAM I to
 VRAM C whenever VRAM C is mapped as main background RAM.
 
 VRAM C (128 KB) is arranged like this:
@@ -478,7 +478,7 @@ Now, remember that the map uses the last 2 KB of the VRAM bank, and that uses as
 much memory as 8 lines of a 16-bit bitmap. The free lines of the bitmap are
 actually 16 to 24.
 
-Nitro Engine uses line 20, located at offset 0x3000 from the start of the bank.
+Nitro Engine Advanced uses line 20, located at offset 0x3000 from the start of the bank.
 
 **Advantages:**
 
@@ -518,7 +518,7 @@ I've tried to give as much flexibility to the developers as possible, and this
 is the result. It is certainly overwhelming for someone who has never done
 anything similar. I've also tried to keep compatibility with the old unreliable
 dual 3D system, just in case the new ones break some game created with old
-versions of Nitro Engine.
+versions of Nitro Engine Advanced.
 
 My advice is to use the DMA method and forget about the others. The classic dual
 3D system is too unreliable, you can't expect to have a game that always draws

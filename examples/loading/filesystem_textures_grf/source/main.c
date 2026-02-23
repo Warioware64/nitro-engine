@@ -2,29 +2,29 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
 // Important: This example won't work on devkitPro. GRF loading functions are
 // only supported in BlocksDS.
 
 #include <filesystem.h>
-#include <NEMain.h>
+#include <NEAMain.h>
 
 typedef struct {
-    NE_Material *Material1;
+    NEA_Material *Material1;
 } SceneData1;
 
 typedef struct {
-    NE_Material *Material2;
+    NEA_Material *Material2;
 } SceneData2;
 
 void Draw3DScene(void *arg)
 {
     SceneData1 *Scene = arg;
 
-    NE_2DViewInit();
+    NEA_2DViewInit();
 
-    NE_2DDrawTexturedQuad(0, 0,
+    NEA_2DDrawTexturedQuad(0, 0,
                           256, 192,
                           0, Scene->Material1);
 }
@@ -33,9 +33,9 @@ void Draw3DScene2(void *arg)
 {
     SceneData2 *Scene = arg;
 
-    NE_2DViewInit();
+    NEA_2DViewInit();
 
-    NE_2DDrawTexturedQuad(64, 32,
+    NEA_2DDrawTexturedQuad(64, 32,
                           64 + 128, 32 + 128,
                           0, Scene->Material2);
 }
@@ -58,8 +58,8 @@ int main(int argc, char *argv[])
     SceneData2 Scene2 = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
     consoleDemoInit();
 
@@ -70,14 +70,14 @@ int main(int argc, char *argv[])
     }
 
     // Init 3D mode
-    NE_InitDual3D();
-    NE_InitConsole();
+    NEA_InitDual3D();
+    NEA_InitConsole();
 
     // Allocate objects
-    Scene1.Material1 = NE_MaterialCreate();
-    Scene2.Material2 = NE_MaterialCreate();
+    Scene1.Material1 = NEA_MaterialCreate();
+    Scene2.Material2 = NEA_MaterialCreate();
 
-    if (NE_MaterialTexLoadGRF(Scene1.Material1, NULL, NE_TEXGEN_TEXCOORD,
+    if (NEA_MaterialTexLoadGRF(Scene1.Material1, NULL, NEA_TEXGEN_TEXCOORD,
                               "a1rgb5_png.grf") == 0)
     {
         printf("Failed to load GRF 1\n");
@@ -87,7 +87,7 @@ int main(int argc, char *argv[])
     // This material has a palette, but we don't care about it. By setting the
     // pointer to NULL it will be marked to be autoedeleted when the material is
     // deleted.
-    if (NE_MaterialTexLoadGRF(Scene2.Material2, NULL, NE_TEXGEN_TEXCOORD,
+    if (NEA_MaterialTexLoadGRF(Scene2.Material2, NULL, NEA_TEXGEN_TEXCOORD,
                               "a3pal32_png.grf") == 0)
     {
         printf("Failed to load GRF 2\n");
@@ -96,9 +96,9 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
-        NE_ProcessDualArg(Draw3DScene, Draw3DScene2, &Scene1, &Scene2);
+        NEA_ProcessDualArg(Draw3DScene, Draw3DScene2, &Scene1, &Scene2);
     }
 
     return 0;

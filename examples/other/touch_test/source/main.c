@@ -2,15 +2,15 @@
 //
 // SPDX-FileContributor: Antonio Niño Díaz, 2008-2024
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#include <NEMain.h>
+#include <NEAMain.h>
 
 #include "sphere_bin.h"
 
 typedef struct {
-    NE_Camera *Camera;
-    NE_Model *Model[10];
+    NEA_Camera *Camera;
+    NEA_Model *Model[10];
 
     int distancetocamera[10];
 
@@ -25,35 +25,35 @@ void Draw3DScene(void *arg)
 {
     SceneData *Scene = arg;
 
-    NE_CameraUse(Scene->Camera);
-    NE_ViewRotate(0, Scene->roty, Scene->rotz);
+    NEA_CameraUse(Scene->Camera);
+    NEA_ViewRotate(0, Scene->roty, Scene->rotz);
 
     // Draw everything
     for (int i = 0; i < 10; i++)
     {
         if (i == Scene->object_touched)
-            NE_PolyFormat(31, 0, NE_LIGHT_1, NE_CULL_BACK, 0);
+            NEA_PolyFormat(31, 0, NEA_LIGHT_1, NEA_CULL_BACK, 0);
         else
-            NE_PolyFormat(31, 0, NE_LIGHT_0, NE_CULL_BACK, 0);
+            NEA_PolyFormat(31, 0, NEA_LIGHT_0, NEA_CULL_BACK, 0);
 
-        NE_ModelDraw(Scene->Model[i]);
+        NEA_ModelDraw(Scene->Model[i]);
     }
 
     if (Scene->touching)
     {
         // Get the information
-        NE_TouchTestStart();
+        NEA_TouchTestStart();
         for (int i = 0; i < 10; i++)
         {
             // Models being drawn during the touch test aren't
             // actually drawn. That means you can use less detailed
             // objects, with no textures, etc, in order to make it
             // easier for the GPU to handle.
-            NE_TouchTestObject();
-            NE_ModelDraw(Scene->Model[i]);
-            Scene->distancetocamera[i] = NE_TouchTestResult();
+            NEA_TouchTestObject();
+            NEA_ModelDraw(Scene->Model[i]);
+            Scene->distancetocamera[i] = NEA_TouchTestResult();
         }
-        NE_TouchTestEnd();
+        NEA_TouchTestEnd();
     }
 }
 
@@ -62,34 +62,34 @@ int main(int argc, char *argv[])
     SceneData Scene = { 0 };
 
     irqEnable(IRQ_HBLANK);
-    irqSet(IRQ_VBLANK, NE_VBLFunc);
-    irqSet(IRQ_HBLANK, NE_HBLFunc);
+    irqSet(IRQ_VBLANK, NEA_VBLFunc);
+    irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
-    NE_Init3D();
+    NEA_Init3D();
     // Move 3D screen to lower screen
-    NE_SwapScreens();
+    NEA_SwapScreens();
     // libnds uses VRAM_C for the text console, reserve A and B only
-    NE_TextureSystemReset(0, 0, NE_VRAM_AB);
+    NEA_TextureSystemReset(0, 0, NEA_VRAM_AB);
     // Init console in non-3D screen
     consoleDemoInit();
 
     for (int i = 0; i < 10; i++)
-        Scene.Model[i] = NE_ModelCreate(NE_Static);
+        Scene.Model[i] = NEA_ModelCreate(NEA_Static);
 
     // Allocate everything
-    Scene.Camera = NE_CameraCreate();
-    NE_CameraSet(Scene.Camera,
+    Scene.Camera = NEA_CameraCreate();
+    NEA_CameraSet(Scene.Camera,
                  -4, 0, 0,
                   0, 0, 0,
                   0, 1, 0);
 
     // Load model
     for (int i = 0; i < 10; i++)
-        NE_ModelLoadStaticMesh(Scene.Model[i], sphere_bin);
+        NEA_ModelLoadStaticMesh(Scene.Model[i], sphere_bin);
 
     // Set up lights
-    NE_LightSet(0, NE_Yellow, 0, -0.5, -0.5);
-    NE_LightSet(1, NE_Red, 0, -0.5, -0.5);
+    NEA_LightSet(0, NEA_Yellow, 0, -0.5, -0.5);
+    NEA_LightSet(1, NEA_Red, 0, -0.5, -0.5);
 
     printf("Press any key to start...");
 
@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
         // Set random coordinates
         for (int i = 0; i < 10; i++)
         {
-            NE_ModelSetCoordI(Scene.Model[i],
+            NEA_ModelSetCoordI(Scene.Model[i],
                 (rand() & (inttof32(3) - 1)) - floattof32(1.5),
                 (rand() & (inttof32(3) - 1)) - floattof32(1.5),
                 (rand() & (inttof32(3) - 1)) - floattof32(1.5));
@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NE_WaitForVBL(0);
+        NEA_WaitForVBL(0);
 
         scanKeys();
         uint32_t keys = keysHeld();
@@ -159,7 +159,7 @@ int main(int argc, char *argv[])
             // Set random coordinates
             for (int i = 0; i < 10; i++)
             {
-                NE_ModelSetCoordI(Scene.Model[i],
+                NEA_ModelSetCoordI(Scene.Model[i],
                     (rand() & (inttof32(3) - 1)) - floattof32(1.5),
                     (rand() & (inttof32(3) - 1)) - floattof32(1.5) ,
                     (rand() & (inttof32(3) - 1)) - floattof32(1.5));
@@ -200,7 +200,7 @@ int main(int argc, char *argv[])
                 Scene.distancetocamera[j] = GL_MAX_DEPTH;
         }
 
-        NE_ProcessArg(Draw3DScene, &Scene);
+        NEA_ProcessArg(Draw3DScene, &Scene);
     }
 
     return 0;

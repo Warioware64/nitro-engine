@@ -4,7 +4,7 @@
 BINDIRS	:= data
 GFXDIRS	:= graphics
 
-# Override to use the local nitro-engine build instead of the installed one
+# Override to use the local nitro-engine-advanced build instead of the installed one
 LIBDIRS		:= ../../.. \
 		   $(BLOCKSDS)/libs/libnds
 

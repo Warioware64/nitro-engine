@@ -1,5 +1,5 @@
 ############
-Nitro Engine
+Nitro Engine Advanced
 ############
 
 Introduction
@@ -8,7 +8,7 @@ Introduction
 This is a 3D game engine, a lot of functions designed to simplify the process of
 making a 3D game. It isn't standalone, it needs libnds to work.
 
-You can use Nitro Engine with `BlocksDS <https://blocksds.skylyrac.net>`_.
+You can use Nitro Engine Advanced with `BlocksDS <https://blocksds.skylyrac.net>`_.
 
 Features:
 
@@ -26,10 +26,10 @@ Features:
 - Basic GUI elements like buttons and scrollbars.
 - Basic physic system: Axis-aligned bounding boxes (AABB) only.
 
-Nitro Engine doesn't support any of the 2D hardware of the DS. In order to use
+Nitro Engine Advanced doesn't support any of the 2D hardware of the DS. In order to use
 the 2D hardware you can use libnds directly, or you can use a library like
 `NFlib <https://github.com/knightfox75/nds_nflib>`_. There is an example of how
-to integrate Nitro Engine and NFlib in the same project `here
+to integrate Nitro Engine Advanced and NFlib in the same project `here
 <./examples/templates/using_nflib>`_.
 
 Setup
@@ -42,7 +42,7 @@ You can install this library with ``wf-pacman`` directly:
 
 .. code:: bash
 
-    wf-pacman -Sy blocksds-nitroengine
+    wf-pacman -Sy blocksds-nitroengineadvanced
 
 If you want to build the library from source, follow the instructions:
 
@@ -73,7 +73,7 @@ You can also try `ArchitectDS <https://codeberg.org/blocksds/architectds>`_.
 This build system written in Python supports converting every format that Nitro
 Engine supports, and it lets you save everything in NitroFS so that your game
 can grow as much as you want. ArchitectDS comes with plenty of examples of how
-to use it with Nitro Engine.
+to use it with Nitro Engine Advanced.
 
 devkitPro
 ---------
@@ -89,19 +89,19 @@ Usage notes
 Note that some features of the 3D hardware aren't emulated by most emulators, so
 you may need to use an actual NDS to test some things. **melonDS** seems to
 emulate all features correctly. **DeSmuME** doesn't emulate the polygon/vertices
-count registers, so the touch test feature of Nitro Engine doesn't work.
+count registers, so the touch test feature of Nitro Engine Advanced doesn't work.
 
 Normally you should link your programs with ``-lNE``, which is the release
-version of Nitro Engine. If you want to use the debug features of Nitro Engine,
-you should link with ``-lNE_debug``, and add ``-DNE_DEBUG`` to the ``CFLAGS``
+version of Nitro Engine Advanced. If you want to use the debug features of Nitro Engine Advanced,
+you should link with ``-lNEA_debug``, and add ``-DNEA_DEBUG`` to the ``CFLAGS``
 and ``CPPFLAGS`` in your Makefile. Make sure to clean and rebuild your project
 after doing the changes mentioned in this step. Check the **error_handling**
-example to see how to use the debug mode of Nitro Engine.
+example to see how to use the debug mode of Nitro Engine Advanced.
 
 Screenshots
 ===========
 
-Screenshots of some of the examples included with Nitro Engine:
+Screenshots of some of the examples included with Nitro Engine Advanced:
 
 .. |animated_model| image:: screenshots/animated_model.png
 .. |box_tower| image:: screenshots/box_tower.png
@@ -139,7 +139,7 @@ Screenshots of some of the examples included with Nitro Engine:
 Contact
 =======
 
-This project is currently hosted in `Codeberg <https://codeberg.org/SkyLyrac/nitro-engine>`__.
+This project is currently hosted in `Codeberg <https://codeberg.org/SkyLyrac/nitro-engine-advanced>`__.
 
 License
 =======

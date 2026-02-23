@@ -2,14 +2,14 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_FORMATS_H__
-#define NE_FORMATS_H__
+#ifndef NEA_FORMATS_H__
+#define NEA_FORMATS_H__
 
-#include "NETexture.h"
+#include "NEATexture.h"
 
-/// @file   NEFormats.h
+/// @file   NEAFormats.h
 /// @brief  Used to convert common formats into DS formats at runtime.
 
 /// @defgroup formats Format coversion functions
@@ -24,7 +24,7 @@
 
 // TODO: PACKED breaks Doxygen
 
-/// @struct NE_BMPHeader
+/// @struct NEA_BMPHeader
 /// Header struct for a BMP file.
 typedef struct PACKED {
     u16 type;       ///< Magic identifier
@@ -32,9 +32,9 @@ typedef struct PACKED {
     u16 reserved1;  ///< Reserved
     u16 reserved2;  ///< Reserved
     u32 offset;     ///< Offset to image data, bytes
-} NE_BMPHeader;
+} NEA_BMPHeader;
 
-/// @struct NE_BMPInfoHeader
+/// @struct NEA_BMPInfoHeader
 /// Information struct of a BMP file.
 typedef struct PACKED {
     u32 size;               ///< Header size in bytes
@@ -48,7 +48,7 @@ typedef struct PACKED {
     u32 yresolution;        ///< Vertical resolution in pixels per meter
     u32 ncolors;            ///< Number of colors
     u32 importantcolors;    ///< Important colors
-} NE_BMPInfoHeader;
+} NEA_BMPInfoHeader;
 
 /// Converts a BMP file from a filesystem to an RGBA texture and loads it to
 /// a material object.
@@ -58,7 +58,7 @@ typedef struct PACKED {
 ///                 bpp or 16 bpp (X1RGB5).
 /// @param transpcolor If true, pixel 0 color will be transparent.
 /// @return It returns 1 on success.
-int NE_FATMaterialTexLoadBMPtoRGBA(NE_Material *tex, char *filename,
+int NEA_FATMaterialTexLoadBMPtoRGBA(NEA_Material *tex, char *filename,
                                    bool transpcolor);
 
 /// Converts a BMP file from a filesystem to an RGB256 texture and loads it to
@@ -69,7 +69,7 @@ int NE_FATMaterialTexLoadBMPtoRGBA(NE_Material *tex, char *filename,
 /// @param filename Path to the BMP file. Bits per pixel must be 8 or 4.
 /// @param transpcolor If true, palette color 0 will be transparent.
 /// @return It returns 1 on success.
-int NE_FATMaterialTexLoadBMPtoRGB256(NE_Material *tex, NE_Palette *pal,
+int NEA_FATMaterialTexLoadBMPtoRGB256(NEA_Material *tex, NEA_Palette *pal,
                                      char *filename, bool transpcolor);
 
 /// Converts a BMP file from RAM to an RGBA texture and loads it to a material
@@ -80,7 +80,7 @@ int NE_FATMaterialTexLoadBMPtoRGB256(NE_Material *tex, NE_Palette *pal,
 ///                16 bpp (X1RGB5).
 /// @param transpcolor If true, pixel 0 color will be transparent.
 /// @return It returns 1 on success.
-int NE_MaterialTexLoadBMPtoRGBA(NE_Material *tex, void *pointer,
+int NEA_MaterialTexLoadBMPtoRGBA(NEA_Material *tex, void *pointer,
                                 bool transpcolor);
 
 /// Converts a BMP file from RAM to an RGB256 texture and loads it to texture
@@ -91,9 +91,9 @@ int NE_MaterialTexLoadBMPtoRGBA(NE_Material *tex, void *pointer,
 /// @param pointer Pointer to the BMP file. Bits per pixel must be 8 or 4.
 /// @param transpcolor If true, palette color 0 will be transparent.
 /// @return It returns 1 on success.
-int NE_MaterialTexLoadBMPtoRGB256(NE_Material *tex, NE_Palette *pal,
+int NEA_MaterialTexLoadBMPtoRGB256(NEA_Material *tex, NEA_Palette *pal,
                                   void *pointer, bool transpcolor);
 
 /// @}
 
-#endif // NE_FORMATS_H__
+#endif // NEA_FORMATS_H__

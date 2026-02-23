@@ -2,13 +2,13 @@
 //
 // Copyright (c) 2008-2023 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_MAIN_H__
-#define NE_MAIN_H__
+#ifndef NEA_MAIN_H__
+#define NEA_MAIN_H__
 
-/// @file   NEMain.h
-/// @brief  Main header of Nitro Engine.
+/// @file   NEAMain.h
+/// @brief  Main header of Nitro Engine Advanced.
 
 /// @defgroup global_defines Global definitions
 ///
@@ -25,42 +25,42 @@
 extern "C" {
 #endif
 
-#ifndef NE_BLOCKSDS
+#ifndef NEA_BLOCKSDS
 # ifndef ARM_CODE
 #  define ARM_CODE __attribute__((target("arm")))
 # endif
 #endif
 
-#include "NE2D.h"
-#include "NEAnimation.h"
-#include "NECamera.h"
-#include "NEDisplayList.h"
-#include "NEFAT.h"
-#include "NEFormats.h"
-#include "NEGeneral.h"
-#include "NEGUI.h"
-#include "NEModel.h"
-#include "NEPalette.h"
-#include "NEPhysics.h"
-#include "NEPolygon.h"
-#include "NERichText.h"
-#include "NEText.h"
-#include "NETexture.h"
+#include "NEA2D.h"
+#include "NEAAnimation.h"
+#include "NEACamera.h"
+#include "NEADisplayList.h"
+#include "NEAFAT.h"
+#include "NEAFormats.h"
+#include "NEAGeneral.h"
+#include "NEAGUI.h"
+#include "NEAModel.h"
+#include "NEAPalette.h"
+#include "NEAPhysics.h"
+#include "NEAPolygon.h"
+#include "NEARichText.h"
+#include "NEAText.h"
+#include "NEATexture.h"
 
-/// Major version of Nitro Engine
-#define NITRO_ENGINE_MAJOR (0)
-/// Minor version of Nitro Engine
-#define NITRO_ENGINE_MINOR (15)
-/// Patch version of Nitro Engine
-#define NITRO_ENGINE_PATCH (5)
+/// Major version of Nitro Engine Advanced
+#define NITRO_ENGINE_ADVANCED_MAJOR (0)
+/// Minor version of Nitro Engine Advanced
+#define NITRO_ENGINE_ADVANCED_MINOR (15)
+/// Patch version of Nitro Engine Advanced
+#define NITRO_ENGINE_ADVANCED_PATCH (5)
 
-/// Full version of Nitro Engine
-#define NITRO_ENGINE_VERSION ((NITRO_ENGINE_MAJOR << 16) |  \
-                              (NITRO_ENGINE_MINOR << 8) |   \
-                              (NITRO_ENGINE_PATCH))
+/// Full version of Nitro Engine Advanced
+#define NITRO_ENGINE_ADVANCED_VERSION ((NITRO_ENGINE_ADVANCED_MAJOR << 16) |  \
+                              (NITRO_ENGINE_ADVANCED_MINOR << 8) |   \
+                              (NITRO_ENGINE_ADVANCED_PATCH))
 
-/// String with the version of Nitro Engine
-#define NITRO_ENGINE_VERSION_STRING "0.15.4"
+/// String with the version of Nitro Engine Advanced
+#define NITRO_ENGINE_ADVANCED_VERSION_STRING "0.15.4"
 
 /// @}
 
@@ -68,4 +68,4 @@ extern "C" {
 }
 #endif
 
-#endif // NE_MAIN_H__
+#endif // NEA_MAIN_H__

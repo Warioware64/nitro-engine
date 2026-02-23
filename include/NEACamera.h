@@ -2,14 +2,14 @@
 //
 // Copyright (c) 2008-2022 Antonio Niño Díaz
 //
-// This file is part of Nitro Engine
+// This file is part of Nitro Engine Advanced
 
-#ifndef NE_CAMERA_H__
-#define NE_CAMERA_H__
+#ifndef NEA_CAMERA_H__
+#define NEA_CAMERA_H__
 
 #include <nds.h>
 
-/// @file   NECamera.h
+/// @file   NEACamera.h
 /// @brief  Structs and functions used to move/rotate/etc the camera.
 
 /// @defgroup camera_system Camera System
@@ -29,18 +29,18 @@ typedef struct {
     int32_t to[3];   ///< Where the camera is looking at
     int32_t up[3];   ///< Vector that points "up"
     bool matrix_is_updated; ///< Set to false when the matrix isn't up-to-date
-} NE_Camera;
+} NEA_Camera;
 
-#define NE_DEFAULT_CAMERAS 16 ///< Default max number of cameras.
+#define NEA_DEFAULT_CAMERAS 16 ///< Default max number of cameras.
 
 /// Creates a new camera object.
 ///
 /// @return Pointer to the newly created camera.
-NE_Camera *NE_CameraCreate(void);
+NEA_Camera *NEA_CameraCreate(void);
 
 /// Setup camera.
 ///
-/// @param cam NE_Camera struct to hold the information.
+/// @param cam NEA_Camera struct to hold the information.
 /// @param xfrom (xfrom, yfrom, zfrom) Camera position coordinates (f32).
 /// @param yfrom (xfrom, yfrom, zfrom) Camera position coordinates (f32).
 /// @param zfrom (xfrom, yfrom, zfrom) Camera position coordinates (f32).
@@ -50,14 +50,14 @@ NE_Camera *NE_CameraCreate(void);
 /// @param xup (xup, yup, zup) Unit vector pointing up (f32).
 /// @param yup (xup, yup, zup) Unit vector pointing up (f32).
 /// @param zup (xup, yup, zup) Unit vector pointing up (f32).
-void NE_CameraSetI(NE_Camera *cam, int xfrom, int yfrom, int zfrom,
+void NEA_CameraSetI(NEA_Camera *cam, int xfrom, int yfrom, int zfrom,
                    int xto, int yto, int zto, int xup, int yup, int zup);
 
 /// Setup camera.
 ///
 /// All values are in float format.
 ///
-/// @param c NE_Camera struct to hold the information.
+/// @param c NEA_Camera struct to hold the information.
 /// @param x1 (xfrom, yfrom, zfrom) Camera position coordinates (float).
 /// @param y1 (xfrom, yfrom, zfrom) Camera position coordinates (float).
 /// @param z1 (xfrom, yfrom, zfrom) Camera position coordinates (float).
@@ -67,15 +67,15 @@ void NE_CameraSetI(NE_Camera *cam, int xfrom, int yfrom, int zfrom,
 /// @param x3 (xup, yup, zup) Unit vector pointing up (float).
 /// @param y3 (xup, yup, zup) Unit vector pointing up (float).
 /// @param z3 (xup, yup, zup) Unit vector pointing up (float).
-#define NE_CameraSet(c, x1, y1, z1, x2, y2, z2, x3, y3, z3) \
-    NE_CameraSetI(c, floattof32(x1), floattof32(y1), floattof32(z1), \
+#define NEA_CameraSet(c, x1, y1, z1, x2, y2, z2, x3, y3, z3) \
+    NEA_CameraSetI(c, floattof32(x1), floattof32(y1), floattof32(z1), \
                   floattof32(x2), floattof32(y2), floattof32(z2), \
                   floattof32(x3), floattof32(y3), floattof32(z3))
 
 /// Set current view to the one of the specified camera.
 ///
 /// @param cam Camera to be used.
-void NE_CameraUse(NE_Camera *cam);
+void NEA_CameraUse(NEA_Camera *cam);
 
 /// Moves a camera on the global x, y and z axes.
 ///
@@ -83,7 +83,7 @@ void NE_CameraUse(NE_Camera *cam);
 /// @param x (x, y, z) Translation (f32).
 /// @param y (x, y, z) Translation (f32).
 /// @param z (x, y, z) Translation (f32).
-void NE_CameraMoveI(NE_Camera *cam, int x, int y, int z);
+void NEA_CameraMoveI(NEA_Camera *cam, int x, int y, int z);
 
 /// Moves a camera on the global x, y and z axes.
 ///
@@ -91,8 +91,8 @@ void NE_CameraMoveI(NE_Camera *cam, int x, int y, int z);
 /// @param x (x, y, z) Translation (float).
 /// @param y (x, y, z) Translation (float).
 /// @param z (x, y, z) Translation (float).
-#define NE_CameraMove(c, x, y, z) \
-    NE_CameraMoveI(c, floattof32(x), floattof32(y), floattof32(z))
+#define NEA_CameraMove(c, x, y, z) \
+    NEA_CameraMoveI(c, floattof32(x), floattof32(y), floattof32(z))
 
 /// Moves a camera on its local x, y and z axes.
 ///
@@ -100,7 +100,7 @@ void NE_CameraMoveI(NE_Camera *cam, int x, int y, int z);
 /// @param front Distance to be moved (f32).
 /// @param right Distance to be moved (f32).
 /// @param up Distance to be moved (f32).
-void NE_CameraMoveFreeI(NE_Camera *cam, int front, int right, int up);
+void NEA_CameraMoveFreeI(NEA_Camera *cam, int front, int right, int up);
 
 /// Moves a camera on its local x, y and z axes.
 ///
@@ -108,8 +108,8 @@ void NE_CameraMoveFreeI(NE_Camera *cam, int front, int right, int up);
 /// @param f Distance to be moved (float).
 /// @param r Distance to be moved (float).
 /// @param u Distance to be moved (float).
-#define NE_CameraMoveFree(c, f, r, u) \
-    NE_CameraMoveFreeI(c, floattof32(f), floattof32(r), floattof32(u))
+#define NEA_CameraMoveFree(c, f, r, u) \
+    NEA_CameraMoveFreeI(c, floattof32(f), floattof32(r), floattof32(u))
 
 /// Rotates a camera by its center by the global x, y and z axes.
 ///
@@ -117,7 +117,7 @@ void NE_CameraMoveFreeI(NE_Camera *cam, int front, int right, int up);
 /// @param rx Angle to rotate on the X axis (0 - 511).
 /// @param ry Angle to rotate on the Y axis.
 /// @param rz Angle to rotate on the Z axis.
-void NE_CameraRotate(NE_Camera *cam, int rx, int ry, int rz);
+void NEA_CameraRotate(NEA_Camera *cam, int rx, int ry, int rz);
 
 /// Rotates a camera by its center by a custom axis.
 ///
@@ -126,7 +126,7 @@ void NE_CameraRotate(NE_Camera *cam, int rx, int ry, int rz);
 /// @param x (x, y, z) Axis vector (f32).
 /// @param y (x, y, z) Axis vector (f32).
 /// @param z (x, y, z) Axis vector (f32).
-void NE_CameraRotateAxisI(NE_Camera *cam, int angle, int x, int y, int z);
+void NEA_CameraRotateAxisI(NEA_Camera *cam, int angle, int x, int y, int z);
 
 /// Rotates a camera by its center by a custom axis.
 ///
@@ -135,8 +135,8 @@ void NE_CameraRotateAxisI(NE_Camera *cam, int angle, int x, int y, int z);
 /// @param x (x, y, z) Axis vector (float).
 /// @param y (x, y, z) Axis vector (float).
 /// @param z (x, y, z) Axis vector (float).
-#define NE_CameraRotateAxis(c, a, x, y, z) \
-    NE_CameraRotateAxisI(c, a, floattof32(x), floattof32(y), floattof32(z))
+#define NEA_CameraRotateAxis(c, a, x, y, z) \
+    NEA_CameraRotateAxisI(c, a, floattof32(x), floattof32(y), floattof32(z))
 
 /// Rotates a camera by its center by its local x, y and z axes.
 ///
@@ -144,22 +144,22 @@ void NE_CameraRotateAxisI(NE_Camera *cam, int angle, int x, int y, int z);
 /// @param rx Angle to rotate on the X axis (Up-Down) (0 - 511).
 /// @param ry Angle to rotate on the Y axis (Right-Left).
 /// @param rz Angle to rotate on the Z axis (Rotate view).
-void NE_CameraRotateFree(NE_Camera *cam, int rx, int ry, int rz);
+void NEA_CameraRotateFree(NEA_Camera *cam, int rx, int ry, int rz);
 
 /// Resets the camera system and sets the maximun number of cameras.
 ///
 /// @param max_cameras Number of cameras. If it is less than 1, it will create
-///                    space for NE_DEFAULT_CAMERAS.
+///                    space for NEA_DEFAULT_CAMERAS.
 /// @return Returns 0 on success.
-int NE_CameraSystemReset(int max_cameras);
+int NEA_CameraSystemReset(int max_cameras);
 
 /// Ends camera system and all memory used by it.
-void NE_CameraSystemEnd(void);
+void NEA_CameraSystemEnd(void);
 
 /// Deletes a camera object.
 ///
 /// @param cam Camera to be deleted.
-void NE_CameraDelete(NE_Camera *cam);
+void NEA_CameraDelete(NEA_Camera *cam);
 
 /// @}
 
@@ -171,48 +171,48 @@ void NE_CameraDelete(NE_Camera *cam);
 /// @{
 
 /// Pushes current view to the stack.
-void NE_ViewPush(void);
+void NEA_ViewPush(void);
 
 /// Pops last pushed view.
-void NE_ViewPop(void);
+void NEA_ViewPop(void);
 
 /// Translate the view.
 ///
 /// @param x (x, y, z) Translation vector (f32).
 /// @param y (x, y, z) Translation vector (f32).
 /// @param z (x, y, z) Translation vector (f32).
-void NE_ViewMoveI(int x, int y, int z);
+void NEA_ViewMoveI(int x, int y, int z);
 
 /// Translate the view.
 ///
 /// @param x (x, y, z) Translation vector (float).
 /// @param y (x, y, z) Translation vector (float).
 /// @param z (x, y, z) Translation vector (float).
-#define NE_ViewMove(x, y, z) \
-    NE_ViewMoveI(floattof32(x), floattof32(y), floattof32(z))
+#define NEA_ViewMove(x, y, z) \
+    NEA_ViewMoveI(floattof32(x), floattof32(y), floattof32(z))
 
 /// Rotates the view.
 //
 /// @param rx Degrees (0 - 511) of rotation by X axis.
 /// @param ry Degrees (0 - 511) of rotation by Y axis.
 /// @param rz Degrees (0 - 511) of rotation by Z axis.
-void NE_ViewRotate(int rx, int ry, int rz);
+void NEA_ViewRotate(int rx, int ry, int rz);
 
 /// Scale the view.
 ///
 /// @param x Factor to scale the X axis by (f32).
 /// @param y Factor to scale the Y axis by (f32).
 /// @param z Factor to scale the Z axis by (f32).
-void NE_ViewScaleI(int x, int y, int z);
+void NEA_ViewScaleI(int x, int y, int z);
 
 /// Scale the view.
 ///
 /// @param x Factor to scale the X axis by (float).
 /// @param y Factor to scale the Y axis by (float).
 /// @param z Factor to scale the Z axis by (float).
-#define NE_ViewScale(x,y,z) \
-    NE_ViewScaleI(floattof32(x), floattof32(y), floattof32(z))
+#define NEA_ViewScale(x,y,z) \
+    NEA_ViewScaleI(floattof32(x), floattof32(y), floattof32(z))
 
 /// @}
 
-#endif // NE_CAMERA_H__
+#endif // NEA_CAMERA_H__
