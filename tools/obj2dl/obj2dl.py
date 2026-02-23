@@ -4,7 +4,11 @@
 #
 # Copyright (c) 2022-2024 Antonio Niño Díaz <antonio_nd@outlook.com>
 
+import os
+import struct
+
 from display_list import DisplayList
+from mtl_parser import parse_mtl, float_to_rgb15, pack_diffuse_ambient, pack_specular_emission
 from collections import defaultdict
 
 class OBJFormatError(Exception):
@@ -14,6 +18,42 @@ VALID_TEXTURE_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024]
 
 def is_valid_texture_size(size):
     return size in VALID_TEXTURE_SIZES
+
+def get_image_dimensions(path):
+    """Read width and height from a PNG or JPEG file without external deps."""
+    with open(path, 'rb') as f:
+        header = f.read(32)
+
+        # PNG: signature (8 bytes) then IHDR chunk (length(4) + 'IHDR'(4) + w(4) + h(4))
+        if header[:8] == b'\x89PNG\r\n\x1a\n':
+            w = struct.unpack('>I', header[16:20])[0]
+            h = struct.unpack('>I', header[20:24])[0]
+            return w, h
+
+        # JPEG: scan for SOF0/SOF2 marker
+        if header[:2] == b'\xff\xd8':
+            f.seek(0)
+            data = f.read()
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC2):  # SOF0 or SOF2
+                    h = struct.unpack('>H', data[i+5:i+7])[0]
+                    w = struct.unpack('>H', data[i+7:i+9])[0]
+                    return w, h
+                if marker == 0xD9:  # EOI
+                    break
+                if marker in (0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5,
+                               0xD6, 0xD7, 0xD8, 0x01):
+                    i += 2
+                else:
+                    seg_len = struct.unpack('>H', data[i+2:i+4])[0]
+                    i += 2 + seg_len
+
+    raise ValueError(f"Cannot read dimensions from {path}")
 
 def parse_face_vertex(vertex_str, use_vertex_color):
     """Parse 'v/vt/vn' string, return (vertex_idx, texcoord_idx, normal_idx) 0-based."""
@@ -269,17 +309,159 @@ def emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
     dl.vtx(vtx[0], vtx[1], vtx[2])
 
 # ---------------------------------------------------------------------------
-# Main conversion
+# Display list generation for a set of faces
 # ---------------------------------------------------------------------------
 
-def convert_obj(input_file, output_file, texture_size,
-                model_scale, model_translation, use_vertex_color,
-                no_strip=False):
+def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
+                          normals, texture_size, model_scale, model_translation,
+                          use_vertex_color, no_strip):
+    """Generate a display list for a group of faces.
 
+    Returns a finalized DisplayList instance.
+    """
+    if no_strip:
+        tri_strips, tri_singles = [], list(range(len(resolved_tris)))
+        quad_strips, quad_singles = [], list(range(len(resolved_quads)))
+    else:
+        tri_strips, tri_singles = stripify_triangles(resolved_tris)
+        quad_strips, quad_singles = stripify_quads(resolved_quads)
+
+    # Statistics
+    separate_vtx = len(resolved_tris) * 3 + len(resolved_quads) * 4
+    strip_vtx = (sum(len(s) for s in tri_strips) + len(tri_singles) * 3
+               + sum(len(s) for s in quad_strips) + len(quad_singles) * 4)
+
+    tri_stripped = len(resolved_tris) - len(tri_singles)
+    quad_stripped = len(resolved_quads) - len(quad_singles)
+
+    print(f"  Triangle strips: {len(tri_strips)} ({tri_stripped} faces stripped, "
+          f"{len(tri_singles)} separate)")
+    print(f"  Quad strips:     {len(quad_strips)} ({quad_stripped} faces stripped, "
+          f"{len(quad_singles)} separate)")
+    print(f"  GPU vertices:    {separate_vtx} -> {strip_vtx} "
+          f"(saved {separate_vtx - strip_vtx})")
+
+    dl = DisplayList()
+
+    # Emit triangle strips
+    for strip_verts in tri_strips:
+        dl.begin_vtxs("triangle_strip")
+        for vk in strip_verts:
+            emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
+                        model_scale, model_translation, use_vertex_color)
+        dl.end_vtxs()
+
+    # Emit separate triangles
+    if tri_singles:
+        dl.begin_vtxs("triangles")
+        for fi in tri_singles:
+            for vk in resolved_tris[fi]:
+                emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
+                            model_scale, model_translation, use_vertex_color)
+        dl.end_vtxs()
+
+    # Emit quad strips
+    for strip_verts in quad_strips:
+        dl.begin_vtxs("quad_strip")
+        for vk in strip_verts:
+            emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
+                        model_scale, model_translation, use_vertex_color)
+        dl.end_vtxs()
+
+    # Emit separate quads
+    if quad_singles:
+        dl.begin_vtxs("quads")
+        for fi in quad_singles:
+            for vk in resolved_quads[fi]:
+                emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
+                            model_scale, model_translation, use_vertex_color)
+        dl.end_vtxs()
+
+    dl.finalize()
+    return dl
+
+# ---------------------------------------------------------------------------
+# DLMM binary format writer
+# ---------------------------------------------------------------------------
+
+DLMM_MAGIC = 0x4D4D4C44  # "DLMM" in little-endian
+DLMM_VERSION = 1
+DLMM_SUBMESH_HEADER_SIZE = 56  # bytes per submesh header
+
+def save_dlmm(output_file, submeshes):
+    """Write multi-material model to .dlmm binary format.
+
+    Args:
+        output_file: output file path
+        submeshes: list of dicts with keys:
+            'name': material name (str, max 31 chars)
+            'dl': finalized DisplayList
+            'diffuse_ambient': u32
+            'specular_emission': u32
+            'color': u16 RGB15
+            'alpha': u16 (0-31)
+            'has_texture': bool
+    """
+    num = len(submeshes)
+    header_size = 12 + DLMM_SUBMESH_HEADER_SIZE * num
+
+    # Get binary data for each display list
+    dl_binaries = []
+    for sub in submeshes:
+        dl_binaries.append(sub['dl'].get_binary())
+
+    # Calculate offsets for display list data
+    dl_offsets = []
+    offset = header_size
+    for dl_bin in dl_binaries:
+        dl_offsets.append(offset)
+        offset += len(dl_bin)
+
+    with open(output_file, 'wb') as f:
+        # File header
+        f.write(struct.pack('<III', DLMM_MAGIC, DLMM_VERSION, num))
+
+        # Submesh headers
+        for i, sub in enumerate(submeshes):
+            flags = 0
+            if sub['has_texture']:
+                flags |= 1
+
+            # Pack name into 32 bytes (null-terminated, zero-padded)
+            name_bytes = sub['name'].encode('ascii', errors='replace')[:31]
+            name_bytes = name_bytes + b'\x00' * (32 - len(name_bytes))
+
+            f.write(struct.pack('<IIIII',
+                dl_offsets[i],
+                len(dl_binaries[i]),
+                sub['diffuse_ambient'],
+                sub['specular_emission'],
+                sub['color']))
+            f.write(struct.pack('<HH', sub['alpha'], flags))
+            f.write(name_bytes)
+
+        # Display list data
+        for dl_bin in dl_binaries:
+            f.write(dl_bin)
+
+# ---------------------------------------------------------------------------
+# OBJ parsing
+# ---------------------------------------------------------------------------
+
+def parse_obj(input_file, use_vertex_color):
+    """Parse an OBJ file and return geometry + material groupings.
+
+    Returns:
+        vertices, texcoords, normals: lists of parsed geometry
+        material_faces: dict of material_name -> list of face token lists
+        mtl_file: path to .mtl file (or None)
+    """
     vertices = []
     texcoords = []
     normals = []
-    faces = []
+    material_faces = defaultdict(list)
+    current_material = "__default__"
+    mtl_file = None
 
     with open(input_file, 'r') as obj_file:
         for line in obj_file:
@@ -291,7 +473,13 @@ def convert_obj(input_file, output_file, texture_size,
             cmd = tokens[0]
             tokens = tokens[1:]
 
-            if cmd == 'v':
+            if cmd == 'mtllib':
+                mtl_file = os.path.join(os.path.dirname(input_file), tokens[0])
+
+            elif cmd == 'usemtl':
+                current_material = ' '.join(tokens)
+
+            elif cmd == 'v':
                 if len(tokens) == 3:
                     if use_vertex_color:
                         raise OBJFormatError(f"Found vertex with no color info: {tokens}")
@@ -311,100 +499,152 @@ def convert_obj(input_file, output_file, texture_size,
                 normals.append(v)
 
             elif cmd == 'f':
-                faces.append(tokens)
+                material_faces[current_material].append(tokens)
 
             elif cmd == 'l':
                 raise OBJFormatError(f"Unsupported polyline command: {tokens}")
 
             else:
-                print(f"Ignored unsupported command: {cmd} {tokens}")
+                pass  # Silently ignore other commands
 
-    print("Vertices:  " + str(len(vertices)))
-    print("Texcoords: " + str(len(texcoords)))
-    print("Normals:   " + str(len(normals)))
-    print("Faces:     " + str(len(faces)))
+    return vertices, texcoords, normals, material_faces, mtl_file
+
+# ---------------------------------------------------------------------------
+# Main conversion
+# ---------------------------------------------------------------------------
+
+def convert_obj(input_file, output_file, texture_size,
+                model_scale, model_translation, use_vertex_color,
+                no_strip=False, multi_material=False):
+
+    vertices, texcoords, normals, material_faces, mtl_file = \
+        parse_obj(input_file, use_vertex_color)
+
+    print(f"Vertices:  {len(vertices)}")
+    print(f"Texcoords: {len(texcoords)}")
+    print(f"Normals:   {len(normals)}")
+    print(f"Materials: {len(material_faces)}")
     print("")
 
-    # Resolve faces into vertex-key tuples
-    resolved_tris = []
-    resolved_quads = []
+    # Load MTL if available
+    materials = {}
+    if mtl_file and os.path.isfile(mtl_file):
+        materials = parse_mtl(mtl_file)
+        print(f"Loaded {len(materials)} materials from {os.path.basename(mtl_file)}")
+        for name in materials:
+            mat = materials[name]
+            tex_info = f" [tex: {mat['map_Kd']}]" if mat['map_Kd'] else ""
+            print(f"  - {name}: Kd={mat['Kd']}, d={mat['d']}{tex_info}")
+        print("")
+    elif mtl_file:
+        print(f"Warning: MTL file not found: {mtl_file}")
+        print("")
 
-    for face in faces:
-        n = len(face)
-        if n != 3 and n != 4:
-            raise OBJFormatError(
-                f"Unsupported polygons with {n} faces. "
-                "Please, split the polygons in your model to triangles."
-            )
-        vkeys = tuple(parse_face_vertex(v, use_vertex_color) for v in face)
-        if n == 3:
-            resolved_tris.append(vkeys)
-        else:
-            resolved_quads.append(vkeys)
+    # Determine if we should use multi-material mode
+    use_multi = multi_material and len(material_faces) > 1
 
-    # Stripify or fall back to separate primitives
-    if no_strip:
-        tri_strips, tri_singles = [], list(range(len(resolved_tris)))
-        quad_strips, quad_singles = [], list(range(len(resolved_quads)))
+    if not use_multi:
+        # ---- Legacy single-material path ----
+        all_faces = []
+        for face_list in material_faces.values():
+            all_faces.extend(face_list)
+
+        print(f"Faces:     {len(all_faces)}")
+        print("")
+
+        resolved_tris = []
+        resolved_quads = []
+
+        for face in all_faces:
+            n = len(face)
+            if n != 3 and n != 4:
+                raise OBJFormatError(
+                    f"Unsupported polygons with {n} faces. "
+                    "Please, split the polygons in your model to triangles."
+                )
+            vkeys = tuple(parse_face_vertex(v, use_vertex_color) for v in face)
+            if n == 3:
+                resolved_tris.append(vkeys)
+            else:
+                resolved_quads.append(vkeys)
+
+        print("Single-material mode:")
+        dl = generate_display_list(resolved_tris, resolved_quads, vertices,
+                                    texcoords, normals, texture_size,
+                                    model_scale, model_translation,
+                                    use_vertex_color, no_strip)
+        dl.save_to_file(output_file)
     else:
-        tri_strips, tri_singles = stripify_triangles(resolved_tris)
-        quad_strips, quad_singles = stripify_quads(resolved_quads)
+        # ---- Multi-material path ----
+        # Resolve base directory for texture image lookups
+        mtl_dir = os.path.dirname(mtl_file) if mtl_file else os.path.dirname(input_file)
 
-    # Statistics
-    separate_vtx = len(resolved_tris) * 3 + len(resolved_quads) * 4
-    strip_vtx = (sum(len(s) for s in tri_strips) + len(tri_singles) * 3
-               + sum(len(s) for s in quad_strips) + len(quad_singles) * 4)
+        submeshes = []
+        total_faces = 0
 
-    tri_stripped = len(resolved_tris) - len(tri_singles)
-    quad_stripped = len(resolved_quads) - len(quad_singles)
+        for mat_name, face_list in material_faces.items():
+            print(f"Material '{mat_name}': {len(face_list)} faces")
+            total_faces += len(face_list)
 
-    print(f"Triangle strips: {len(tri_strips)} ({tri_stripped} faces stripped, "
-          f"{len(tri_singles)} separate)")
-    print(f"Quad strips:     {len(quad_strips)} ({quad_stripped} faces stripped, "
-          f"{len(quad_singles)} separate)")
-    print(f"GPU vertices:    {separate_vtx} -> {strip_vtx} "
-          f"(saved {separate_vtx - strip_vtx})")
-    print("")
+            resolved_tris = []
+            resolved_quads = []
+            for face in face_list:
+                n = len(face)
+                if n != 3 and n != 4:
+                    raise OBJFormatError(
+                        f"Unsupported polygons with {n} faces in material '{mat_name}'. "
+                        "Please, split the polygons in your model to triangles."
+                    )
+                vkeys = tuple(parse_face_vertex(v, use_vertex_color) for v in face)
+                if n == 3:
+                    resolved_tris.append(vkeys)
+                else:
+                    resolved_quads.append(vkeys)
 
-    # Emit display list
-    dl = DisplayList()
+            # Determine per-material texture size from map_Kd image
+            mat_props = materials.get(mat_name, {})
+            mat_tex_size = list(texture_size)  # fallback to CLI --texture
+            map_kd = mat_props.get('map_Kd')
+            if map_kd:
+                tex_path = os.path.join(mtl_dir, map_kd)
+                if os.path.isfile(tex_path):
+                    w, h = get_image_dimensions(tex_path)
+                    if is_valid_texture_size(w) and is_valid_texture_size(h):
+                        mat_tex_size = [w, h]
+                        print(f"  Texture: {map_kd} ({w}x{h})")
+                    else:
+                        print(f"  Warning: {map_kd} has non-NDS size {w}x{h}, "
+                              f"using fallback {mat_tex_size}")
+                else:
+                    print(f"  Warning: texture not found: {tex_path}")
 
-    # Emit triangle strips
-    for strip_verts in tri_strips:
-        dl.begin_vtxs("triangle_strip")
-        for vk in strip_verts:
-            emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                        model_scale, model_translation, use_vertex_color)
-        dl.end_vtxs()
+            dl = generate_display_list(resolved_tris, resolved_quads, vertices,
+                                        texcoords, normals, mat_tex_size,
+                                        model_scale, model_translation,
+                                        use_vertex_color, no_strip)
 
-    # Emit separate triangles (original CCW order)
-    if tri_singles:
-        dl.begin_vtxs("triangles")
-        for fi in tri_singles:
-            for vk in resolved_tris[fi]:
-                emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                            model_scale, model_translation, use_vertex_color)
-        dl.end_vtxs()
+            kd = mat_props.get('Kd', (1.0, 1.0, 1.0))
+            ka = mat_props.get('Ka', (0.0, 0.0, 0.0))
+            ks = mat_props.get('Ks', (0.0, 0.0, 0.0))
+            ke = mat_props.get('Ke', (0.0, 0.0, 0.0))
+            alpha = mat_props.get('d', 1.0)
+            has_tex = mat_props.get('map_Kd') is not None
 
-    # Emit quad strips
-    for strip_verts in quad_strips:
-        dl.begin_vtxs("quad_strip")
-        for vk in strip_verts:
-            emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                        model_scale, model_translation, use_vertex_color)
-        dl.end_vtxs()
+            submeshes.append({
+                'name': mat_name,
+                'dl': dl,
+                'diffuse_ambient': pack_diffuse_ambient(kd, ka),
+                'specular_emission': pack_specular_emission(ks, ke),
+                'color': float_to_rgb15(*kd),
+                'alpha': max(0, min(31, int(alpha * 31))),
+                'has_texture': has_tex,
+            })
+            print("")
 
-    # Emit separate quads (original CCW order)
-    if quad_singles:
-        dl.begin_vtxs("quads")
-        for fi in quad_singles:
-            for vk in resolved_quads[fi]:
-                emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                            model_scale, model_translation, use_vertex_color)
-        dl.end_vtxs()
-
-    dl.finalize()
-    dl.save_to_file(output_file)
+        print(f"Total faces: {total_faces}")
+        print(f"Submeshes:   {len(submeshes)}")
+        print(f"Output:      {output_file} (DLMM format)")
+        save_dlmm(output_file, submeshes)
 
 if __name__ == "__main__":
 
@@ -412,9 +652,9 @@ if __name__ == "__main__":
     import sys
     import traceback
 
-    print("obj2dl v0.2.0")
+    print("obj2dl v0.3.0")
     print("Copyright (c) 2022-2024 Antonio Niño Díaz <antonio_nd@outlook.com>")
-    print("All rights reserved")
+    print("Multi-material support by Nitro Engine Advanced Contributors")
     print("")
 
     parser = argparse.ArgumentParser(
@@ -425,11 +665,11 @@ if __name__ == "__main__":
                         help="input file")
     parser.add_argument("--output", required=True,
                         help="output file")
-    parser.add_argument("--texture", required=True, type=int,
-                        nargs="+", action="extend",
-                        help="texture width and height (e.g. '--texture 32 64')")
 
     # Optional arguments
+    parser.add_argument("--texture", default=None, type=int,
+                        nargs="+", action="extend",
+                        help="texture width and height (e.g. '--texture 32 64')")
     parser.add_argument("--translation", default=[0, 0, 0], type=float,
                         nargs="+", action="extend",
                         help="translate model by this value")
@@ -441,18 +681,27 @@ if __name__ == "__main__":
     parser.add_argument("--no-strip", required=False,
                         action='store_true',
                         help="disable strip generation (original behavior)")
+    parser.add_argument("--multi-material", required=False,
+                        action='store_true',
+                        help="enable multi-material output (DLMM format)")
 
     args = parser.parse_args()
 
-    if len(args.texture) != 2:
-        print("Please, provide exactly 2 values to the --texture argument")
-        sys.exit(1)
-
-    if not is_valid_texture_size(args.texture[0]):
-        print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
-        sys.exit(1)
-    if not is_valid_texture_size(args.texture[1]):
-        print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
+    # Texture size: required for single-material, optional for multi-material
+    texture_size = [0, 0]
+    if args.texture is not None:
+        if len(args.texture) != 2:
+            print("Please, provide exactly 2 values to the --texture argument")
+            sys.exit(1)
+        if not is_valid_texture_size(args.texture[0]):
+            print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
+            sys.exit(1)
+        if not is_valid_texture_size(args.texture[1]):
+            print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
+            sys.exit(1)
+        texture_size = args.texture
+    elif not args.multi_material:
+        print("--texture is required for single-material mode")
         sys.exit(1)
 
     if len(args.translation) != 3:
@@ -460,9 +709,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     try:
-        convert_obj(args.input, args.output, args.texture,
+        convert_obj(args.input, args.output, texture_size,
                     args.scale, args.translation, args.use_vertex_color,
-                    args.no_strip)
+                    args.no_strip, args.multi_material)
     except BaseException as e:
         print("ERROR: " + str(e))
         traceback.print_exc()

@@ -42,13 +42,44 @@ typedef enum {
     NEA_Animated ///< Animated.
 } NEA_ModelType;
 
+/// Maximum number of submeshes per multi-material model.
+#define NEA_MAX_SUBMESHES 16
+
+/// DLMM file magic number ("DLMM" in little-endian).
+#define NEA_DLMM_MAGIC 0x4D4D4C44
+
+/// Submesh flag: this submesh has a texture reference.
+#define NEA_SUBMESH_HAS_TEXTURE (1 << 0)
+
+/// Holds information for one submesh within a multi-material model.
+typedef struct {
+    void *dl_data;             ///< Pointer to display list data in the loaded file
+    NEA_Material *material;    ///< Runtime material (NULL = use embedded defaults)
+    u32 diffuse_ambient;       ///< Embedded diffuse/ambient from DLMM
+    u32 specular_emission;     ///< Embedded specular/emission from DLMM
+    u32 color;                 ///< Embedded vertex color (RGB15)
+    u16 alpha;                 ///< Embedded alpha (0-31)
+    u16 flags;                 ///< Submesh flags (NEA_SUBMESH_HAS_TEXTURE etc.)
+    char name[NEA_MATERIAL_NAME_LEN]; ///< Material name from DLMM file
+} NEA_SubMesh;
+
+/// Container for multi-material mesh data loaded from a DLMM file.
+typedef struct {
+    int num_submeshes;         ///< Number of submeshes
+    void *base_data;           ///< Base allocation pointer (for free)
+    bool base_has_to_free;     ///< Whether base_data should be freed on delete
+    int *base_refcount;        ///< Shared reference count for clone support
+    NEA_SubMesh submeshes[NEA_MAX_SUBMESHES]; ///< Submesh array
+} NEA_MultiMeshData;
+
 /// Holds information of a model.
 typedef struct {
     NEA_ModelType modeltype;   ///< Model type (static or animated)
     int meshindex;            ///< Index of mesh (static or DSM)
     NEA_AnimInfo *animinfo[2]; ///< Animation information (two can be blended)
     int32_t anim_blend;       ///< Animation blend factor
-    NEA_Material *texture;     ///< Material used by this model
+    NEA_Material *texture;     ///< Material used by this model (single-material)
+    NEA_MultiMeshData *multi;  ///< Multi-material data, or NULL for single-material
     int x;                    ///< X position of the model (f32)
     int y;                    ///< Y position of the model (f32)
     int z;                    ///< Z position of the model (f32)
@@ -344,6 +375,65 @@ int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer);
 /// @param path Path to the file.
 /// @return It returns 1 on success, 0 on error.
 int NEA_ModelLoadDSMFAT(NEA_Model *model, const char *path);
+
+/// Load a multi-material mesh file (DLMM) from RAM.
+///
+/// The model must be a static model. After loading, use
+/// NEA_ModelSetSubMeshMaterial(), NEA_ModelSetSubMeshMaterialByName(), or
+/// NEA_ModelAutoBindMaterials() to assign materials to submeshes.
+///
+/// @param model Pointer to a static model.
+/// @param pointer Pointer to the DLMM data in RAM.
+/// @return 1 on success, 0 on error.
+int NEA_ModelLoadMultiMesh(NEA_Model *model, const void *pointer);
+
+/// Load a multi-material mesh file (DLMM) from a filesystem.
+///
+/// @param model Pointer to a static model.
+/// @param path Path to the DLMM file.
+/// @return 1 on success, 0 on error.
+int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path);
+
+/// Assign a material to a submesh by index.
+///
+/// @param model Pointer to the model.
+/// @param submesh_index Index of the submesh (0-based).
+/// @param material Pointer to the material.
+/// @return 1 on success, 0 on error.
+int NEA_ModelSetSubMeshMaterial(NEA_Model *model, int submesh_index,
+                                NEA_Material *material);
+
+/// Assign a material to a submesh by material name.
+///
+/// The name must match the material_name stored in the DLMM file.
+///
+/// @param model Pointer to the model.
+/// @param name Material name string from the DLMM file.
+/// @param material Pointer to the material.
+/// @return 1 on success, 0 on error.
+int NEA_ModelSetSubMeshMaterialByName(NEA_Model *model, const char *name,
+                                      NEA_Material *material);
+
+/// Automatically bind materials to submeshes by matching names.
+///
+/// For each submesh, searches for a material whose name matches the submesh
+/// material name (set via NEA_MaterialSetName). This is the simplest workflow.
+///
+/// @param model Pointer to the model.
+void NEA_ModelAutoBindMaterials(NEA_Model *model);
+
+/// Get the number of submeshes in a multi-material model.
+///
+/// @param model Pointer to the model.
+/// @return Number of submeshes, or 0 if not a multi-material model.
+int NEA_ModelGetSubMeshCount(const NEA_Model *model);
+
+/// Get the material name of a submesh.
+///
+/// @param model Pointer to the model.
+/// @param submesh_index Index of the submesh.
+/// @return Pointer to the name string, or NULL on error.
+const char *NEA_ModelGetSubMeshName(const NEA_Model *model, int submesh_index);
 
 /// Deletes all models and frees all memory used by them.
 void NEA_ModelDeleteAll(void);

@@ -195,6 +195,19 @@ void NEA_ModelDelete(NEA_Model *model)
     if (model->meshindex != NEA_NO_MESH)
         ne_mesh_delete(model->meshindex);
 
+    // Clean up multi-mesh data if present
+    if (model->multi != NULL)
+    {
+        (*model->multi->base_refcount)--;
+        if (*model->multi->base_refcount == 0)
+        {
+            if (model->multi->base_has_to_free)
+                free(model->multi->base_data);
+            free(model->multi->base_refcount);
+        }
+        free(model->multi);
+    }
+
     free(model);
 }
 
@@ -263,7 +276,7 @@ extern bool NEA_TestTouch;
 void NEA_ModelDraw(const NEA_Model *model)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    if (model->meshindex == NEA_NO_MESH)
+    if (model->multi == NULL && model->meshindex == NEA_NO_MESH)
         return;
 
     if (model->modeltype == NEA_Animated)
@@ -302,38 +315,57 @@ void NEA_ModelDraw(const NEA_Model *model)
     {
         PosTest_Asynch(0, 0, 0);
     }
+    else if (model->multi != NULL)
+    {
+        // Multi-material draw path
+        for (int i = 0; i < model->multi->num_submeshes; i++)
+        {
+            NEA_SubMesh *sub = &model->multi->submeshes[i];
+            if (sub->material != NULL)
+            {
+                NEA_MaterialUse(sub->material);
+            }
+            else
+            {
+                GFX_DIFFUSE_AMBIENT = sub->diffuse_ambient;
+                GFX_SPECULAR_EMISSION = sub->specular_emission;
+                GFX_COLOR = sub->color;
+                GFX_TEX_FORMAT = 0;
+            }
+            NEA_DisplayListDrawDefault(sub->dl_data);
+        }
+    }
     else
     {
-        // If the texture pointer is NULL, this will set GFX_TEX_FORMAT
-        // to 0 and GFX_COLOR to white
+        // Single-material path
         NEA_MaterialUse(model->texture);
-    }
 
-    ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
-    const void *meshdata = mesh->address;
+        ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
+        const void *meshdata = mesh->address;
 
-    if (model->modeltype == NEA_Static)
-    {
-        NEA_DisplayListDrawDefault(meshdata);
-    }
-    else // if(model->modeltype == NEA_Animated)
-    {
-        if (model->animinfo[0]->animation && model->animinfo[1]->animation)
+        if (model->modeltype == NEA_Static)
         {
-            int ret = DSMA_DrawModelBlendAnimation(meshdata,
-                    model->animinfo[0]->animation->data,
-                    model->animinfo[0]->currframe,
-                    model->animinfo[1]->animation->data,
-                    model->animinfo[1]->currframe,
-                    model->anim_blend);
-            NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            NEA_DisplayListDrawDefault(meshdata);
         }
-        else // if (model->animinfo[0]->animation)
+        else // if(model->modeltype == NEA_Animated)
         {
-            int ret = DSMA_DrawModel(meshdata,
-                                     model->animinfo[0]->animation->data,
-                                     model->animinfo[0]->currframe);
-            NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            if (model->animinfo[0]->animation && model->animinfo[1]->animation)
+            {
+                int ret = DSMA_DrawModelBlendAnimation(meshdata,
+                        model->animinfo[0]->animation->data,
+                        model->animinfo[0]->currframe,
+                        model->animinfo[1]->animation->data,
+                        model->animinfo[1]->currframe,
+                        model->anim_blend);
+                NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            }
+            else // if (model->animinfo[0]->animation)
+            {
+                int ret = DSMA_DrawModel(meshdata,
+                                         model->animinfo[0]->animation->data,
+                                         model->animinfo[0]->currframe);
+                NEA_Assert(ret == DSMA_SUCCESS, "Failed to draw animated model");
+            }
         }
     }
 
@@ -373,6 +405,19 @@ void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
     {
         ne_mesh_info_t *mesh = &NEA_Mesh[dest->meshindex];
         mesh->uses++;
+    }
+
+    // Clone multi-mesh data if present
+    if (source->multi != NULL)
+    {
+        dest->multi = calloc(1, sizeof(NEA_MultiMeshData));
+        NEA_AssertPointer(dest->multi, "Not enough memory for multi-mesh clone");
+        memcpy(dest->multi, source->multi, sizeof(NEA_MultiMeshData));
+        (*dest->multi->base_refcount)++;
+    }
+    else
+    {
+        dest->multi = NULL;
     }
 }
 
@@ -596,6 +641,229 @@ int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer)
     NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
 
     return ne_model_load_ram_common(model, pointer);
+}
+
+//--------------------------------------------------------------------------
+// Multi-material mesh (DLMM) support
+//--------------------------------------------------------------------------
+
+#define DLMM_HEADER_SIZE         12
+#define DLMM_SUBMESH_HEADER_SIZE 56
+
+static int ne_multimesh_load(NEA_Model *model, void *data, bool has_to_free)
+{
+    const u8 *ptr = (const u8 *)data;
+
+    // Read file header
+    u32 magic = *(const u32 *)(ptr + 0);
+    u32 version = *(const u32 *)(ptr + 4);
+    u32 num_submeshes = *(const u32 *)(ptr + 8);
+
+    if (magic != NEA_DLMM_MAGIC)
+    {
+        NEA_DebugPrint("Invalid DLMM magic");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    if (version != 1)
+    {
+        NEA_DebugPrint("Unsupported DLMM version");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    if (num_submeshes == 0 || num_submeshes > NEA_MAX_SUBMESHES)
+    {
+        NEA_DebugPrint("Invalid submesh count");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    // Free existing multi-mesh if present
+    if (model->multi != NULL)
+    {
+        (*model->multi->base_refcount)--;
+        if (*model->multi->base_refcount == 0)
+        {
+            if (model->multi->base_has_to_free)
+                free(model->multi->base_data);
+            free(model->multi->base_refcount);
+        }
+        free(model->multi);
+        model->multi = NULL;
+    }
+
+    // Allocate multi-mesh data
+    NEA_MultiMeshData *multi = calloc(1, sizeof(NEA_MultiMeshData));
+    if (multi == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    multi->base_refcount = malloc(sizeof(int));
+    if (multi->base_refcount == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        free(multi);
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    *multi->base_refcount = 1;
+    multi->base_data = data;
+    multi->base_has_to_free = has_to_free;
+    multi->num_submeshes = (int)num_submeshes;
+
+    // Parse submesh headers
+    const u8 *hdr = ptr + DLMM_HEADER_SIZE;
+    for (int i = 0; i < (int)num_submeshes; i++)
+    {
+        NEA_SubMesh *sub = &multi->submeshes[i];
+
+        u32 dl_offset = *(const u32 *)(hdr + 0);
+        sub->diffuse_ambient = *(const u32 *)(hdr + 8);
+        sub->specular_emission = *(const u32 *)(hdr + 12);
+        sub->color = *(const u32 *)(hdr + 16);
+        sub->alpha = *(const u16 *)(hdr + 20);
+        sub->flags = *(const u16 *)(hdr + 22);
+
+        memcpy(sub->name, hdr + 24, NEA_MATERIAL_NAME_LEN);
+        sub->name[NEA_MATERIAL_NAME_LEN - 1] = '\0';
+
+        sub->dl_data = (void *)(ptr + dl_offset);
+        sub->material = NULL;
+
+        hdr += DLMM_SUBMESH_HEADER_SIZE;
+    }
+
+    model->multi = multi;
+    return 1;
+}
+
+int NEA_ModelLoadMultiMesh(NEA_Model *model, const void *pointer)
+{
+    if (!ne_model_system_inited)
+        return 0;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(pointer, "NULL data pointer");
+    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
+
+    return ne_multimesh_load(model, (void *)pointer, false);
+}
+
+int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path)
+{
+    if (!ne_model_system_inited)
+        return 0;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
+
+    void *data = NEA_FATLoadData(path);
+    if (data == NULL)
+        return 0;
+
+    return ne_multimesh_load(model, data, true);
+}
+
+int NEA_ModelSetSubMeshMaterial(NEA_Model *model, int submesh_index,
+                                NEA_Material *material)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    if (model->multi == NULL)
+    {
+        NEA_DebugPrint("Model has no multi-mesh data");
+        return 0;
+    }
+
+    if (submesh_index < 0 || submesh_index >= model->multi->num_submeshes)
+    {
+        NEA_DebugPrint("Submesh index out of range");
+        return 0;
+    }
+
+    model->multi->submeshes[submesh_index].material = material;
+    return 1;
+}
+
+int NEA_ModelSetSubMeshMaterialByName(NEA_Model *model, const char *name,
+                                      NEA_Material *material)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(name, "NULL name pointer");
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    if (model->multi == NULL)
+    {
+        NEA_DebugPrint("Model has no multi-mesh data");
+        return 0;
+    }
+
+    for (int i = 0; i < model->multi->num_submeshes; i++)
+    {
+        if (strcmp(model->multi->submeshes[i].name, name) == 0)
+        {
+            model->multi->submeshes[i].material = material;
+            return 1;
+        }
+    }
+
+    NEA_DebugPrint("Submesh name not found");
+    return 0;
+}
+
+void NEA_ModelAutoBindMaterials(NEA_Model *model)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+
+    if (model->multi == NULL)
+        return;
+
+    for (int i = 0; i < model->multi->num_submeshes; i++)
+    {
+        NEA_SubMesh *sub = &model->multi->submeshes[i];
+        if (sub->name[0] != '\0')
+        {
+            NEA_Material *mat = NEA_MaterialFindByName(sub->name);
+            if (mat != NULL)
+                sub->material = mat;
+        }
+    }
+}
+
+int NEA_ModelGetSubMeshCount(const NEA_Model *model)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+
+    if (model->multi == NULL)
+        return 0;
+
+    return model->multi->num_submeshes;
+}
+
+const char *NEA_ModelGetSubMeshName(const NEA_Model *model, int submesh_index)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+
+    if (model->multi == NULL)
+        return NULL;
+
+    if (submesh_index < 0 || submesh_index >= model->multi->num_submeshes)
+        return NULL;
+
+    return model->multi->submeshes[submesh_index].name;
 }
 
 void NEA_ModelDeleteAll(void)

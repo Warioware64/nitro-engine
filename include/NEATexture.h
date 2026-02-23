@@ -27,6 +27,9 @@
 
 #define NEA_NO_PALETTE       -1 ///< Value that represents not having a palette
 
+/// Maximum length of a material name (including null terminator).
+#define NEA_MATERIAL_NAME_LEN 32
+
 /// Holds information of one material.
 typedef struct {
     int texindex;            ///< Index to internal texture object
@@ -35,6 +38,7 @@ typedef struct {
     u32 diffuse_ambient;     ///< Diffuse and ambient lighting material color
     u32 specular_emission;   ///< Specular and emission lighting material color
     bool palette_autodelete; ///< Set to true for the palette to be deleted with the material.
+    char name[NEA_MATERIAL_NAME_LEN]; ///< Name/alias for material lookup
 } NEA_Material;
 
 /// Supported texture options
@@ -54,6 +58,26 @@ typedef enum {
 ///
 /// @return Pointer to the newly created material.
 NEA_Material *NEA_MaterialCreate(void);
+
+/// Set the name/alias of a material for lookup purposes.
+///
+/// @param mat Material to name.
+/// @param name Name string (max 31 characters, will be truncated).
+void NEA_MaterialSetName(NEA_Material *mat, const char *name);
+
+/// Get the name of a material.
+///
+/// @param mat Material.
+/// @return Pointer to the name string (empty string if unset).
+const char *NEA_MaterialGetName(const NEA_Material *mat);
+
+/// Find a material by name.
+///
+/// Searches all created materials for one matching the given name.
+///
+/// @param name Name to search for.
+/// @return Pointer to the matching material, or NULL if not found.
+NEA_Material *NEA_MaterialFindByName(const char *name);
 
 /// Applies a color to a material.
 ///

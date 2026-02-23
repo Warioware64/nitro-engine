@@ -164,6 +164,38 @@ NEA_Material *NEA_MaterialCreate(void)
     return NULL;
 }
 
+void NEA_MaterialSetName(NEA_Material *mat, const char *name)
+{
+    NEA_AssertPointer(mat, "NULL material pointer");
+    NEA_AssertPointer(name, "NULL name pointer");
+    strncpy(mat->name, name, NEA_MATERIAL_NAME_LEN - 1);
+    mat->name[NEA_MATERIAL_NAME_LEN - 1] = '\0';
+}
+
+const char *NEA_MaterialGetName(const NEA_Material *mat)
+{
+    NEA_AssertPointer(mat, "NULL material pointer");
+    return mat->name;
+}
+
+NEA_Material *NEA_MaterialFindByName(const char *name)
+{
+    NEA_AssertPointer(name, "NULL name pointer");
+
+    if (!ne_texture_system_inited)
+        return NULL;
+
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
+    {
+        if (NEA_UserMaterials[i] == NULL)
+            continue;
+        if (strcmp(NEA_UserMaterials[i]->name, name) == 0)
+            return NEA_UserMaterials[i];
+    }
+
+    return NULL;
+}
+
 void NEA_MaterialColorSet(NEA_Material *tex, u32 color)
 {
     NEA_AssertPointer(tex, "NULL pointer");
