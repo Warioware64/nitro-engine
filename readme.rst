@@ -42,7 +42,7 @@ You can install this library with ``wf-pacman`` directly:
 
 .. code:: bash
 
-    wf-pacman -Sy blocksds-nitroengineadvanced
+    wf-pacman -Sy blocksds-nitroengine
 
 If you want to build the library from source, follow the instructions:
 
@@ -139,7 +139,7 @@ Screenshots of some of the examples included with Nitro Engine Advanced:
 Contact
 =======
 
-This project is currently hosted in `Codeberg <https://codeberg.org/SkyLyrac/nitro-engine-advanced>`__.
+This project is currently hosted in `Codeberg <https://codeberg.org/SkyLyrac/nitro-engine>`__.
 
 License
 =======
