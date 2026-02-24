@@ -5,6 +5,7 @@
 # Copyright (c) 2022 Antonio Niño Díaz <antonio_nd@outlook.com>
 
 import os
+import struct
 
 from collections import namedtuple, defaultdict
 from math import sqrt
@@ -18,6 +19,98 @@ VALID_TEXTURE_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024]
 
 def is_valid_texture_size(size):
     return size in VALID_TEXTURE_SIZES
+
+def get_image_dimensions(path):
+    """Read width and height from a PNG or JPEG file without external deps."""
+    with open(path, 'rb') as f:
+        header = f.read(32)
+
+        # PNG: signature (8 bytes) then IHDR chunk
+        if header[:8] == b'\x89PNG\r\n\x1a\n':
+            w = struct.unpack('>I', header[16:20])[0]
+            h = struct.unpack('>I', header[20:24])[0]
+            return w, h
+
+        # JPEG: scan for SOF0/SOF2 marker
+        if header[:2] == b'\xff\xd8':
+            f.seek(0)
+            data = f.read()
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC2):
+                    h = struct.unpack('>H', data[i+5:i+7])[0]
+                    w = struct.unpack('>H', data[i+7:i+9])[0]
+                    return w, h
+                if marker == 0xD9:
+                    break
+                if marker in (0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5,
+                               0xD6, 0xD7, 0xD8, 0x01):
+                    i += 2
+                else:
+                    seg_len = struct.unpack('>H', data[i+2:i+4])[0]
+                    i += 2 + seg_len
+
+    raise ValueError(f"Cannot read dimensions from {path}")
+
+
+DLMM_MAGIC = 0x4D4D4C44  # "DLMM" in little-endian
+DLMM_VERSION = 1
+DLMM_SUBMESH_HEADER_SIZE = 56  # bytes per submesh header
+
+def save_dlmm(output_file, submeshes):
+    """Write multi-material model to .dlmm binary format.
+
+    Args:
+        output_file: output file path
+        submeshes: list of dicts with keys:
+            'name': material name (str, max 31 chars)
+            'dl': finalized DisplayList
+            'diffuse_ambient': u32
+            'specular_emission': u32
+            'color': u16 RGB15
+            'alpha': u16 (0-31)
+            'has_texture': bool
+    """
+    num = len(submeshes)
+    header_size = 12 + DLMM_SUBMESH_HEADER_SIZE * num
+
+    dl_binaries = []
+    for sub in submeshes:
+        dl_binaries.append(sub['dl'].get_binary())
+
+    dl_offsets = []
+    offset = header_size
+    for dl_bin in dl_binaries:
+        dl_offsets.append(offset)
+        offset += len(dl_bin)
+
+    with open(output_file, 'wb') as f:
+        f.write(struct.pack('<III', DLMM_MAGIC, DLMM_VERSION, num))
+
+        for i, sub in enumerate(submeshes):
+            flags = 0
+            if sub['has_texture']:
+                flags |= 1
+
+            name_bytes = sub['name'].encode('ascii', errors='replace')[:31]
+            name_bytes = name_bytes + b'\x00' * (32 - len(name_bytes))
+
+            f.write(struct.pack('<IIIII',
+                dl_offsets[i],
+                len(dl_binaries[i]),
+                sub['diffuse_ambient'],
+                sub['specular_emission'],
+                sub['color']))
+            f.write(struct.pack('<HH', sub['alpha'], flags))
+            f.write(name_bytes)
+
+        for dl_bin in dl_binaries:
+            f.write(dl_bin)
+
 
 def assert_num_args(cmd, real, expected, tokens):
     if real != expected:
@@ -117,7 +210,7 @@ def parse_md5mesh(input_file):
     Joint = namedtuple("Joint", "name parent pos orient")
     Vert = namedtuple("Vert", "st startWeight countWeight")
     Weight = namedtuple("Weight", "joint bias pos")
-    Mesh = namedtuple("Mesh", "numverts verts numtris tris numweights weights")
+    Mesh = namedtuple("Mesh", "shader numverts verts numtris tris numweights weights")
 
     joints = []
     meshes = []
@@ -134,6 +227,7 @@ def parse_md5mesh(input_file):
         mode = "root"
 
         # Temporary variables used to store mesh information before packing it
+        shader = ""
         numverts = None
         verts = None
         numtris = None
@@ -232,8 +326,9 @@ def parse_md5mesh(input_file):
                         raise MD5FormatError(f"Unexpected tokens after 'mesh {{}}': {tokens}")
                     mode = "root"
 
-                    meshes.append(Mesh(numverts, verts, numtris, tris, numweights, weights))
+                    meshes.append(Mesh(shader, numverts, verts, numtris, tris, numweights, weights))
 
+                    shader = ""
                     numverts = None
                     verts = None
                     numtris = None
@@ -242,8 +337,8 @@ def parse_md5mesh(input_file):
                     weights = None
 
                 elif cmd == 'shader':
-                    # Ignore this
-                    pass
+                    _, shader_path, _ = line.split('"')
+                    shader = shader_path
 
                 elif cmd == 'numverts':
                     assert_num_args('numverts', nargs, 1, tokens)
@@ -683,7 +778,8 @@ def stripify_triangles(resolved_tris):
 
 def convert_md5mesh(model_file, name, output_folder, texture_size,
                     draw_normal_polygons, extension_mesh, extension_anim,
-                    blender_fix, export_base_pose, no_strip=False):
+                    blender_fix, export_base_pose, no_strip=False,
+                    multi_material=False):
 
     print(f"Converting model: {model_file}")
 
@@ -692,10 +788,10 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
 
     print(f"Loaded {len(joints)} joint(s) and {len(meshes)} mesh(es).")
 
-    if len(meshes) > 1:
+    if not multi_material and len(meshes) > 1:
         print("WARNING: More than one mesh found. All meshes will share the same "
-              "texture. If you want them to have different textures, you must use "
-              "multiple .md5mesh files.")
+              "texture. If you want them to have different textures, use "
+              "--multi-material to output a DLMM file with per-mesh materials.")
 
     if export_base_pose:
         print("Converting base pose...")
@@ -706,13 +802,41 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
 
     print("Converting meshes...")
 
-    # Display list shared between all meshes
-    dl = DisplayList()
-
+    model_dir = os.path.dirname(os.path.abspath(model_file))
     base_matrix = 30 - len(joints) + 1
-    last_joint_index = None
 
-    for mesh in meshes:
+    # In multi-material mode, each mesh gets its own DisplayList
+    # In single mode, all meshes share one DisplayList
+    if not multi_material:
+        dl = DisplayList()
+
+    last_joint_index = None
+    dlmm_submeshes = []  # used only in multi-material mode
+
+    for mesh_index, mesh in enumerate(meshes):
+        if multi_material:
+            dl = DisplayList()
+            last_joint_index = None
+
+            # Determine texture size from shader image
+            mesh_tex_size = list(texture_size) if texture_size else [64, 64]
+            if mesh.shader:
+                shader_path = os.path.join(model_dir, mesh.shader)
+                if os.path.isfile(shader_path):
+                    try:
+                        w, h = get_image_dimensions(shader_path)
+                        if is_valid_texture_size(w) and is_valid_texture_size(h):
+                            mesh_tex_size = [w, h]
+                            print(f"  Shader '{mesh.shader}': detected {w}x{h}")
+                        else:
+                            print(f"  WARNING: Shader image {mesh.shader} has non-power-of-2 "
+                                  f"size {w}x{h}, using fallback {mesh_tex_size}")
+                    except ValueError as e:
+                        print(f"  WARNING: Cannot read shader image: {e}")
+                else:
+                    print(f"  WARNING: Shader image not found: {shader_path}")
+        else:
+            mesh_tex_size = texture_size
         print(f"  Vertices: {mesh.numverts}")
         print(f"  Tris:     {mesh.numtris}")
         print(f"  Weights:  {mesh.numweights}")
@@ -753,8 +877,8 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
             tri_vdata = []
             for vert, weight in zip(verts, weights):
                 st = vert.st
-                u = st[0] * texture_size[0]
-                v = st[1] * texture_size[1]
+                u = st[0] * mesh_tex_size[0]
+                v = st[1] * mesh_tex_size[1]
 
                 joint_index = weight.joint
                 joint = joints[joint_index]
@@ -894,9 +1018,33 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
                     dl.vtx(vert_avg_end.x, vert_avg_end.y, vert_avg_end.z)
 
             dl.end_vtxs()
-    dl.finalize()
 
-    dl.save_to_file(os.path.join(output_folder, f"{name}{extension_mesh}"))
+        if multi_material:
+            dl.finalize()
+            # Derive material name from shader path (basename without extension)
+            if mesh.shader:
+                mat_name = os.path.splitext(os.path.basename(mesh.shader))[0]
+            else:
+                mat_name = f"mesh_{mesh_index}"
+
+            dlmm_submeshes.append({
+                'name': mat_name,
+                'dl': dl,
+                'diffuse_ambient': 0,
+                'specular_emission': 0,
+                'color': 0x7FFF,
+                'alpha': 31,
+                'has_texture': True,
+            })
+            print(f"  Material name: '{mat_name}'")
+
+    if multi_material:
+        output_path = os.path.join(output_folder, f"{name}{extension_mesh}")
+        save_dlmm(output_path, dlmm_submeshes)
+        print(f"Saved DLMM with {len(dlmm_submeshes)} submesh(es) to {output_path}")
+    else:
+        dl.finalize()
+        dl.save_to_file(os.path.join(output_folder, f"{name}{extension_mesh}"))
 
 
 def convert_md5anim(name, output_folder, anim_file, skip_frames, extension_anim,
@@ -962,21 +1110,33 @@ if __name__ == "__main__":
     parser.add_argument("--no-strip", required=False,
                         action='store_true',
                         help="disable strip generation (original behavior)")
+    parser.add_argument("--multi-material", required=False,
+                        action='store_true',
+                        help="output DLMM format with per-mesh materials "
+                             "(texture sizes auto-detected from shader images)")
 
     args = parser.parse_args()
 
     if args.model is not None:
-        if len(args.texture) != 2:
-            print("Please, provide exactly 2 values to the --texture argument")
-            sys.exit(1)
+        if args.multi_material:
+            # In multi-material mode, --texture is optional (auto-detected from shader)
+            if len(args.texture) not in (0, 2):
+                print("Please, provide exactly 0 or 2 values to the --texture argument "
+                      "in multi-material mode")
+                sys.exit(1)
+        else:
+            if len(args.texture) != 2:
+                print("Please, provide exactly 2 values to the --texture argument")
+                sys.exit(1)
 
-        if not is_valid_texture_size(args.texture[0]):
-            print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
-            sys.exit(1)
+        if len(args.texture) == 2:
+            if not is_valid_texture_size(args.texture[0]):
+                print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
+                sys.exit(1)
 
-        if not is_valid_texture_size(args.texture[1]):
-            print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
-            sys.exit(1)
+            if not is_valid_texture_size(args.texture[1]):
+                print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
+                sys.exit(1)
 
     # Create output directory if it doesn't exist
     os.makedirs(args.output, exist_ok=True)
@@ -990,7 +1150,8 @@ if __name__ == "__main__":
             convert_md5mesh(args.model, args.name, args.output, args.texture,
                             args.draw_normal_polygons, extension_mesh,
                             extension_anim, args.blender_fix,
-                            args.export_base_pose, args.no_strip)
+                            args.export_base_pose, args.no_strip,
+                            args.multi_material)
 
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,

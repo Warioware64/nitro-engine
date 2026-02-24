@@ -165,14 +165,19 @@ class DisplayList():
         # Prepend size to the list
         self.display_list.insert(0, len(self.display_list))
 
+    def get_binary(self):
+        """Return the display list as a bytes object. Must be called after finalize()."""
+        data = bytearray()
+        for u32 in self.display_list:
+            data.append(u32 & 0xFF)
+            data.append((u32 >> 8) & 0xFF)
+            data.append((u32 >> 16) & 0xFF)
+            data.append((u32 >> 24) & 0xFF)
+        return bytes(data)
+
     def save_to_file(self, path):
         with open(path, "wb") as f:
-            for u32 in self.display_list:
-                b = [u32 & 0xFF, \
-                    (u32 >> 8) & 0xFF, \
-                    (u32 >> 16) & 0xFF, \
-                    (u32 >> 24) & 0xFF]
-                f.write(bytearray(b))
+            f.write(self.get_binary())
 
     def nop(self):
         self.add_command(command_name_to_id("NOP"))

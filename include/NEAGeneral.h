@@ -337,6 +337,20 @@ void NEA_ClippingPlanesSetI(int znear, int zfar);
 /// @param value true enables antialiasing, false disables it.
 void NEA_AntialiasEnable(bool value);
 
+/// Depth buffering modes for the 3D engine.
+typedef enum {
+    NEA_ZBUFFER = 0,       ///< Z-buffering (linear depth, default)
+    NEA_WBUFFER = (1 << 1) ///< W-buffering (reciprocal depth, better for perspective)
+} NEA_DepthBufferMode;
+
+/// Set the depth buffering mode.
+///
+/// Z-buffering is the default. W-buffering provides better depth precision
+/// for perspective projection but should not be used with orthographic views.
+///
+/// @param mode NEA_ZBUFFER or NEA_WBUFFER.
+void NEA_SetDepthBufferMode(NEA_DepthBufferMode mode);
+
 /// Returns the number of polygons drawn since the last glFlush().
 ///
 /// @return Returns the number of polygons (0 - 2048).

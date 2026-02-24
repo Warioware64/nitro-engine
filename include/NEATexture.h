@@ -423,4 +423,53 @@ void NEA_TextureDrawingEnd(void);
 
 /// @}
 
+/// @defgroup texture_matrix Texture matrix
+///
+/// Functions to manipulate the GPU texture matrix. Only materials loaded with
+/// NEA_TEXGEN_TEXCOORD are affected. Materials with NEA_TEXGEN_OFF (the
+/// default) are not affected, so there is no conflict.
+///
+/// @{
+
+/// Reset the texture matrix to identity.
+///
+/// Call this before applying new texture transforms.
+void NEA_TextureMatrixIdentity(void);
+
+/// Translate the texture matrix (fixed-point).
+///
+/// @param x Translation on the S (horizontal) axis (f32).
+/// @param y Translation on the T (vertical) axis (f32).
+void NEA_TextureMatrixTranslateI(int x, int y);
+
+/// Translate the texture matrix (float).
+///
+/// @param x Translation on the S (horizontal) axis.
+/// @param y Translation on the T (vertical) axis.
+#define NEA_TextureMatrixTranslate(x, y) \
+    NEA_TextureMatrixTranslateI(floattof32(x), floattof32(y))
+
+/// Rotate the texture matrix.
+///
+/// Rotates texture coordinates in the S-T plane. Uses the same angle units
+/// as NEA_ModelSetRot() (0-511 = full rotation).
+///
+/// @param angle Rotation angle.
+void NEA_TextureMatrixRotate(int angle);
+
+/// Scale the texture matrix (fixed-point).
+///
+/// @param sx Scale on the S (horizontal) axis (f32).
+/// @param sy Scale on the T (vertical) axis (f32).
+void NEA_TextureMatrixScaleI(int sx, int sy);
+
+/// Scale the texture matrix (float).
+///
+/// @param sx Scale on the S (horizontal) axis.
+/// @param sy Scale on the T (vertical) axis.
+#define NEA_TextureMatrixScale(sx, sy) \
+    NEA_TextureMatrixScaleI(floattof32(sx), floattof32(sy))
+
+/// @}
+
 #endif // NEA_TEXTURE_H__

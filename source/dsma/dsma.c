@@ -128,7 +128,7 @@ uint32_t DSMA_GetNumFrames(const void *dsa_file)
 }
 
 ITCM_CODE ARM_CODE
-int DSMA_DrawModel(const void *dsm_file, const void *dsa_file, uint32_t frame_interp)
+int DSMA_PrepareBones(const void *dsa_file, uint32_t frame_interp)
 {
     const dsa_t *dsa = dsa_file;
 
@@ -211,19 +211,29 @@ int DSMA_DrawModel(const void *dsm_file, const void *dsa_file, uint32_t frame_in
         }
     }
 
-    // Draw model
-    // ----------
+    return DSMA_SUCCESS;
+}
+
+void DSMA_FinishDraw(void)
+{
+    MATRIX_POP = 1;
+}
+
+ITCM_CODE ARM_CODE
+int DSMA_DrawModel(const void *dsm_file, const void *dsa_file, uint32_t frame_interp)
+{
+    int ret = DSMA_PrepareBones(dsa_file, frame_interp);
+    if (ret != DSMA_SUCCESS)
+        return ret;
 
     NEA_DisplayListDrawDefault(dsm_file);
-
-    MATRIX_POP = 1;
+    DSMA_FinishDraw();
 
     return DSMA_SUCCESS;
 }
 
 ITCM_CODE ARM_CODE
-int DSMA_DrawModelBlendAnimation(const void *dsm_file,
-        const void *dsa_file_1, uint32_t frame_interp_1,
+int DSMA_PrepareBonesBlend(const void *dsa_file_1, uint32_t frame_interp_1,
         const void *dsa_file_2, uint32_t frame_interp_2,
         uint32_t blend)
 {
@@ -329,12 +339,22 @@ int DSMA_DrawModelBlendAnimation(const void *dsm_file,
         MATRIX_STORE = base_matrix + i;
     }
 
-    // Draw model
-    // ----------
+    return DSMA_SUCCESS;
+}
+
+ITCM_CODE ARM_CODE
+int DSMA_DrawModelBlendAnimation(const void *dsm_file,
+        const void *dsa_file_1, uint32_t frame_interp_1,
+        const void *dsa_file_2, uint32_t frame_interp_2,
+        uint32_t blend)
+{
+    int ret = DSMA_PrepareBonesBlend(dsa_file_1, frame_interp_1,
+                                     dsa_file_2, frame_interp_2, blend);
+    if (ret != DSMA_SUCCESS)
+        return ret;
 
     NEA_DisplayListDrawDefault(dsm_file);
-
-    MATRIX_POP = 1;
+    DSMA_FinishDraw();
 
     return DSMA_SUCCESS;
 }

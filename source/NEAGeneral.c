@@ -32,6 +32,8 @@ static int fov;
 
 static int ne_main_screen = 1; // 1 = top, 0 = bottom
 
+static int ne_depth_buffer_mode = 0; // GL_ZBUFFERING by default
+
 static uint32_t ne_dma_enabled = 0;
 static uint32_t ne_dma_src = 0;
 static uint32_t ne_dma_dst = 0;
@@ -310,6 +312,8 @@ static void ne_init_registers(void)
     GFX_FLUSH = 0;
     GFX_FLUSH = 0;
 
+    ne_depth_buffer_mode = 0; // Reset to Z-buffering
+
     NEA_MainScreenSetOnTop();
     lcdMainOnTop();
 
@@ -377,6 +381,11 @@ void NEA_UpdateInput(void)
 
     if (ne_input.kheld & KEY_TOUCH)
         touchRead(&ne_input.touch);
+}
+
+void NEA_SetDepthBufferMode(NEA_DepthBufferMode mode)
+{
+    ne_depth_buffer_mode = mode;
 }
 
 int NEA_Init3D(void)
@@ -900,7 +909,7 @@ void NEA_Process(NEA_Voidfunc drawscene)
     NEA_AssertPointer(drawscene, "NULL function pointer");
     drawscene();
 
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 }
 
 void NEA_ProcessArg(NEA_VoidArgfunc drawscene, void *arg)
@@ -910,7 +919,7 @@ void NEA_ProcessArg(NEA_VoidArgfunc drawscene, void *arg)
     NEA_AssertPointer(drawscene, "NULL function pointer");
     drawscene(arg);
 
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 }
 
 int NEA_TwoPassGetPass(void)
@@ -1105,7 +1114,7 @@ static void ne_process_two_pass_fb(void)
 
 static void ne_process_two_pass_end(void)
 {
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 
     ne_two_pass_frame ^= 1;
 }
@@ -1191,7 +1200,7 @@ static void ne_process_dual_3d_common_start(void)
 
 static void ne_process_dual_3d_common_end(void)
 {
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 
     NEA_Screen ^= 1;
 }
@@ -1271,7 +1280,7 @@ static void ne_process_dual_3d_fb_common_start(void)
 
 static void ne_process_dual_3d_fb_common_end(void)
 {
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 
     NEA_Screen ^= 1;
 }
@@ -1440,7 +1449,7 @@ static void ne_process_dual_3d_dma_common_start(void)
 
 static void ne_process_dual_3d_dma_common_end(void)
 {
-    GFX_FLUSH = GL_TRANS_MANUALSORT;
+    GFX_FLUSH = GL_TRANS_MANUALSORT | ne_depth_buffer_mode;
 
     NEA_Screen ^= 1;
 

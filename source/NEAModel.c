@@ -318,6 +318,29 @@ void NEA_ModelDraw(const NEA_Model *model)
     else if (model->multi != NULL)
     {
         // Multi-material draw path
+        // For animated models, set up bone matrices first
+        if (model->modeltype == NEA_Animated)
+        {
+            int ret;
+            if (model->animinfo[0]->animation && model->animinfo[1]->animation)
+            {
+                ret = DSMA_PrepareBonesBlend(
+                        model->animinfo[0]->animation->data,
+                        model->animinfo[0]->currframe,
+                        model->animinfo[1]->animation->data,
+                        model->animinfo[1]->currframe,
+                        model->anim_blend);
+            }
+            else
+            {
+                ret = DSMA_PrepareBones(
+                        model->animinfo[0]->animation->data,
+                        model->animinfo[0]->currframe);
+            }
+            NEA_Assert(ret == DSMA_SUCCESS,
+                       "Failed to prepare bones for animated model");
+        }
+
         for (int i = 0; i < model->multi->num_submeshes; i++)
         {
             NEA_SubMesh *sub = &model->multi->submeshes[i];
@@ -334,6 +357,9 @@ void NEA_ModelDraw(const NEA_Model *model)
             }
             NEA_DisplayListDrawDefault(sub->dl_data);
         }
+
+        if (model->modeltype == NEA_Animated)
+            DSMA_FinishDraw();
     }
     else
     {
@@ -755,7 +781,6 @@ int NEA_ModelLoadMultiMesh(NEA_Model *model, const void *pointer)
 
     NEA_AssertPointer(model, "NULL model pointer");
     NEA_AssertPointer(pointer, "NULL data pointer");
-    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
 
     return ne_multimesh_load(model, (void *)pointer, false);
 }
@@ -767,7 +792,6 @@ int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path)
 
     NEA_AssertPointer(model, "NULL model pointer");
     NEA_AssertPointer(path, "NULL path pointer");
-    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
 
     void *data = NEA_FATLoadData(path);
     if (data == NULL)

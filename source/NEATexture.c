@@ -1046,7 +1046,7 @@ void NEA_TexturePutPixelRGBA(u32 x, u32 y, u16 color)
     NEA_AssertPointer(drawingtexture_address,
                      "No texture active for drawing");
     NEA_Assert(drawingtexture_type == NEA_A1RGB5,
-              "Ative texture isn't NEA_A1RGB5");
+              "Active texture isn't NEA_A1RGB5");
 
     if (x >= drawingtexture_x || y >= drawingtexture_y)
         return;
@@ -1078,4 +1078,36 @@ void NEA_TextureDrawingEnd(void)
     vramRestorePrimaryBanks(ne_vram_saved);
 
     drawingtexture_address = NULL;
+}
+
+void NEA_TextureMatrixIdentity(void)
+{
+    MATRIX_CONTROL = GL_TEXTURE;
+    MATRIX_IDENTITY = 0;
+    MATRIX_CONTROL = GL_MODELVIEW;
+}
+
+void NEA_TextureMatrixTranslateI(int x, int y)
+{
+    MATRIX_CONTROL = GL_TEXTURE;
+    MATRIX_TRANSLATE = x;
+    MATRIX_TRANSLATE = y;
+    MATRIX_TRANSLATE = 0;
+    MATRIX_CONTROL = GL_MODELVIEW;
+}
+
+void NEA_TextureMatrixRotate(int angle)
+{
+    MATRIX_CONTROL = GL_TEXTURE;
+    glRotateZi(angle << 6);
+    MATRIX_CONTROL = GL_MODELVIEW;
+}
+
+void NEA_TextureMatrixScaleI(int sx, int sy)
+{
+    MATRIX_CONTROL = GL_TEXTURE;
+    MATRIX_SCALE = sx;
+    MATRIX_SCALE = sy;
+    MATRIX_SCALE = inttof32(1);
+    MATRIX_CONTROL = GL_MODELVIEW;
 }

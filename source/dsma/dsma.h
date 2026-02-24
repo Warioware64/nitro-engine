@@ -50,6 +50,26 @@ int DSMA_DrawModelBlendAnimation(const void *dsm_file,
         const void *dsa_file_2, uint32_t frame_interp_2,
         uint32_t blend);
 
+// Sets up bone matrices in the hardware matrix stack for the given animation
+// frame, but does NOT draw any display list. Call DSMA_FinishDraw() after
+// drawing your display list(s) to clean up the matrix stack.
+//
+// This is useful for multi-material animated models where you need to draw
+// multiple display lists (one per submesh) with different materials, all
+// sharing the same bone matrices.
+ITCM_CODE ARM_CODE
+int DSMA_PrepareBones(const void *dsa_file, uint32_t frame_interp);
+
+// Same as DSMA_PrepareBones but blends between two animations.
+ITCM_CODE ARM_CODE
+int DSMA_PrepareBonesBlend(const void *dsa_file_1, uint32_t frame_interp_1,
+        const void *dsa_file_2, uint32_t frame_interp_2,
+        uint32_t blend);
+
+// Pops the matrix stack after DSMA_PrepareBones / DSMA_PrepareBonesBlend.
+// Must be called once after you are done drawing all display lists.
+void DSMA_FinishDraw(void);
+
 #define DSMA_SUCCESS                    0
 #define DSMA_INVALID_VERSION            -1
 #define DSMA_INVALID_FRAME              -2
