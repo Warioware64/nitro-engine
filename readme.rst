@@ -35,7 +35,15 @@ Features:
 - Text system based on `libDSF <https://codeberg.org/SkyLyrac/libdsf>`_, which
   is based on `BMFont <https://www.angelcode.com/products/bmfont/>`_.
 - Basic GUI elements like buttons and scrollbars.
-- Basic physics system: Axis-aligned bounding boxes (AABB) only.
+- **Physics engine** with multiple collision shapes (AABB, sphere, capsule,
+  triangle mesh), collision responses (bounce, stop, slide, sensor), mass-based
+  impulse, collision groups with bitmask filtering, and collision callbacks.
+- **Triangle mesh collision (ColMesh)**: generate collision meshes from OBJ files
+  with ``obj2dl --collision``. Supports sphere-vs-mesh, AABB-vs-mesh, and
+  capsule-vs-mesh detection with 64-bit precision arithmetic.
+- **Per-bone collision** for animated models: attach collision primitives
+  (sphere, capsule, AABB) to skeleton bones. Shapes follow the animation in
+  real time for accurate hit detection on animated characters.
 
 Nitro Engine Advanced doesn't support any of the 2D hardware of the DS. In order
 to use the 2D hardware you can use libnds directly, or you can use a library like
@@ -97,10 +105,12 @@ Tools
 Nitro Engine Advanced includes the following conversion tools under ``tools/``:
 
 - **obj2dl**: Converts Wavefront OBJ files into NDS display lists (``.bin``).
-  Supports ``--texture`` and ``--scale`` options.
+  Supports ``--texture``, ``--scale``, and ``--collision`` (generates a
+  ``.col.bin`` triangle mesh for the physics engine).
 - **md5_to_dsma**: Converts MD5 mesh and animation files into NDS-compatible
   formats. Supports ``--multi-material`` for DLMM output with per-submesh
-  materials.
+  materials, and ``--collision <md5collimesh>`` to generate per-bone collision
+  data (``.boncol``) from a collision mesh exported by the Blender addon.
 - **img2ds**: Converts images to NDS textures and palettes (deprecated, except
   for DEPTHBMP conversion).
 

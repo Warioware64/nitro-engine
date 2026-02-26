@@ -11,6 +11,8 @@ from display_list import DisplayList
 from mtl_parser import parse_mtl, float_to_rgb15, pack_diffuse_ambient, pack_specular_emission
 from collections import defaultdict
 
+import math
+
 class OBJFormatError(Exception):
     pass
 
@@ -445,6 +447,110 @@ def save_dlmm(output_file, submeshes):
             f.write(dl_bin)
 
 # ---------------------------------------------------------------------------
+# .colmesh collision mesh generation
+# ---------------------------------------------------------------------------
+
+COLM_MAGIC = 0x4D4C4F43   # "COLM" little-endian
+COLM_VERSION = 1
+
+def float_to_f32(val):
+    """Convert a float to NDS f32 (20.12 fixed-point) as unsigned-wrapped int32."""
+    res = int(val * (1 << 12))
+    if res < -0x80000000:
+        raise OverflowError(f"{val} too small for f32: {res:#08x}")
+    if res > 0x7FFFFFFF:
+        raise OverflowError(f"{val} too big for f32: {res:#08x}")
+    if res < 0:
+        res = 0x100000000 + res
+    return res
+
+def generate_colmesh(output_file, vertices, material_faces,
+                     model_scale, model_translation, use_vertex_color):
+    """Generate a .colmesh binary file from parsed OBJ geometry.
+
+    Collects all faces as triangles (splitting quads), applies scale and
+    translation, computes face normals, and writes the binary format.
+    """
+    # Collect all faces as triangles
+    all_tris = []
+    for face_list in material_faces.values():
+        for face in face_list:
+            vkeys = [parse_face_vertex(v, use_vertex_color) for v in face]
+            n = len(vkeys)
+            if n == 3:
+                all_tris.append([vkeys[0][0], vkeys[1][0], vkeys[2][0]])
+            elif n == 4:
+                all_tris.append([vkeys[0][0], vkeys[1][0], vkeys[2][0]])
+                all_tris.append([vkeys[0][0], vkeys[2][0], vkeys[3][0]])
+            # Ignore other polygon types for collision
+
+    if not all_tris:
+        print("Warning: No triangles for collision mesh")
+        return
+
+    # Transform vertices to world-space f32
+    triangles = []
+    min_xyz = [float('inf')] * 3
+    max_xyz = [float('-inf')] * 3
+
+    for tri_indices in all_tris:
+        verts_f32 = []
+        for vi in tri_indices:
+            pos = []
+            for i in range(3):
+                val = vertices[vi][i]
+                val += model_translation[i]
+                val *= model_scale
+                pos.append(val)
+                if val < min_xyz[i]:
+                    min_xyz[i] = val
+                if val > max_xyz[i]:
+                    max_xyz[i] = val
+            verts_f32.append(pos)
+
+        # Compute face normal via cross product
+        e1 = [verts_f32[1][i] - verts_f32[0][i] for i in range(3)]
+        e2 = [verts_f32[2][i] - verts_f32[0][i] for i in range(3)]
+        nx = e1[1] * e2[2] - e1[2] * e2[1]
+        ny = e1[2] * e2[0] - e1[0] * e2[2]
+        nz = e1[0] * e2[1] - e1[1] * e2[0]
+
+        # Normalize
+        length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if length > 1e-10:
+            nx /= length
+            ny /= length
+            nz /= length
+        else:
+            nx, ny, nz = 0.0, 1.0, 0.0  # degenerate: point up
+
+        triangles.append((verts_f32, (nx, ny, nz)))
+
+    # Write .colmesh binary
+    colmesh_path = os.path.splitext(output_file)[0] + '.colmesh'
+
+    with open(colmesh_path, 'wb') as f:
+        # Header
+        f.write(struct.pack('<IIII',
+            COLM_MAGIC, COLM_VERSION, len(triangles), 0))
+
+        # Bounding AABB (min, max)
+        for i in range(3):
+            f.write(struct.pack('<I', float_to_f32(min_xyz[i])))
+        for i in range(3):
+            f.write(struct.pack('<I', float_to_f32(max_xyz[i])))
+
+        # Triangles
+        for verts_f32, normal in triangles:
+            for v in verts_f32:
+                for i in range(3):
+                    f.write(struct.pack('<I', float_to_f32(v[i])))
+            for i in range(3):
+                f.write(struct.pack('<I', float_to_f32(normal[i])))
+
+    print(f"Collision mesh: {len(triangles)} triangles -> {colmesh_path}")
+
+# ---------------------------------------------------------------------------
 # OBJ parsing
 # ---------------------------------------------------------------------------
 
@@ -515,7 +621,7 @@ def parse_obj(input_file, use_vertex_color):
 
 def convert_obj(input_file, output_file, texture_size,
                 model_scale, model_translation, use_vertex_color,
-                no_strip=False, multi_material=False):
+                no_strip=False, multi_material=False, collision=False):
 
     vertices, texcoords, normals, material_faces, mtl_file = \
         parse_obj(input_file, use_vertex_color)
@@ -646,6 +752,11 @@ def convert_obj(input_file, output_file, texture_size,
         print(f"Output:      {output_file} (DLMM format)")
         save_dlmm(output_file, submeshes)
 
+    # Generate collision mesh if requested
+    if collision:
+        generate_colmesh(output_file, vertices, material_faces,
+                         model_scale, model_translation, use_vertex_color)
+
 if __name__ == "__main__":
 
     import argparse
@@ -684,6 +795,9 @@ if __name__ == "__main__":
     parser.add_argument("--multi-material", required=False,
                         action='store_true',
                         help="enable multi-material output (DLMM format)")
+    parser.add_argument("--collision", required=False,
+                        action='store_true',
+                        help="generate .colmesh collision mesh alongside display list")
 
     args = parser.parse_args()
 
@@ -711,7 +825,7 @@ if __name__ == "__main__":
     try:
         convert_obj(args.input, args.output, texture_size,
                     args.scale, args.translation, args.use_vertex_color,
-                    args.no_strip, args.multi_material)
+                    args.no_strip, args.multi_material, args.collision)
     except BaseException as e:
         print("ERROR: " + str(e))
         traceback.print_exc()

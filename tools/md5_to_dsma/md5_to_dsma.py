@@ -1047,6 +1047,174 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
         dl.save_to_file(os.path.join(output_folder, f"{name}{extension_mesh}"))
 
 
+# ---------------------------------------------------------------------------
+# Bone collision (.md5collimesh / .boncol) support
+# ---------------------------------------------------------------------------
+
+BNCL_MAGIC = 0x4C434E42   # "BNCL" little-endian
+BNCL_VERSION = 1
+
+# Type codes matching NEA_BONCOL_TYPE_* in NEABoneCollision.h
+BONCOL_TYPE_NONE    = 0
+BONCOL_TYPE_SPHERE  = 1
+BONCOL_TYPE_CAPSULE = 2
+BONCOL_TYPE_AABB    = 3
+
+def parse_md5collimesh(path):
+    """Parse a .md5collimesh text file.
+
+    Returns a list of dicts, one per bone:
+        {'name': str, 'type': str, 'radius': float, 'half_height': float,
+         'half_extents': (float,float,float), 'offset': (float,float,float)}
+    """
+    bones = []
+
+    with open(path, 'r') as f:
+        mode = "root"
+        current = None
+
+        for line in f:
+            line = line.split('//')[0].strip()
+            if not line:
+                continue
+
+            tokens = line.split()
+            cmd = tokens[0]
+
+            if mode == "root":
+                if cmd == "MD5CollisionVersion":
+                    version = int(tokens[1])
+                    if version != 1:
+                        raise MD5FormatError(
+                            f"Unsupported MD5CollisionVersion: {version}")
+
+                elif cmd == "numBones":
+                    # informational only, we count from parsed data
+                    pass
+
+                elif cmd == "bone":
+                    # bone "name" {
+                    _, name, rest = line.split('"')
+                    if '{' not in rest:
+                        raise MD5FormatError(
+                            f"Expected '{{' after bone name: {line}")
+                    current = {
+                        'name': name,
+                        'type': 'none',
+                        'radius': 0.0,
+                        'half_height': 0.0,
+                        'half_extents': (0.0, 0.0, 0.0),
+                        'offset': (0.0, 0.0, 0.0),
+                    }
+                    mode = "bone"
+
+            elif mode == "bone":
+                if cmd == '}':
+                    bones.append(current)
+                    current = None
+                    mode = "root"
+
+                elif cmd == "type":
+                    current['type'] = tokens[1]
+
+                elif cmd == "radius":
+                    current['radius'] = float(tokens[1])
+
+                elif cmd == "half_height":
+                    current['half_height'] = float(tokens[1])
+
+                elif cmd == "half_extents":
+                    current['half_extents'] = (
+                        float(tokens[1]), float(tokens[2]), float(tokens[3]))
+
+                elif cmd == "offset":
+                    current['offset'] = (
+                        float(tokens[1]), float(tokens[2]), float(tokens[3]))
+
+    return bones
+
+
+def save_bone_collision(joints, collision_bones, output_path, blender_fix):
+    """Write a .boncol binary file.
+
+    Maps bone names from collision_bones to joint indices in the MD5 model.
+    Only bones present in both the collision data and the joint list are written.
+    """
+    # Build name->index map from joints
+    joint_map = {}
+    for i, joint in enumerate(joints):
+        joint_map[joint.name] = i
+
+    # Resolve collision bones to joint indices
+    resolved = []
+    for cb in collision_bones:
+        name = cb['name']
+        if name not in joint_map:
+            print(f"  WARNING: Bone '{name}' in collision data not found in "
+                  f"model joints, skipping")
+            continue
+        resolved.append((joint_map[name], cb))
+
+    # Sort by joint index for predictable output
+    resolved.sort(key=lambda x: x[0])
+
+    num_bones = len(resolved)
+    if num_bones == 0:
+        print("  WARNING: No collision bones matched model joints")
+        return
+
+    with open(output_path, 'wb') as f:
+        # Header: magic, version, num_bones, reserved
+        f.write(struct.pack('<IIII', BNCL_MAGIC, BNCL_VERSION, num_bones, 0))
+
+        for joint_idx, cb in resolved:
+            col_type = cb['type']
+            offset = cb['offset']
+
+            # Apply blender fix to offsets (rotate -90 on X: x, z, -y)
+            if blender_fix:
+                offset = (offset[0], offset[2], -offset[1])
+
+            # Determine type code and params
+            if col_type == 'sphere':
+                type_code = BONCOL_TYPE_SPHERE
+                p1 = cb['radius']
+                p2 = 0.0
+                p3 = 0.0
+            elif col_type == 'capsule':
+                type_code = BONCOL_TYPE_CAPSULE
+                p1 = cb['radius']
+                p2 = cb['half_height']
+                p3 = 0.0
+            elif col_type == 'aabb':
+                type_code = BONCOL_TYPE_AABB
+                p1 = cb['half_extents'][0]
+                p2 = cb['half_extents'][1]
+                p3 = cb['half_extents'][2]
+                if blender_fix:
+                    p1, p2, p3 = p1, p3, p2
+            else:
+                type_code = BONCOL_TYPE_NONE
+                p1 = p2 = p3 = 0.0
+
+            # Per-bone entry: 32 bytes
+            # type(u8) + bone_idx(u8) + pad(2) = 4 bytes
+            # param1/2/3 (f32) = 12 bytes
+            # offset_xyz (f32) = 12 bytes
+            # reserved = 4 bytes
+            f.write(struct.pack('<BBBB',
+                type_code, joint_idx & 0xFF, 0, 0))
+            f.write(struct.pack('<III',
+                float_to_f32(p1), float_to_f32(p2), float_to_f32(p3)))
+            f.write(struct.pack('<III',
+                float_to_f32(offset[0]),
+                float_to_f32(offset[1]),
+                float_to_f32(offset[2])))
+            f.write(struct.pack('<I', 0))  # reserved
+
+    print(f"  Bone collision: {num_bones} bones -> {output_path}")
+
+
 def convert_md5anim(name, output_folder, anim_file, skip_frames, extension_anim,
                     blender_fix):
 
@@ -1114,6 +1282,9 @@ if __name__ == "__main__":
                         action='store_true',
                         help="output DLMM format with per-mesh materials "
                              "(texture sizes auto-detected from shader images)")
+    parser.add_argument("--collision", required=False, type=str, default=None,
+                        help="path to .md5collimesh file for per-bone collision "
+                             "data (generates .boncol binary)")
 
     args = parser.parse_args()
 
@@ -1156,6 +1327,25 @@ if __name__ == "__main__":
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,
                             extension_anim, args.blender_fix)
+
+        if args.collision is not None:
+            if args.model is None:
+                print("ERROR: --collision requires --model to map bone names "
+                      "to joint indices")
+                sys.exit(1)
+
+            print(f"Processing bone collision: {args.collision}")
+            collision_bones = parse_md5collimesh(args.collision)
+            print(f"  Parsed {len(collision_bones)} bone collision entries")
+
+            # Re-parse joints from model for name mapping
+            joints, _ = parse_md5mesh(args.model)
+
+            extension_boncol = "_boncol.bin" if args.bin else ".boncol"
+            boncol_path = os.path.join(args.output,
+                                       f"{args.name}{extension_boncol}")
+            save_bone_collision(joints, collision_bones, boncol_path,
+                                args.blender_fix)
 
     except BaseException as e:
         print("ERROR: " + str(e))

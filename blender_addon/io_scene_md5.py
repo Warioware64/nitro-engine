@@ -26,6 +26,7 @@ import re
 
 from bpy.props import (
     BoolProperty,
+    EnumProperty,
     FloatProperty,
     StringProperty,
     IntProperty,
@@ -45,6 +46,202 @@ bpy.types.Scene.md5_bone_collection = StringProperty(
         name="Bone Collection",
         description="Bone collection name used for MD5 export",
         default="MD5_Export")
+
+
+###
+### Bone collision system
+###
+
+class NEA_BoneCollisionProps(bpy.types.PropertyGroup):
+    """Per-bone collision shape properties for NEA physics."""
+    col_type: EnumProperty(
+        items=[
+            ('none', 'None', 'No collision shape'),
+            ('sphere', 'Sphere', 'Spherical collision shape'),
+            ('capsule', 'Capsule', 'Capsule collision shape (Y-axis)'),
+            ('aabb', 'AABB', 'Axis-aligned bounding box'),
+        ],
+        name="Type",
+        description="Collision shape type for this bone",
+        default='none',
+    )
+    radius: FloatProperty(
+        name="Radius",
+        description="Collision sphere or capsule radius",
+        default=0.5, min=0.01,
+    )
+    half_height: FloatProperty(
+        name="Half Height",
+        description="Capsule half-height along Y axis",
+        default=0.5, min=0.01,
+    )
+    half_x: FloatProperty(name="Half X", default=0.5, min=0.01)
+    half_y: FloatProperty(name="Half Y", default=0.5, min=0.01)
+    half_z: FloatProperty(name="Half Z", default=0.5, min=0.01)
+    offset_x: FloatProperty(name="X", default=0.0)
+    offset_y: FloatProperty(name="Y", default=0.0)
+    offset_z: FloatProperty(name="Z", default=0.0)
+
+
+# Viewport overlay draw handler
+_collision_draw_handler = None
+
+
+def _make_circle_points(center, radius, axis, segments=16):
+    """Generate circle vertices around center in the given plane."""
+    pts = []
+    for i in range(segments + 1):
+        a = 2 * math.pi * i / segments
+        c_a = math.cos(a) * radius
+        s_a = math.sin(a) * radius
+        if axis == 'X':
+            v = mu.Vector((0, c_a, s_a))
+        elif axis == 'Y':
+            v = mu.Vector((c_a, 0, s_a))
+        else:
+            v = mu.Vector((c_a, s_a, 0))
+        pts.append(center + v)
+    return pts
+
+
+def _draw_collision_overlays():
+    """GPU draw callback for bone collision wireframe visualization."""
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    context = bpy.context
+    obj = context.active_object
+    if not obj or obj.type != 'ARMATURE':
+        return
+
+    scene = context.scene
+    if not getattr(scene, 'nea_show_collision', False):
+        return
+
+    arm = obj.data
+    wm = obj.matrix_world
+    lines = []
+
+    for bone in arm.bones:
+        props = bone.nea_collision
+        if props.col_type == 'none':
+            continue
+
+        # Bone center in world space = bone head + offset transformed by bone
+        bone_mat = wm @ bone.matrix_local
+        offset = mu.Vector((props.offset_x, props.offset_y, props.offset_z))
+        center = bone_mat @ offset
+
+        if props.col_type == 'sphere':
+            for axis in ('X', 'Y', 'Z'):
+                pts = _make_circle_points(center, props.radius, axis)
+                for i in range(len(pts) - 1):
+                    lines.extend([pts[i][:], pts[i + 1][:]])
+
+        elif props.col_type == 'capsule':
+            r = props.radius
+            hh = props.half_height
+            rot3 = bone_mat.to_3x3()
+            top = center + rot3 @ mu.Vector((0, hh, 0))
+            bot = center + rot3 @ mu.Vector((0, -hh, 0))
+            for c in (top, bot):
+                for axis in ('X', 'Z'):
+                    pts = _make_circle_points(c, r, axis)
+                    for i in range(len(pts) - 1):
+                        lines.extend([pts[i][:], pts[i + 1][:]])
+            # Connecting lines at 4 cardinal points
+            for angle in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
+                dx = r * math.cos(angle)
+                dz = r * math.sin(angle)
+                p1 = top + mu.Vector((dx, 0, dz))
+                p2 = bot + mu.Vector((dx, 0, dz))
+                lines.extend([p1[:], p2[:]])
+
+        elif props.col_type == 'aabb':
+            hx, hy, hz = props.half_x, props.half_y, props.half_z
+            corners = []
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    for sz in (-1, 1):
+                        corners.append(
+                            (center + mu.Vector((sx * hx, sy * hy, sz * hz)))[:])
+            edges = [
+                (0, 1), (2, 3), (4, 5), (6, 7),
+                (0, 2), (1, 3), (4, 6), (5, 7),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ]
+            for a, b in edges:
+                lines.extend([corners[a], corners[b]])
+
+    if not lines:
+        return
+
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    shader.bind()
+    shader.uniform_float("color", (0.0, 1.0, 0.0, 0.8))
+    batch.draw(shader)
+
+
+class NEA_OT_ToggleCollisionOverlay(bpy.types.Operator):
+    """Toggle bone collision wireframe overlay in the 3D viewport"""
+    bl_idname = "nea.toggle_collision_overlay"
+    bl_label = "Toggle Collision Overlay"
+
+    def execute(self, context):
+        global _collision_draw_handler
+        scene = context.scene
+        scene.nea_show_collision = not scene.nea_show_collision
+
+        if scene.nea_show_collision and _collision_draw_handler is None:
+            _collision_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+                _draw_collision_overlays, (), 'WINDOW', 'POST_VIEW')
+        elif not scene.nea_show_collision and _collision_draw_handler is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(
+                _collision_draw_handler, 'WINDOW')
+            _collision_draw_handler = None
+
+        # Redraw all 3D viewports
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+        return {'FINISHED'}
+
+
+class NEA_OT_AutoFitCollision(bpy.types.Operator):
+    """Auto-generate capsule collision shapes for all bones based on geometry"""
+    bl_idname = "nea.autofit_collision"
+    bl_label = "Auto-Fit All Bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object is not None
+                and context.active_object.type == 'ARMATURE')
+
+    def execute(self, context):
+        arm = context.active_object.data
+        count = 0
+        for bone in arm.bones:
+            if bone.length < 0.001:
+                continue
+            props = bone.nea_collision
+            env_radius = getattr(bone, 'head_radius', 0.0)
+            if env_radius > 0.01:
+                radius = env_radius
+            else:
+                radius = bone.length * 0.2
+            props.col_type = 'capsule'
+            props.radius = radius
+            props.half_height = bone.length * 0.5
+            props.offset_x = 0.0
+            props.offset_y = bone.length * 0.5
+            props.offset_z = 0.0
+            count += 1
+        self.report({'INFO'}, f"Auto-fitted {count} bone collision shapes")
+        return {'FINISHED'}
+
 
 ###
 ### Import functions
@@ -781,6 +978,92 @@ def write_md5anim(filePath, prerequisites, correctionMatrix, previewKeys, frame_
     return
 
 
+def _auto_capsule_from_bone(bone):
+    """Generate capsule collision parameters from bone geometry.
+
+    Uses the bone's length for half_height and a fraction of length for radius.
+    The offset centers the capsule along the bone's local Y axis (head to tail).
+    """
+    length = bone.length
+    if length < 0.001:
+        return None
+
+    # Use envelope radius if available and reasonable, otherwise derive from
+    # bone length.  Blender bones have head_radius / tail_radius from envelope
+    # display, but these are only meaningful when the user has edited them.
+    # Fall back to a fraction of bone length.
+    env_radius = getattr(bone, 'head_radius', 0.0)
+    if env_radius > 0.01:
+        radius = env_radius
+    else:
+        radius = length * 0.2
+
+    half_height = length * 0.5
+    # Offset to center of bone along its local Y axis
+    offset = (0.0, length * 0.5, 0.0)
+
+    return {
+        'type': 'capsule',
+        'radius': radius,
+        'half_height': half_height,
+        'offset': offset,
+    }
+
+
+def write_md5collimesh(filepath, bones):
+    """Write a .md5collimesh text file from bone collision properties.
+
+    Bones with manually configured collision shapes (col_type != 'none') use
+    those settings.  Bones left at the default 'none' get an auto-generated
+    capsule shape derived from the bone's length and envelope radius.
+    """
+    count = 0
+
+    with open(filepath, 'w') as f:
+        # First pass: count entries (manual + auto-generated)
+        entries = []
+        for bone in bones:
+            props = bone.nea_collision
+            if props.col_type != 'none':
+                entries.append(('manual', bone, props))
+            else:
+                auto = _auto_capsule_from_bone(bone)
+                if auto is not None:
+                    entries.append(('auto', bone, auto))
+
+        f.write("MD5CollisionVersion 1\n")
+        f.write(f"numBones {len(entries)}\n\n")
+
+        for kind, bone, data in entries:
+            f.write(f'bone "{bone.name}" {{\n')
+
+            if kind == 'manual':
+                props = data
+                f.write(f'  type {props.col_type}\n')
+                if props.col_type in ('sphere', 'capsule'):
+                    f.write(f'  radius {props.radius:.6f}\n')
+                if props.col_type == 'capsule':
+                    f.write(f'  half_height {props.half_height:.6f}\n')
+                if props.col_type == 'aabb':
+                    f.write(f'  half_extents {props.half_x:.6f} '
+                            f'{props.half_y:.6f} {props.half_z:.6f}\n')
+                f.write(f'  offset {props.offset_x:.6f} '
+                        f'{props.offset_y:.6f} {props.offset_z:.6f}\n')
+            else:
+                # Auto-generated capsule from bone geometry
+                f.write(f'  type {data["type"]}\n')
+                f.write(f'  radius {data["radius"]:.6f}\n')
+                f.write(f'  half_height {data["half_height"]:.6f}\n')
+                ox, oy, oz = data['offset']
+                f.write(f'  offset {ox:.6f} {oy:.6f} {oz:.6f}\n')
+
+            f.write('}\n\n')
+
+        count = len(entries)
+
+    return count
+
+
 ###
 ### Operators and auxiliary functions
 ###
@@ -1287,6 +1570,55 @@ class MD5Panel(bpy.types.Panel):
         else:
             column1.enabled = False
 
+
+class BONE_PT_nea_collision(bpy.types.Panel):
+    """NEA per-bone collision shape properties"""
+    bl_label = "NEA Bone Collision"
+    bl_idname = "BONE_PT_nea_collision"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "bone"
+
+    @classmethod
+    def poll(cls, context):
+        return context.bone is not None
+
+    def draw(self, context):
+        layout = self.layout
+        bone = context.bone
+        props = bone.nea_collision
+
+        layout.prop(props, "col_type")
+
+        if props.col_type == 'sphere':
+            layout.prop(props, "radius")
+        elif props.col_type == 'capsule':
+            layout.prop(props, "radius")
+            layout.prop(props, "half_height")
+        elif props.col_type == 'aabb':
+            col = layout.column(align=True)
+            col.prop(props, "half_x")
+            col.prop(props, "half_y")
+            col.prop(props, "half_z")
+
+        if props.col_type != 'none':
+            box = layout.box()
+            box.label(text="Offset:")
+            row = box.row(align=True)
+            row.prop(props, "offset_x")
+            row.prop(props, "offset_y")
+            row.prop(props, "offset_z")
+
+        layout.separator()
+        row = layout.row()
+        row.operator("nea.autofit_collision", icon='MOD_PHYSICS')
+
+        row = layout.row()
+        icon = 'HIDE_OFF' if context.scene.nea_show_collision else 'HIDE_ON'
+        row.operator("nea.toggle_collision_overlay", icon=icon,
+                     depress=context.scene.nea_show_collision)
+
+
 ### Export UI
 
 class MaybeExportMD5Mesh(bpy.types.Operator):
@@ -1426,14 +1758,20 @@ class ExportMD5Mesh(bpy.types.Operator, ExportHelper):
             default=False
             )
 
-    
+    exportCollision : BoolProperty(
+            name="Export bone collision (.md5collimesh)",
+            description="Export per-bone collision data alongside the mesh",
+            default=False
+            )
+
+
     def invoke(self, context, event):
         ao = bpy.context.active_object
         collection = ao.users_collection[0]
         self.filepath = collection.name
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
-    
+
     def execute(self, context):
         global prerequisites
         #for cmdline export
@@ -1445,12 +1783,19 @@ class ExportMD5Mesh(bpy.types.Operator, ExportHelper):
             else:
                 self.report({'ERROR'}, "\n" + message(checkResult[0],checkResult[1]) )
                 return {'CANCELLED'}
-        
+
         rotdeg = float(self.reorientDegrees)
         orientationTweak = mu.Matrix.Rotation(math.radians( rotdeg ),4,'Z')
         scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
         write_md5mesh(self.filepath, prerequisites, correctionMatrix, self.fixWindings)
+
+        if self.exportCollision:
+            bones = prerequisites[0]
+            collimesh_path = os.path.splitext(self.filepath)[0] + '.md5collimesh'
+            n = write_md5collimesh(collimesh_path, bones)
+            self.report({'INFO'}, f"Exported {n} bone collision(s) to {collimesh_path}")
+
         return {'FINISHED'}
 
 class ExportMD5Anim(bpy.types.Operator, ExportHelper):
@@ -1603,39 +1948,49 @@ class ExportMD5Batch(bpy.types.Operator, ExportHelper):
     description="Only select if having issues with materials flagged with eyeDeform",
     default=False
     )
-       
+
+    exportCollision : BoolProperty(
+            name="Export bone collision (.md5collimesh)",
+            description="Export per-bone collision data alongside the mesh",
+            default=False
+            )
+
     path_mode = path_reference_mode
     check_extension = True
-    
+
     def invoke(self, context, event):
         ao = bpy.context.active_object
         collection = ao.users_collection[0]
         self.filepath = collection.name
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
-    
+
     def execute(self, context):
-        
+
         rotdeg = float(self.reorientDegrees)
         orientationTweak = mu.Matrix.Rotation(math.radians( rotdeg ),4,'Z')
         scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak @ scaleTweak
-        
-       
+
+
         batch_directory = os.path.dirname(self.filepath)
-        #ewfile_name = os.path.join( directory , "newfile.blend")
-        
 
         ao = bpy.context.active_object
-        collection = ao.users_collection[0]        
+        collection = ao.users_collection[0]
         meshObjects = [o for o in bpy.data.collections[collection.name].objects
             if o.data in bpy.data.meshes[:] and o.find_armature()]
         armatures = [a.find_armature() for a in meshObjects]
         armature = armatures[0]
         collection_Prefix = "("+collection.name+")_"
-               
+
         #write the mesh
         write_md5mesh(self.filepath, prerequisites, correctionMatrix, self.fixWindings )
+
+        if self.exportCollision:
+            bones = prerequisites[0]
+            collimesh_path = os.path.splitext(self.filepath)[0] + '.md5collimesh'
+            n = write_md5collimesh(collimesh_path, bones)
+            self.report({'INFO'}, f"Exported {n} bone collision(s) to {collimesh_path}")
                 
         if not self.exportAllAnims:
             #write the active action
@@ -1736,28 +2091,38 @@ def menu_func_export_batch(self, context):
         MaybeExportMD5Batch.bl_idname, text="MD5 Mesh and Animation(s)")
 
 classes = (
-	ImportMD5Mesh,
-	MaybeImportMD5Anim,
-	ImportMD5Anim,
-	MD5BonesAdd,
-	MD5BonesRemove,
-	MD5BonesReplace,
-	MD5BonesClear,
-	MD5Panel,
-	MaybeExportMD5Mesh,
-	MaybeExportMD5Anim,
-	MaybeExportMD5Batch,
-	ExportMD5Mesh,
-	ExportMD5Anim,
-	ExportMD5Batch,
-    MessageBox
+    NEA_BoneCollisionProps,
+    ImportMD5Mesh,
+    MaybeImportMD5Anim,
+    ImportMD5Anim,
+    MD5BonesAdd,
+    MD5BonesRemove,
+    MD5BonesReplace,
+    MD5BonesClear,
+    MD5Panel,
+    BONE_PT_nea_collision,
+    NEA_OT_ToggleCollisionOverlay,
+    NEA_OT_AutoFitCollision,
+    MaybeExportMD5Mesh,
+    MaybeExportMD5Anim,
+    MaybeExportMD5Batch,
+    ExportMD5Mesh,
+    ExportMD5Anim,
+    ExportMD5Batch,
+    MessageBox,
 )
 
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-		
+
+    bpy.types.Bone.nea_collision = bpy.props.PointerProperty(
+        type=NEA_BoneCollisionProps)
+    bpy.types.Scene.nea_show_collision = BoolProperty(
+        name="Show Collision Overlays",
+        default=False)
+
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_mesh)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_mesh)
@@ -1765,8 +2130,17 @@ def register():
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_batch)
 
 def unregister():
+    global _collision_draw_handler
+    if _collision_draw_handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(
+            _collision_draw_handler, 'WINDOW')
+        _collision_draw_handler = None
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+
+    del bpy.types.Bone.nea_collision
+    del bpy.types.Scene.nea_show_collision
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_mesh)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_mesh)

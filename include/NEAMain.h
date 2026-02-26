@@ -34,6 +34,7 @@ extern "C" {
 #include "NEA2D.h"
 #include "NEAAnimation.h"
 #include "NEACamera.h"
+#include "NEACollision.h"
 #include "NEADisplayList.h"
 #include "NEAFAT.h"
 #include "NEAFormats.h"
@@ -46,6 +47,7 @@ extern "C" {
 #include "NEARichText.h"
 #include "NEAText.h"
 #include "NEATexture.h"
+#include "NEABoneCollision.h"
 
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (0)

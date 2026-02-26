@@ -1,0 +1,115 @@
+MD5CollisionVersion 1
+numBones 16
+
+bone "Base.Bone" {
+  type capsule
+  radius 0.292226
+  half_height 1.461132
+  offset 0.000000 1.461132 0.000000
+}
+
+bone "Spine.Low" {
+  type capsule
+  radius 0.336473
+  half_height 0.841183
+  offset 0.000000 0.841183 0.000000
+}
+
+bone "Spine.High" {
+  type capsule
+  radius 0.061723
+  half_height 0.514109
+  offset 0.000000 0.514109 0.000000
+}
+
+bone "Head" {
+  type capsule
+  radius 0.161677
+  half_height 0.669776
+  offset 0.000000 0.669776 0.000000
+}
+
+bone "Chest.Left" {
+  type capsule
+  radius 0.061723
+  half_height 0.501904
+  offset 0.000000 0.501904 0.000000
+}
+
+bone "Arm.Upper.Left" {
+  type capsule
+  radius 0.282915
+  half_height 0.802598
+  offset 0.000000 0.802598 0.000000
+}
+
+bone "Arm.End.Left" {
+  type capsule
+  radius 0.301977
+  half_height 0.802598
+  offset 0.000000 0.802598 0.000000
+}
+
+bone "Chest.Right" {
+  type capsule
+  radius 0.061723
+  half_height 0.508632
+  offset 0.000000 0.508632 0.000000
+}
+
+bone "Arm.Upper.Right" {
+  type capsule
+  radius 0.245441
+  half_height 0.843400
+  offset 0.000000 0.843400 0.000000
+}
+
+bone "Arm.End..Right" {
+  type capsule
+  radius 0.171861
+  half_height 0.746126
+  offset 0.000000 0.746126 0.000000
+}
+
+bone "Pelvis.Left" {
+  type capsule
+  radius 0.096999
+  half_height 0.242498
+  offset 0.000000 0.242498 0.000000
+}
+
+bone "Leg-Upper.Left" {
+  type capsule
+  radius 0.028778
+  half_height 0.683109
+  offset 0.000000 0.683109 0.000000
+}
+
+bone "Leg-Lower.Left" {
+  type capsule
+  radius 0.381968
+  half_height 0.763935
+  offset 0.000000 0.763935 0.000000
+}
+
+bone "Pelvis.Right" {
+  type capsule
+  radius 0.110026
+  half_height 0.275065
+  offset 0.000000 0.275065 0.000000
+}
+
+bone "Leg-Upper.Right" {
+  type capsule
+  radius 0.032642
+  half_height 0.683109
+  offset 0.000000 0.683109 0.000000
+}
+
+bone "Leg-Lower.Right" {
+  type capsule
+  radius 0.381968
+  half_height 0.763935
+  offset 0.000000 0.763935 0.000000
+}
+
