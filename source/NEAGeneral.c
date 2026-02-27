@@ -1784,6 +1784,13 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
         NEA_ModelAnimateAll();
     if (flags & NEA_UPDATE_PHYSICS)
         NEA_PhysicsUpdateAll();
+    // Weak reference: if user code links NEASound (by calling any NEA_Sound*
+    // function), the strong definition is pulled from the archive and used.
+    // Otherwise this resolves to NULL and the call is safely skipped.
+    // This avoids forcing -lmm9 on examples that don't use sound.
+    extern void NEA_SoundUpdateAll(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_SOUND) && NEA_SoundUpdateAll)
+        NEA_SoundUpdateAll();
 
     NEA_CPUPercent = div32(ne_cpucount * 100, 263);
     if (flags & NEA_CAN_SKIP_VBL)

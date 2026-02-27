@@ -48,6 +48,8 @@ LIBS		?= -lNEA -lnds9 -lc
 LIBDIRS		+= $(BLOCKSDSEXT)/nitro-engine-advanced \
 		   $(BLOCKSDS)/libs/libnds
 
+ARM7ELF		?= $(BLOCKSDS)/sys/default_arm7/arm7.elf
+
 # Build artifacts
 # ---------------
 
@@ -196,7 +198,7 @@ endif
 $(ROM): $(ELF)
 	@echo "  NDSTOOL $@"
 	$(V)$(BLOCKSDS)/tools/ndstool/ndstool -c $@ \
-		-7 $(BLOCKSDS)/sys/default_arm7/arm7.elf -9 $(ELF) \
+		-7 $(ARM7ELF) -9 $(ELF) \
 		-b $(GAME_ICON) "$(GAME_FULL_TITLE)" \
 		$(NDSTOOL_ARGS)
 

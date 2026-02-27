@@ -44,6 +44,12 @@ Features:
 - **Per-bone collision** for animated models: attach collision primitives
   (sphere, capsule, AABB) to skeleton bones. Shapes follow the animation in
   real time for accurate hit detection on animated characters.
+- **Sound system** (optional, powered by `Maxmod <https://maxmod.devkitpro.org/>`_):
+  spatial 3D sound with distance attenuation and stereo panning, background music
+  with volume/tempo/pitch control, non-spatial SFX, and WAV streaming. Spatial
+  sources can be attached to models so audio follows objects in the scene. Enabled
+  by building with ``NEA_MAXMOD=1`` — when disabled, the module compiles to
+  nothing and has no dependencies.
 
 Nitro Engine Advanced doesn't support any of the 2D hardware of the DS. In order
 to use the 2D hardware you can use libnds directly, or you can use a library like
@@ -64,6 +70,16 @@ Building from source
        make -f Makefile.blocksds install -j`nproc`
 
    This builds the library in both debug and release modes and installs it.
+
+   To enable sound support (Maxmod integration), add ``NEA_MAXMOD=1``:
+
+   .. code:: bash
+
+       make -f Makefile.blocksds install NEA_MAXMOD=1 -j`nproc`
+
+   Your project must also link ``-lmm9``, add ``-DNEA_MAXMOD`` to its defines,
+   and use ``arm7_maxmod.elf`` as the ARM7 binary. See the examples under
+   ``examples/sound/`` for reference Makefiles.
 
 2. If you want to check that everything is working as expected, open one of the
    folders of the examples and run:

@@ -30,6 +30,12 @@ endif
 
 LIBDIRS		:= $(BLOCKSDS)/libs/libnds
 
+# Optional Maxmod spatial sound support
+ifeq ($(NEA_MAXMOD),1)
+DEFINES		+= -DNEA_MAXMOD
+LIBDIRS		+= $(BLOCKSDS)/libs/maxmod
+endif
+
 # Build artifacts
 # ---------------
 

@@ -48,6 +48,7 @@ extern "C" {
 #include "NEAText.h"
 #include "NEATexture.h"
 #include "NEABoneCollision.h"
+#include "NEASound.h"
 
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (0)

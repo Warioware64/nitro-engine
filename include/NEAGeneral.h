@@ -420,7 +420,9 @@ typedef enum {
     /// is greater than 100%. You can use this if you don't need to load
     /// textures or do anything else during the VBL. It is needed to set
     /// NEA_HBLFunc() as a HBL interrupt handler for this flag to work.
-    NEA_CAN_SKIP_VBL = BIT(3)
+    NEA_CAN_SKIP_VBL = BIT(3),
+    /// Updates spatial sound sources (volume/panning from camera distance).
+    NEA_UPDATE_SOUND = BIT(4)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.
