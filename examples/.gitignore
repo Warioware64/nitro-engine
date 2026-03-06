@@ -2,3 +2,7 @@
 *.elf
 *.arm9
 *.o
+
+# Binary format generator scripts (example helpers, not for end users)
+gen_scene.py
+gen_animmat.py

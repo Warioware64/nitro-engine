@@ -28,6 +28,7 @@ from bpy.props import (
     BoolProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     StringProperty,
     IntProperty,
     CollectionProperty)
@@ -241,6 +242,2002 @@ class NEA_OT_AutoFitCollision(bpy.types.Operator):
             count += 1
         self.report({'INFO'}, f"Auto-fitted {count} bone collision shapes")
         return {'FINISHED'}
+
+
+###
+### Scene management system
+###
+
+class NEA_SceneNodeProps(bpy.types.PropertyGroup):
+    """Per-object scene node properties for NEA scene export."""
+    node_type: EnumProperty(
+        items=[
+            ('auto', 'Auto', 'Detect type automatically (mesh/camera/empty)'),
+            ('empty', 'Empty', 'Group/transform node'),
+            ('mesh', 'Mesh', 'Renderable mesh node'),
+            ('camera', 'Camera', 'Camera node'),
+            ('trigger', 'Trigger', 'Collision zone with callbacks'),
+        ],
+        name="Node Type",
+        description="Scene node type for NEA export",
+        default='auto',
+    )
+    tags: StringProperty(
+        name="Tags",
+        description="Comma-separated tags (max 3, 15 chars each)",
+        default="",
+    )
+    is_active_camera: BoolProperty(
+        name="Active Camera",
+        description="Set this camera as the active scene camera",
+        default=False,
+    )
+    visible: BoolProperty(
+        name="Visible",
+        description="Node and its children are visible on load",
+        default=True,
+    )
+    script_id: IntProperty(
+        name="Script ID",
+        description="Identifier for trigger scripts (0-255)",
+        min=0, max=255, default=0,
+    )
+    trigger_shape: EnumProperty(
+        items=[
+            ('sphere', 'Sphere', 'Spherical trigger zone'),
+            ('aabb', 'AABB', 'Axis-aligned bounding box trigger zone'),
+        ],
+        name="Trigger Shape",
+        description="Collision shape for trigger zone",
+        default='sphere',
+    )
+    trigger_radius: FloatProperty(
+        name="Radius",
+        description="Trigger sphere radius",
+        default=1.0, min=0.01,
+    )
+    trigger_half_x: FloatProperty(
+        name="Half X",
+        description="AABB half-extent on X axis",
+        default=1.0, min=0.01,
+    )
+    trigger_half_y: FloatProperty(
+        name="Half Y",
+        description="AABB half-extent on Y axis",
+        default=1.0, min=0.01,
+    )
+    trigger_half_z: FloatProperty(
+        name="Half Z",
+        description="AABB half-extent on Z axis",
+        default=1.0, min=0.01,
+    )
+
+
+class NEA_AddonPreferences(bpy.types.AddonPreferences):
+    """Addon preferences for NEA tools (Edit > Preferences > Add-ons)."""
+    bl_idname = __name__
+
+    tools_path: StringProperty(
+        name="NEA Repository Path",
+        description=(
+            "Path to the nitro-engine-advanced git repo root. "
+            "Used to locate obj2dl, md5_to_dsma, etc. "
+            "Leave empty to auto-detect from BlocksDS install"
+        ),
+        default="",
+        subtype='DIR_PATH',
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "tools_path")
+        if self.tools_path:
+            tools_dir = os.path.join(bpy.path.abspath(self.tools_path), 'tools')
+            if os.path.isdir(tools_dir):
+                layout.label(text="Tools directory found", icon='CHECKMARK')
+            else:
+                layout.label(text="'tools/' not found at this path",
+                             icon='ERROR')
+
+
+class NEA_SceneSettings(bpy.types.PropertyGroup):
+    """Per-scene settings for NEA scene export."""
+    scene_name: StringProperty(
+        name="Scene Name",
+        description="Default file name for export (without extension)",
+        default="level",
+    )
+    scale: FloatProperty(
+        name="Scale",
+        description="Scale factor for position values",
+        default=1.0, min=0.01, max=1000.0,
+    )
+
+
+# Trigger zone viewport overlay draw handler
+_trigger_draw_handler = None
+
+
+def _draw_trigger_overlays():
+    """GPU draw callback for trigger zone wireframe visualization."""
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    context = bpy.context
+    scene = context.scene
+    if not getattr(scene, 'nea_show_triggers', False):
+        return
+
+    lines = []
+
+    for obj in scene.objects:
+        props = obj.nea_scene_node
+        resolved = props.node_type
+        if resolved == 'auto' and obj.type == 'EMPTY':
+            resolved = 'empty'
+        if resolved != 'trigger':
+            continue
+
+        center = obj.matrix_world.translation
+
+        if props.trigger_shape == 'sphere':
+            for axis in ('X', 'Y', 'Z'):
+                pts = _make_circle_points(center, props.trigger_radius, axis)
+                for i in range(len(pts) - 1):
+                    lines.extend([pts[i][:], pts[i + 1][:]])
+
+        elif props.trigger_shape == 'aabb':
+            hx = props.trigger_half_x
+            hy = props.trigger_half_y
+            hz = props.trigger_half_z
+            corners = []
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    for sz in (-1, 1):
+                        corners.append(
+                            (center + mu.Vector((sx * hx, sy * hy, sz * hz)))[:])
+            edges = [
+                (0, 1), (2, 3), (4, 5), (6, 7),
+                (0, 2), (1, 3), (4, 6), (5, 7),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ]
+            for a, b in edges:
+                lines.extend([corners[a], corners[b]])
+
+    if not lines:
+        return
+
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    shader.bind()
+    shader.uniform_float("color", (0.2, 1.0, 0.2, 0.8))
+    batch.draw(shader)
+
+
+class NEA_OT_ToggleTriggerOverlay(bpy.types.Operator):
+    """Toggle trigger zone wireframe overlay in the 3D viewport"""
+    bl_idname = "nea.toggle_trigger_overlay"
+    bl_label = "Toggle Trigger Overlay"
+
+    def execute(self, context):
+        global _trigger_draw_handler
+        scene = context.scene
+        scene.nea_show_triggers = not scene.nea_show_triggers
+
+        if scene.nea_show_triggers and _trigger_draw_handler is None:
+            _trigger_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+                _draw_trigger_overlays, (), 'WINDOW', 'POST_VIEW')
+        elif not scene.nea_show_triggers and _trigger_draw_handler is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(
+                _trigger_draw_handler, 'WINDOW')
+            _trigger_draw_handler = None
+
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+        return {'FINISHED'}
+
+
+def _resolve_node_type(obj):
+    """Determine the NEA node type for a Blender object."""
+    ntype = obj.nea_scene_node.node_type
+    if ntype != 'auto':
+        return ntype
+    if obj.type == 'CAMERA':
+        return 'camera'
+    if obj.type == 'MESH':
+        return 'mesh'
+    return 'empty'
+
+
+def _collect_scene_nodes(context, scale):
+    """Walk Blender's view layer objects and build the scene JSON dict."""
+    import json
+
+    # Gather all root-level and parented objects (skip armatures, lights, etc.
+    # that don't map to scene nodes unless they are cameras)
+    allowed_types = {'MESH', 'EMPTY', 'CAMERA'}
+    objects = [o for o in context.view_layer.objects
+               if o.type in allowed_types]
+
+    # Build index map: object -> index
+    obj_list = list(objects)
+    obj_index = {o: i for i, o in enumerate(obj_list)}
+
+    nodes = []
+    assets = []
+    materials = []
+    active_camera_idx = 0xFFFF
+
+    for i, obj in enumerate(obj_list):
+        props = obj.nea_scene_node
+        ntype = _resolve_node_type(obj)
+
+        # Parent index
+        parent_idx = 0xFF
+        if obj.parent and obj.parent in obj_index:
+            parent_idx = obj_index[obj.parent]
+
+        # Position (in Blender coords, Y-up -> NDS: x, z, -y swap not needed
+        # since the engine expects Blender-exported values)
+        loc = obj.location * scale
+        pos = [loc.x, loc.z, -loc.y]
+
+        # Rotation (convert Blender euler to 0-511 range for NDS)
+        euler = obj.rotation_euler
+        rx = int(round(euler.x / (2 * math.pi) * 512)) & 0x1FF
+        ry = int(round(euler.z / (2 * math.pi) * 512)) & 0x1FF
+        rz = int(round(-euler.y / (2 * math.pi) * 512)) & 0x1FF
+
+        # Scale
+        scl = obj.scale
+        scl_out = [scl.x, scl.z, scl.y]
+
+        # Tags
+        tag_list = []
+        if props.tags.strip():
+            tag_list = [t.strip()[:15] for t in props.tags.split(',')
+                        if t.strip()][:3]
+
+        node = {
+            'name': obj.name[:23],
+            'type': ntype,
+            'parent_idx': parent_idx,
+            'visible': props.visible,
+            'position': pos,
+            'rotation': [rx, ry, rz],
+            'scale': scl_out,
+            'tags': tag_list,
+        }
+
+        # Type-specific data
+        if ntype == 'mesh':
+            node['mesh'] = {
+                'asset_index': 0,
+                'material_index': 0xFFFF,
+                'is_animated': False,
+            }
+        elif ntype == 'camera':
+            # Compute look-at direction from camera's forward vector
+            forward = obj.matrix_world.to_3x3() @ mu.Vector((0, 0, -1))
+            up_vec = obj.matrix_world.to_3x3() @ mu.Vector((0, 1, 0))
+            to = [
+                (loc.x + forward.x) * scale,
+                (loc.z + forward.z) * scale,
+                -(loc.y + forward.y) * scale,
+            ]
+            up = [up_vec.x, up_vec.z, -up_vec.y]
+            node['camera'] = {'to': to, 'up': up}
+
+            if props.is_active_camera:
+                active_camera_idx = i
+        elif ntype == 'trigger':
+            trig = {
+                'shape': props.trigger_shape,
+                'script_id': props.script_id,
+            }
+            if props.trigger_shape == 'sphere':
+                trig['radius'] = props.trigger_radius * scale
+            elif props.trigger_shape == 'aabb':
+                trig['half_x'] = props.trigger_half_x * scale
+                trig['half_y'] = props.trigger_half_y * scale
+                trig['half_z'] = props.trigger_half_z * scale
+            node['trigger'] = trig
+
+        nodes.append(node)
+
+    return {
+        'nodes': nodes,
+        'assets': assets,
+        'materials': materials,
+        'active_camera_idx': active_camera_idx,
+    }
+
+
+def _float_to_f32(val):
+    """Convert a float to NDS 20.12 fixed-point (signed int32).
+
+    Uses the same pattern as display_list.py float_to_v16.
+    """
+    res = int(val * (1 << 12))
+    if res < -0x80000000:
+        raise OverflowError(f"{val} too small for f32: {res:#010x}")
+    if res > 0x7FFFFFFF:
+        raise OverflowError(f"{val} too big for f32: {res:#010x}")
+    if res < 0:
+        res = 0x100000000 + res
+    return res
+
+
+def _pack_fixed_string(s, length):
+    """Pack a string into a fixed-length null-padded bytes object."""
+    encoded = s.encode('utf-8')[:length - 1]
+    return encoded + b'\x00' * (length - len(encoded))
+
+
+def _write_neascene_binary(output_path, nodes, assets, mat_refs,
+                           active_camera_idx):
+    """Write a binary .neascene file directly (no external tool needed).
+
+    Binary layout matches NEAScene.c parser expectations:
+        Header 16 B, Assets 64 B each, MatRefs 80 B each, Nodes 128 B each.
+    """
+    import struct
+
+    NSCN_MAGIC = 0x4E53434E
+    NSCN_VERSION = 1
+    NODE_SIZE = 128
+    NODE_NAME_LEN = 24
+    TAG_LEN = 16
+    MAX_TAGS = 6
+
+    type_map = {'empty': 0, 'mesh': 1, 'camera': 2, 'trigger': 3}
+
+    with open(output_path, 'wb') as f:
+        # --- Header (16 bytes) ---
+        f.write(struct.pack('<IIHHHH',
+                            NSCN_MAGIC, NSCN_VERSION,
+                            len(nodes), len(assets), len(mat_refs),
+                            active_camera_idx))
+
+        # --- Asset table (64 bytes each) ---
+        for asset in assets:
+            data = _pack_fixed_string(asset.get('path', ''), 48)
+            data += struct.pack('<B', asset.get('type', 0))
+            data += b'\x00' * 15
+            f.write(data)
+
+        # --- Material ref table (80 bytes each) ---
+        for mat in mat_refs:
+            f.write(_pack_fixed_string(mat.get('name', ''), 32))
+            f.write(_pack_fixed_string(mat.get('tex_path', ''), 48))
+
+        # --- Node table (128 bytes each) ---
+        for node in nodes:
+            buf = bytearray(NODE_SIZE)
+
+            # Name (24 bytes at offset 0)
+            buf[0:NODE_NAME_LEN] = _pack_fixed_string(
+                node.get('name', ''), NODE_NAME_LEN)
+
+            # Type, parent, num_tags, flags (offset 24-27)
+            ntype = type_map.get(node.get('type', 'empty'), 0)
+            buf[24] = ntype
+            buf[25] = node.get('parent_idx', 0xFF) & 0xFF
+
+            tags = node.get('tags', [])[:MAX_TAGS]
+            buf[26] = len(tags)
+
+            flags = 1 if node.get('visible', True) else 0
+            buf[27] = flags
+
+            # Position (f32 x3 at offset 28)
+            pos = node.get('position', [0.0, 0.0, 0.0])
+            struct.pack_into('<III', buf, 28,
+                             _float_to_f32(pos[0]),
+                             _float_to_f32(pos[1]),
+                             _float_to_f32(pos[2]))
+
+            # Rotation (int16 x3 at offset 40, +2 padding)
+            rot = node.get('rotation', [0, 0, 0])
+            struct.pack_into('<hhhh', buf, 40,
+                             rot[0] & 0x1FF, rot[1] & 0x1FF,
+                             rot[2] & 0x1FF, 0)
+
+            # Scale (f32 x3 at offset 48)
+            scl = node.get('scale', [1.0, 1.0, 1.0])
+            struct.pack_into('<III', buf, 48,
+                             _float_to_f32(scl[0]),
+                             _float_to_f32(scl[1]),
+                             _float_to_f32(scl[2]))
+
+            # Type-specific data at offset 60
+            type_str = node.get('type', 'empty')
+            if type_str == 'mesh':
+                mesh = node.get('mesh', {})
+                struct.pack_into('<HHB', buf, 60,
+                                 mesh.get('asset_index', 0),
+                                 mesh.get('material_index', 0xFFFF),
+                                 1 if mesh.get('is_animated', False) else 0)
+            elif type_str == 'camera':
+                cam = node.get('camera', {})
+                to = cam.get('to', [0.0, 0.0, -1.0])
+                up = cam.get('up', [0.0, 1.0, 0.0])
+                struct.pack_into('<IIIIII', buf, 60,
+                                 _float_to_f32(to[0]), _float_to_f32(to[1]),
+                                 _float_to_f32(to[2]),
+                                 _float_to_f32(up[0]), _float_to_f32(up[1]),
+                                 _float_to_f32(up[2]))
+            elif type_str == 'trigger':
+                trig = node.get('trigger', {})
+                shape_type = {'sphere': 1, 'aabb': 2}.get(
+                    trig.get('shape', 'sphere'), 1)
+                buf[60] = shape_type
+                buf[61] = trig.get('script_id', 0)
+                if shape_type == 1:
+                    struct.pack_into('<I', buf, 64,
+                                     _float_to_f32(trig.get('radius', 1.0)))
+                elif shape_type == 2:
+                    struct.pack_into('<III', buf, 64,
+                                     _float_to_f32(trig.get('half_x', 1.0)),
+                                     _float_to_f32(trig.get('half_y', 1.0)),
+                                     _float_to_f32(trig.get('half_z', 1.0)))
+
+            # Tags at offset 80 (3 * 16 = 48 bytes)
+            for t in range(len(tags)):
+                tag_bytes = _pack_fixed_string(tags[t], TAG_LEN)
+                buf[80 + t * TAG_LEN:80 + (t + 1) * TAG_LEN] = tag_bytes
+
+            f.write(bytes(buf))
+
+
+class NEA_OT_ExportScene(bpy.types.Operator, ExportHelper):
+    """Export the current Blender scene as a binary .neascene file"""
+    bl_idname = "nea.export_scene"
+    bl_label = "Export NEA Scene"
+    bl_options = {'REGISTER', 'PRESET'}
+    filename_ext = ".neascene"
+
+    filter_glob: StringProperty(
+        default="*.neascene",
+        options={'HIDDEN'},
+    )
+
+    scaleFactor: FloatProperty(
+        name="Scale",
+        description="Scale factor for position values",
+        default=1.0, min=0.01, max=1000.0,
+    )
+
+    export_json: BoolProperty(
+        name="Also save .json",
+        description="Keep the intermediate JSON file next to the binary",
+        default=False,
+    )
+
+    path_mode = path_reference_mode
+    check_extension = True
+
+    def invoke(self, context, event):
+        # Default filename from scene settings or blend file name
+        settings = context.scene.nea_scene_settings
+        if settings.scene_name:
+            self.filepath = settings.scene_name
+        else:
+            self.filepath = "level"
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        import json
+        import struct
+
+        scale = self.scaleFactor
+
+        # Build scene data
+        scene_data = _collect_scene_nodes(context, scale)
+
+        if not scene_data['nodes']:
+            self.report({'ERROR'}, "No exportable objects in scene")
+            return {'CANCELLED'}
+
+        bin_path = self.filepath
+        nodes = scene_data['nodes']
+        assets = scene_data.get('assets', [])
+        mat_refs = scene_data.get('materials', [])
+        active_cam = scene_data.get('active_camera_idx', 0xFFFF)
+
+        # Save optional JSON
+        if self.export_json:
+            export_dir = os.path.dirname(bin_path)
+            base_name = os.path.splitext(os.path.basename(bin_path))[0]
+            json_path = os.path.join(export_dir, base_name + '.neascene.json')
+            with open(json_path, 'w') as f:
+                json.dump(scene_data, f, indent=2)
+
+        # Write binary .neascene directly
+        _write_neascene_binary(bin_path, nodes, assets, mat_refs, active_cam)
+
+        self.report({'INFO'},
+                    f"Exported {len(nodes)} nodes to {bin_path}")
+        return {'FINISHED'}
+
+
+class OBJECT_PT_nea_scene_node(bpy.types.Panel):
+    """NEA scene node properties"""
+    bl_label = "NEA Scene Node"
+    bl_idname = "OBJECT_PT_nea_scene_node"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+        props = obj.nea_scene_node
+
+        layout.prop(props, "node_type")
+        layout.prop(props, "visible")
+        layout.prop(props, "tags")
+
+        resolved = _resolve_node_type(obj)
+
+        if resolved == 'camera':
+            layout.prop(props, "is_active_camera")
+
+        if resolved == 'trigger':
+            box = layout.box()
+            box.label(text="Trigger Settings:")
+            box.prop(props, "trigger_shape")
+            box.prop(props, "script_id")
+            if props.trigger_shape == 'sphere':
+                box.prop(props, "trigger_radius")
+            elif props.trigger_shape == 'aabb':
+                col = box.column(align=True)
+                col.prop(props, "trigger_half_x")
+                col.prop(props, "trigger_half_y")
+                col.prop(props, "trigger_half_z")
+
+
+class VIEW3D_PT_nea_scene_export(bpy.types.Panel):
+    """NEA scene export panel in the 3D viewport N-panel"""
+    bl_label = "NEA Scene Export"
+    bl_idname = "VIEW3D_PT_nea_scene_export"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "NEA"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.nea_scene_settings
+
+        layout.prop(settings, "scene_name")
+        layout.prop(settings, "scale")
+
+        layout.separator()
+        layout.operator("nea.export_scene", icon='EXPORT',
+                         text="Export NEA Scene...")
+
+        layout.separator()
+        icon = 'HIDE_OFF' if context.scene.nea_show_triggers else 'HIDE_ON'
+        layout.operator("nea.toggle_trigger_overlay", icon=icon,
+                         depress=getattr(context.scene, 'nea_show_triggers',
+                                         False))
+
+
+###
+### Texture VRAM size calculation
+###
+
+def _calc_texture_vram(tex_format, width, height):
+    """Calculate NDS texture VRAM usage in bytes for a given format and size.
+    Returns (tex_bytes, pal_bytes) tuple."""
+    pixels = width * height
+    tex_bytes = 0
+    pal_bytes = 0
+
+    if tex_format == 'tex4x4':
+        # 4x4 block compression: 4 bytes per 4x4 block + 2-byte palette index
+        block_count = (width // 4) * (height // 4)
+        tex_bytes = block_count * 4 + block_count * 2
+        pal_bytes = 4 * 2  # palette (4 colors * 2 bytes each, per block)
+    elif tex_format == 'palette4':
+        tex_bytes = pixels // 4       # 2 bits per pixel
+        pal_bytes = 4 * 2             # 4 colors * 16-bit RGB
+    elif tex_format == 'palette16':
+        tex_bytes = pixels // 2       # 4 bits per pixel
+        pal_bytes = 16 * 2            # 16 colors * 16-bit RGB
+    elif tex_format == 'palette256':
+        tex_bytes = pixels            # 8 bits per pixel
+        pal_bytes = 256 * 2           # 256 colors * 16-bit RGB
+    elif tex_format == 'a3i5':
+        tex_bytes = pixels            # 8 bits per pixel
+        pal_bytes = 32 * 2            # up to 32 palette entries
+    elif tex_format == 'a5i3':
+        tex_bytes = pixels            # 8 bits per pixel
+        pal_bytes = 8 * 2             # up to 8 palette entries
+    elif tex_format == 'direct':
+        tex_bytes = pixels * 2        # 16 bits per pixel (RGB555)
+        pal_bytes = 0
+    return (tex_bytes, pal_bytes)
+
+
+def _format_vram_size(size_bytes):
+    """Format byte size as a readable string."""
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
+def _calc_scene_total_vram(context):
+    """Calculate total texture VRAM for all materials in the scene."""
+    total_tex = 0
+    total_pal = 0
+    seen = set()
+    for obj in context.scene.objects:
+        if obj.type != 'MESH':
+            continue
+        for mat in obj.data.materials:
+            if mat is None or mat.name in seen:
+                continue
+            seen.add(mat.name)
+            ptex = mat.nea_ptexconv
+            # Find texture dimensions
+            w, h = 0, 0
+            if mat.node_tree:
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        w, h = node.image.size[0], node.image.size[1]
+                        break
+            if w > 0 and h > 0:
+                tb, pb = _calc_texture_vram(ptex.tex_format, w, h)
+                total_tex += tb
+                total_pal += pb
+    return (total_tex, total_pal)
+
+
+###
+### Polyformat settings (per-object polygon attributes)
+###
+
+def _float_to_rgb15(color):
+    """Convert Blender RGB float (0-1) to NDS RGB15 integer."""
+    r = int(color[0] * 31) & 31
+    g = int(color[1] * 31) & 31
+    b = int(color[2] * 31) & 31
+    return r | (g << 5) | (b << 10)
+
+
+class NEA_PolyformatProps(bpy.types.PropertyGroup):
+    """Per-object polygon format settings for NEA."""
+    light_enum: EnumProperty(
+        items=[
+            ('NEA_LIGHT_0', 'Light 0', ''),
+            ('NEA_LIGHT_1', 'Light 1', ''),
+            ('NEA_LIGHT_2', 'Light 2', ''),
+            ('NEA_LIGHT_3', 'Light 3', ''),
+            ('NEA_LIGHT_01', 'Light 0+1', ''),
+            ('NEA_LIGHT_02', 'Light 0+2', ''),
+            ('NEA_LIGHT_03', 'Light 0+3', ''),
+            ('NEA_LIGHT_12', 'Light 1+2', ''),
+            ('NEA_LIGHT_13', 'Light 1+3', ''),
+            ('NEA_LIGHT_23', 'Light 2+3', ''),
+            ('NEA_LIGHT_012', 'Light 0+1+2', ''),
+            ('NEA_LIGHT_013', 'Light 0+1+3', ''),
+            ('NEA_LIGHT_023', 'Light 0+2+3', ''),
+            ('NEA_LIGHT_123', 'Light 1+2+3', ''),
+            ('NEA_LIGHT_0123', 'All Lights', ''),
+        ],
+        name="Lights",
+        description="Which lights affect this object",
+        default='NEA_LIGHT_0',
+    )
+    alpha: IntProperty(
+        name="Alpha",
+        description="0 = wireframe, 31 = opaque, 1-30 = translucent",
+        default=31, min=0, max=31,
+    )
+    polygon_id: IntProperty(
+        name="Polygon ID",
+        description="Used for antialias, blending, and outlining (0-63)",
+        default=0, min=0, max=63,
+    )
+    culling: EnumProperty(
+        items=[
+            ('NEA_CULL_BACK', 'Back', 'Cull back-facing polygons'),
+            ('NEA_CULL_FRONT', 'Front', 'Cull front-facing polygons'),
+            ('NEA_CULL_NONE', 'None', 'Draw all polygons'),
+        ],
+        name="Culling",
+        description="Polygon culling mode",
+        default='NEA_CULL_BACK',
+    )
+    other_flag1_enabled: BoolProperty(name="Flag 1", default=False)
+    other_flag1: EnumProperty(
+        items=[
+            ('NEA_MODULATION', 'Modulation', 'Normal shading'),
+            ('NEA_DECAL', 'Decal', 'Decal mode'),
+            ('NEA_TOON_HIGHLIGHT_SHADING', 'Toon/Highlight', 'Toon or highlight shading'),
+            ('NEA_SHADOW_POLYGONS', 'Shadow', 'Shadow polygons'),
+            ('NEA_TRANS_DEPTH_KEEP', 'Trans Depth Keep', 'Keep old depth for translucent'),
+            ('NEA_TRANS_DEPTH_UPDATE', 'Trans Depth Update', 'Set new depth for translucent'),
+            ('NEA_HIDE_FAR_CLIPPED', 'Hide Far Clipped', ''),
+            ('NEA_RENDER_FAR_CLIPPED', 'Render Far Clipped', ''),
+            ('NEA_FOG_ENABLE', 'Fog Enable', ''),
+        ],
+        name="", default='NEA_MODULATION',
+    )
+    other_flag2_enabled: BoolProperty(name="Flag 2", default=False)
+    other_flag2: EnumProperty(
+        items=[
+            ('NEA_MODULATION', 'Modulation', ''),
+            ('NEA_DECAL', 'Decal', ''),
+            ('NEA_TOON_HIGHLIGHT_SHADING', 'Toon/Highlight', ''),
+            ('NEA_SHADOW_POLYGONS', 'Shadow', ''),
+            ('NEA_TRANS_DEPTH_KEEP', 'Trans Depth Keep', ''),
+            ('NEA_TRANS_DEPTH_UPDATE', 'Trans Depth Update', ''),
+            ('NEA_HIDE_FAR_CLIPPED', 'Hide Far Clipped', ''),
+            ('NEA_RENDER_FAR_CLIPPED', 'Render Far Clipped', ''),
+            ('NEA_FOG_ENABLE', 'Fog Enable', ''),
+        ],
+        name="", default='NEA_MODULATION',
+    )
+
+
+class OBJECT_PT_nea_polyformat(bpy.types.Panel):
+    """NEA polygon format settings"""
+    bl_label = "NEA Polyformat"
+    bl_idname = "OBJECT_PT_nea_polyformat"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.object.nea_polyformat
+
+        layout.prop(props, "light_enum")
+
+        box = layout.box()
+        box.label(text="Polygon Format:")
+        box.prop(props, "alpha")
+        box.prop(props, "polygon_id")
+        box.prop(props, "culling")
+
+        box2 = layout.box()
+        box2.label(text="Other Flags:")
+        row = box2.row()
+        row.prop(props, "other_flag1_enabled", text="")
+        sub = row.row()
+        sub.enabled = props.other_flag1_enabled
+        sub.prop(props, "other_flag1")
+        row = box2.row()
+        row.prop(props, "other_flag2_enabled", text="")
+        sub = row.row()
+        sub.enabled = props.other_flag2_enabled
+        sub.prop(props, "other_flag2")
+
+
+###
+### Material settings (ptexconv, texture flags, material properties)
+###
+
+class NEA_PtexconvProps(bpy.types.PropertyGroup):
+    """Per-material ptexconv texture format settings."""
+    tex_format: EnumProperty(
+        items=[
+            ('tex4x4', 'TEX4X4', 'Compressed 4x4 texels'),
+            ('palette4', 'Palette 4', '4-color palette'),
+            ('palette16', 'Palette 16', '16-color palette'),
+            ('palette256', 'Palette 256', '256-color palette'),
+            ('a3i5', 'A3I5', '3-bit alpha, 5-bit index'),
+            ('a5i3', 'A5I3', '5-bit alpha, 3-bit index'),
+            ('direct', 'Direct', 'Direct color (16-bit)'),
+        ],
+        name="Format",
+        description="NDS texture format for ptexconv",
+        default='palette256',
+    )
+    compression: IntProperty(
+        name="TEX4X4 Compression",
+        description="Compression level for TEX4X4 format (0-100)",
+        default=0, min=0, max=100,
+    )
+    dithering: IntProperty(
+        name="Dithering",
+        description="Dithering level (0-100)",
+        default=0, min=0, max=100,
+    )
+
+
+class NEA_TextureFlagsProps(bpy.types.PropertyGroup):
+    """Per-material NDS texture flags."""
+    wrap_s: BoolProperty(name="Wrap S", default=True,
+                         description="NEA_TEXTURE_WRAP_S")
+    wrap_t: BoolProperty(name="Wrap T", default=True,
+                         description="NEA_TEXTURE_WRAP_T")
+    flip_s: BoolProperty(name="Flip S", default=False,
+                         description="NEA_TEXTURE_FLIP_S")
+    flip_t: BoolProperty(name="Flip T", default=False,
+                         description="NEA_TEXTURE_FLIP_T")
+    color0_transparent: BoolProperty(name="Color 0 Transparent", default=False,
+                                     description="NEA_TEXTURE_COLOR0_TRANSPARENT")
+    texgen: EnumProperty(
+        items=[
+            ('NEA_TEXGEN_TEXCOORD', 'Texcoord', 'Use UV coordinates'),
+            ('NEA_TEXGEN_NORMAL', 'Normal', 'Generate from normals'),
+            ('NEA_TEXGEN_POSITION', 'Position', 'Generate from position'),
+            ('NEA_TEXGEN_OFF', 'Off', 'No texture coordinate generation'),
+        ],
+        name="TexGen",
+        description="Texture coordinate generation mode",
+        default='NEA_TEXGEN_TEXCOORD',
+    )
+
+
+class NEA_MaterialProps(bpy.types.PropertyGroup):
+    """Per-material NDS material color properties."""
+    enabled: BoolProperty(
+        name="Use Material Properties",
+        description="Enable custom diffuse/ambient/specular/emission colors",
+        default=False,
+    )
+    diffuse: FloatVectorProperty(
+        name="Diffuse", subtype='COLOR',
+        description="Light directly hitting the polygon",
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0,
+    )
+    ambient: FloatVectorProperty(
+        name="Ambient", subtype='COLOR',
+        description="Indirect light (reflections from environment)",
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+    )
+    specular: FloatVectorProperty(
+        name="Specular", subtype='COLOR',
+        description="Light reflected towards the camera (mirror)",
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+    )
+    emission: FloatVectorProperty(
+        name="Emission", subtype='COLOR',
+        description="Light emitted by the polygon",
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0,
+    )
+    use_vtx_color: BoolProperty(
+        name="Vertex Color",
+        description="Diffuse reflection works as color command",
+        default=False,
+    )
+    use_shininess: BoolProperty(
+        name="Shininess Table",
+        description="Specular uses the shininess table",
+        default=False,
+    )
+
+
+class MATERIAL_PT_nea_ptexconv(bpy.types.Panel):
+    """NEA ptexconv texture format settings"""
+    bl_label = "NEA Texture Format (ptexconv)"
+    bl_idname = "MATERIAL_PT_nea_ptexconv"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "material"
+
+    @classmethod
+    def poll(cls, context):
+        return context.material is not None
+
+    def draw(self, context):
+        layout = self.layout
+        mat = context.material
+        ptex = mat.nea_ptexconv
+        flags = mat.nea_tex_flags
+        props = mat.nea_mat_props
+
+        box = layout.box()
+        box.label(text="Texture Format:")
+        box.prop(ptex, "tex_format")
+        if ptex.tex_format == 'tex4x4':
+            box.prop(ptex, "compression")
+        box.prop(ptex, "dithering")
+
+        # Per-material VRAM size display
+        w, h = 0, 0
+        if mat.node_tree:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    w, h = node.image.size[0], node.image.size[1]
+                    break
+        if w > 0 and h > 0:
+            tb, pb = _calc_texture_vram(ptex.tex_format, w, h)
+            vram_box = box.box()
+            vram_box.label(text=f"Texture: {w}x{h}")
+            vram_box.label(text=f"VRAM: {_format_vram_size(tb)} tex"
+                           f" + {_format_vram_size(pb)} pal"
+                           f" = {_format_vram_size(tb + pb)}")
+
+        box2 = layout.box()
+        box2.label(text="Texture Flags:")
+        row = box2.row()
+        row.prop(flags, "wrap_s")
+        row.prop(flags, "wrap_t")
+        row = box2.row()
+        row.prop(flags, "flip_s")
+        row.prop(flags, "flip_t")
+        box2.prop(flags, "color0_transparent")
+        box2.prop(flags, "texgen")
+
+        box3 = layout.box()
+        box3.prop(props, "enabled")
+        if props.enabled:
+            box3.prop(props, "diffuse")
+            box3.label(text=f"  RGB15: {_float_to_rgb15(props.diffuse):#06x}")
+            box3.prop(props, "ambient")
+            box3.label(text=f"  RGB15: {_float_to_rgb15(props.ambient):#06x}")
+            box3.prop(props, "specular")
+            box3.label(text=f"  RGB15: {_float_to_rgb15(props.specular):#06x}")
+            box3.prop(props, "emission")
+            box3.label(text=f"  RGB15: {_float_to_rgb15(props.emission):#06x}")
+            box3.prop(props, "use_vtx_color")
+            box3.prop(props, "use_shininess")
+
+
+###
+### Light settings (per-scene, 4 lights)
+###
+
+class NEA_LightProps(bpy.types.PropertyGroup):
+    """Per-scene light configuration (4 NDS hardware lights)."""
+    light0_enabled: BoolProperty(name="Enable Light 0", default=True)
+    light0_color: FloatVectorProperty(
+        name="Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0)
+    light0_x: FloatProperty(name="X", default=-0.5, min=-0.98, max=0.98,
+                            description="Direction vector X (v10 format)")
+    light0_y: FloatProperty(name="Y", default=-0.5, min=-0.98, max=0.98)
+    light0_z: FloatProperty(name="Z", default=-0.5, min=-0.98, max=0.98)
+
+    light1_enabled: BoolProperty(name="Enable Light 1", default=False)
+    light1_color: FloatVectorProperty(
+        name="Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0)
+    light1_x: FloatProperty(name="X", default=-0.5, min=-0.98, max=0.98)
+    light1_y: FloatProperty(name="Y", default=-0.5, min=-0.98, max=0.98)
+    light1_z: FloatProperty(name="Z", default=-0.5, min=-0.98, max=0.98)
+
+    light2_enabled: BoolProperty(name="Enable Light 2", default=False)
+    light2_color: FloatVectorProperty(
+        name="Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0)
+    light2_x: FloatProperty(name="X", default=-0.5, min=-0.98, max=0.98)
+    light2_y: FloatProperty(name="Y", default=-0.5, min=-0.98, max=0.98)
+    light2_z: FloatProperty(name="Z", default=-0.5, min=-0.98, max=0.98)
+
+    light3_enabled: BoolProperty(name="Enable Light 3", default=False)
+    light3_color: FloatVectorProperty(
+        name="Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0)
+    light3_x: FloatProperty(name="X", default=-0.5, min=-0.98, max=0.98)
+    light3_y: FloatProperty(name="Y", default=-0.5, min=-0.98, max=0.98)
+    light3_z: FloatProperty(name="Z", default=-0.5, min=-0.98, max=0.98)
+
+    near_plane: FloatProperty(
+        name="Near Plane", default=0.1, min=0.001,
+        description="Near clipping plane distance")
+    far_plane: FloatProperty(
+        name="Far Plane", default=16.0, min=0.1,
+        description="Far clipping plane distance")
+
+
+class SCENE_PT_nea_lights(bpy.types.Panel):
+    """NEA per-scene light and clipping settings"""
+    bl_label = "NEA Lights & Clipping"
+    bl_idname = "SCENE_PT_nea_lights"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "scene"
+
+    def draw(self, context):
+        layout = self.layout
+        lp = context.scene.nea_light_props
+
+        box = layout.box()
+        box.label(text="Clipping Planes:")
+        row = box.row()
+        row.prop(lp, "near_plane")
+        row.prop(lp, "far_plane")
+
+        for i in range(4):
+            box = layout.box()
+            en = getattr(lp, f"light{i}_enabled")
+            box.prop(lp, f"light{i}_enabled")
+            if en:
+                box.prop(lp, f"light{i}_color")
+                c = getattr(lp, f"light{i}_color")
+                box.label(text=f"  RGB15: {_float_to_rgb15(c):#06x}")
+                row = box.row(align=True)
+                row.prop(lp, f"light{i}_x")
+                row.prop(lp, f"light{i}_y")
+                row.prop(lp, f"light{i}_z")
+
+
+class SCENE_PT_nea_vram(bpy.types.Panel):
+    """Total texture VRAM usage for the scene"""
+    bl_label = "NEA Texture VRAM"
+    bl_idname = "SCENE_PT_nea_vram"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "scene"
+
+    def draw(self, context):
+        layout = self.layout
+        total_tex, total_pal = _calc_scene_total_vram(context)
+        total = total_tex + total_pal
+
+        box = layout.box()
+        box.label(text="Scene Texture VRAM Total:", icon='TEXTURE')
+        box.label(text=f"Texture data: {_format_vram_size(total_tex)}")
+        box.label(text=f"Palette data: {_format_vram_size(total_pal)}")
+        box.separator()
+        row = box.row()
+        row.alert = total > 256 * 1024  # NDS has 256 KB texture VRAM per bank
+        row.label(text=f"Total: {_format_vram_size(total)}")
+
+        # NDS VRAM reference
+        box2 = layout.box()
+        box2.label(text="NDS VRAM Banks:")
+        box2.label(text=f"  VRAM_A: 128 KB ({total * 100 / (128*1024):.0f}%%)" if total > 0 else "  VRAM_A: 128 KB")
+        box2.label(text=f"  VRAM_AB: 256 KB ({total * 100 / (256*1024):.0f}%%)" if total > 0 else "  VRAM_AB: 256 KB")
+        box2.label(text=f"  VRAM_ABCD: 512 KB ({total * 100 / (512*1024):.0f}%%)" if total > 0 else "  VRAM_ABCD: 512 KB")
+
+
+###
+### Mesh conversion tools (obj2dl, md5_to_dsma, ptexconv execution)
+###
+
+def _find_nea_tool(name):
+    """Find a NEA tool by name, checking addon prefs, env var, then installed."""
+    tool_file = name + '.py'
+
+    # 1. Addon preferences (user-configured repo path)
+    prefs = bpy.context.preferences.addons.get(__name__)
+    if prefs and prefs.preferences.tools_path:
+        path = os.path.join(
+            bpy.path.abspath(prefs.preferences.tools_path),
+            'tools', name, tool_file)
+        if os.path.isfile(path):
+            return path
+
+    # 2. NEA_ROOT environment variable
+    env_root = os.environ.get('NEA_ROOT', '')
+    if env_root:
+        path = os.path.join(env_root, 'tools', name, tool_file)
+        if os.path.isfile(path):
+            return path
+
+    # 3. Adjacent to addon file (works if addon is run from repo)
+    addon_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(addon_dir)
+    path = os.path.join(repo_root, 'tools', name, tool_file)
+    if os.path.isfile(path):
+        return path
+
+    # 4. Installed NEA in BlocksDS
+    path = os.path.join(
+        '/opt/wonderful/thirdparty/blocksds/external',
+        'nitro-engine-advanced', 'tools', name, tool_file)
+    if os.path.isfile(path):
+        return path
+
+    # 5. Original nitro-engine in BlocksDS
+    path = os.path.join(
+        '/opt/wonderful/thirdparty/blocksds/external',
+        'nitro-engine', 'tools', name, tool_file)
+    if os.path.isfile(path):
+        return path
+
+    return None
+
+
+def _run_tool(cmd, report_fn):
+    """Run a subprocess command and report results. Returns True on success."""
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as e:
+        report_fn({'ERROR'}, f"Command not found: {e}")
+        return False
+    except subprocess.TimeoutExpired:
+        report_fn({'ERROR'}, "Tool timed out (120s)")
+        return False
+
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        report_fn({'ERROR'}, f"Tool failed:\n{err}")
+        return False
+
+    if result.stdout.strip():
+        print(result.stdout.strip())
+    return True
+
+
+def _resolve_output_dir(ts):
+    """Resolve output directory from tool settings. Returns absolute path or None."""
+    raw = ts.output_dir
+    resolved = bpy.path.abspath(raw) if raw else ''
+    if not resolved or not os.path.isabs(resolved):
+        # '//' doesn't resolve when .blend file is not saved
+        blend = bpy.data.filepath
+        if blend:
+            resolved = os.path.dirname(blend)
+        else:
+            resolved = ''
+    if not resolved:
+        return None
+    return resolved
+
+
+class NEA_ToolSettings(bpy.types.PropertyGroup):
+    """Per-scene settings for NEA conversion tools."""
+    output_dir: StringProperty(
+        name="Output Directory",
+        description="Directory for output files (save .blend file first, or set absolute path)",
+        default="//",
+        subtype='DIR_PATH',
+    )
+    obj2dl_scale: FloatProperty(
+        name="Scale", default=1.0, min=0.001, max=1000.0)
+    obj2dl_vertex_color: BoolProperty(
+        name="Vertex Colors", default=False)
+    obj2dl_multi_material: BoolProperty(
+        name="Multi-Material (DLMM)", default=False)
+    obj2dl_collision: BoolProperty(
+        name="Generate .colmesh", default=False)
+    md5_mesh_path: StringProperty(
+        name="MD5mesh File",
+        description="Path to the .md5mesh file",
+        subtype='FILE_PATH',
+    )
+    md5_model_name: StringProperty(
+        name="Model Name", default="model")
+    md5_blender_fix: BoolProperty(
+        name="Blender Fix",
+        description="Rotate model -90 degrees on X",
+        default=True,
+    )
+    md5_export_base_pose: BoolProperty(
+        name="Export Base Pose", default=False)
+    md5_multi_material: BoolProperty(
+        name="Multi-Material (DLMM)", default=False)
+
+
+# =========================================================================
+# Animated Material System (Action/F-Curve based)
+# =========================================================================
+
+class NEA_AnimMatProps(bpy.types.PropertyGroup):
+    """Per-material NDS animated material properties.
+
+    Keyframe these using Blender's animation tools (right-click > Insert
+    Keyframe, or I key), then export. Only properties that have F-Curves
+    in the material's Action are exported as tracks.
+    """
+    enabled: BoolProperty(
+        name="Enable Animated Material",
+        description="Enable animated material export for this material",
+        default=False,
+    )
+    # -- Polygon format --
+    nea_alpha: IntProperty(
+        name="Alpha", min=0, max=31, default=31,
+        description="NDS polygon alpha (0=transparent, 31=opaque)",
+    )
+    nea_lights: IntProperty(
+        name="Lights Mask", min=0, max=15, default=1,
+        description="NDS light enable bitmask (1=L0, 2=L1, 4=L2, 8=L3)",
+    )
+    nea_culling: IntProperty(
+        name="Culling Mode", min=0, max=3, default=2,
+        description="0=none, 1=front, 2=back, 3=both sides",
+    )
+    nea_polyid: IntProperty(
+        name="Polygon ID", min=0, max=63, default=0,
+        description="NDS polygon ID (0-63)",
+    )
+    # -- Colors --
+    nea_color: FloatVectorProperty(
+        name="Vertex Color", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0, size=3,
+    )
+    nea_diffuse: FloatVectorProperty(
+        name="Diffuse", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0, size=3,
+    )
+    nea_ambient: FloatVectorProperty(
+        name="Ambient", subtype='COLOR',
+        default=(0.5, 0.5, 0.5), min=0.0, max=1.0, size=3,
+    )
+    nea_specular: FloatVectorProperty(
+        name="Specular", subtype='COLOR',
+        default=(1.0, 1.0, 1.0), min=0.0, max=1.0, size=3,
+    )
+    nea_emission: FloatVectorProperty(
+        name="Emission", subtype='COLOR',
+        default=(0.0, 0.0, 0.0), min=0.0, max=1.0, size=3,
+    )
+    # -- Material swap --
+    nea_mat_index: IntProperty(
+        name="Material Index", min=0, max=255, default=0,
+        description="Index into the material swap table",
+    )
+    # -- Texture matrix --
+    nea_tex_scroll_x: FloatProperty(
+        name="Tex Scroll X", default=0.0,
+        description="Texture matrix scroll X (f32 units)",
+    )
+    nea_tex_scroll_y: FloatProperty(
+        name="Tex Scroll Y", default=0.0,
+        description="Texture matrix scroll Y (f32 units)",
+    )
+    nea_tex_rotate: IntProperty(
+        name="Tex Rotate", min=0, max=511, default=0,
+        description="Texture rotation angle (0-511 = full turn)",
+    )
+    nea_tex_scale_x: FloatProperty(
+        name="Tex Scale X", default=1.0, min=0.0,
+        description="Texture matrix scale X (1.0 = identity)",
+    )
+    nea_tex_scale_y: FloatProperty(
+        name="Tex Scale Y", default=1.0, min=0.0,
+        description="Texture matrix scale Y (1.0 = identity)",
+    )
+
+
+class MATERIAL_PT_nea_animmat(bpy.types.Panel):
+    """NEA Animated Material panel (in Material Properties)."""
+    bl_label = "NEA Animated Material"
+    bl_idname = "MATERIAL_PT_nea_animmat"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "material"
+
+    @classmethod
+    def poll(cls, context):
+        return (context.object is not None
+                and context.object.type == 'MESH'
+                and context.material is not None)
+
+    def draw(self, context):
+        layout = self.layout
+        mat = context.material
+        props = mat.nea_animmat
+
+        layout.prop(props, "enabled")
+        if not props.enabled:
+            return
+
+        # Show action info
+        if mat.animation_data and mat.animation_data.action:
+            action = mat.animation_data.action
+            fs, fe = action.frame_range
+            layout.label(text=f"Action: {action.name}  ({int(fe - fs + 1)} frames)",
+                         icon='ACTION')
+        else:
+            layout.label(text="No Action assigned. Keyframe properties to create one.",
+                         icon='INFO')
+
+        # Polygon format
+        box = layout.box()
+        box.label(text="Polygon Format", icon='MESH_CUBE')
+        row = box.row(align=True)
+        row.prop(props, "nea_alpha")
+        row.prop(props, "nea_polyid")
+        row = box.row(align=True)
+        row.prop(props, "nea_lights")
+        row.prop(props, "nea_culling")
+
+        # Colors
+        box = layout.box()
+        box.label(text="Colors", icon='COLOR')
+        box.prop(props, "nea_color")
+        row = box.row(align=True)
+        row.prop(props, "nea_diffuse")
+        row.prop(props, "nea_ambient")
+        row = box.row(align=True)
+        row.prop(props, "nea_specular")
+        row.prop(props, "nea_emission")
+
+        # Material swap
+        box = layout.box()
+        box.label(text="Material Swap", icon='MATERIAL')
+        box.prop(props, "nea_mat_index")
+
+        # Texture matrix
+        box = layout.box()
+        box.label(text="Texture Matrix", icon='TEXTURE')
+        row = box.row(align=True)
+        row.prop(props, "nea_tex_scroll_x")
+        row.prop(props, "nea_tex_scroll_y")
+        box.prop(props, "nea_tex_rotate")
+        row = box.row(align=True)
+        row.prop(props, "nea_tex_scale_x")
+        row.prop(props, "nea_tex_scale_y")
+
+        layout.separator()
+        layout.label(text="Right-click a property > Insert Keyframe to animate.",
+                     icon='INFO')
+        layout.operator("nea.export_animmat", icon='EXPORT')
+
+
+def _float_to_rgb15(r, g, b):
+    """Convert float RGB (0-1) to NDS RGB15 packed value."""
+    ri = int(round(r * 31)) & 0x1F
+    gi = int(round(g * 31)) & 0x1F
+    bi = int(round(b * 31)) & 0x1F
+    return ri | (gi << 5) | (bi << 10)
+
+
+def _float_to_f32(val):
+    """Convert a float to NDS f32 (20.12 fixed-point) as uint32."""
+    return int(round(val * 4096)) & 0xFFFFFFFF
+
+
+class NEA_OT_ExportAnimMat(bpy.types.Operator):
+    """Export animated material by reading F-Curves from material Action"""
+    bl_idname = "nea.export_animmat"
+    bl_label = "Export Animated Material"
+
+    def execute(self, context):
+        import struct
+        from bpy_extras.anim_utils import action_ensure_channelbag_for_slot
+
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'WARNING'}, "No active mesh object")
+            return {'CANCELLED'}
+
+        mat = obj.active_material
+        if mat is None or not hasattr(mat, 'nea_animmat'):
+            self.report({'WARNING'}, "No active material")
+            return {'CANCELLED'}
+
+        props = mat.nea_animmat
+        if not props.enabled:
+            self.report({'WARNING'}, "Animated material not enabled")
+            return {'CANCELLED'}
+
+        if not mat.animation_data or not mat.animation_data.action:
+            self.report({'WARNING'},
+                        "No Action on material. Keyframe properties first.")
+            return {'CANCELLED'}
+
+        action = mat.animation_data.action
+        slot = mat.animation_data.action_slot
+        channelbag = action_ensure_channelbag_for_slot(action, slot)
+
+        # ---- Collect F-Curves by data_path ----
+        fc_map = {}  # data_path -> {array_index: fcurve}
+        for fc in channelbag.fcurves:
+            dp = fc.data_path
+            if dp.startswith("nea_animmat."):
+                if dp not in fc_map:
+                    fc_map[dp] = {}
+                fc_map[dp][fc.array_index] = fc
+
+        if not fc_map:
+            self.report({'WARNING'}, "No animated NEA properties found")
+            return {'CANCELLED'}
+
+        # ---- Property mapping ----
+        # Simple scalar tracks: one F-Curve -> one track
+        SIMPLE_MAP = {
+            'nea_animmat.nea_alpha':        (0, 'int', 0x1F),
+            'nea_animmat.nea_lights':       (1, 'int', 0x0F),
+            'nea_animmat.nea_culling':      (2, 'int', 0xC0),
+            'nea_animmat.nea_mat_index':    (6, 'int', 0xFF),
+            'nea_animmat.nea_polyid':       (7, 'int', 0x3F),
+            'nea_animmat.nea_tex_scroll_x': (8, 'f32', None),
+            'nea_animmat.nea_tex_scroll_y': (9, 'f32', None),
+            'nea_animmat.nea_tex_rotate':   (10, 'int', 0x1FF),
+            'nea_animmat.nea_tex_scale_x':  (11, 'f32', None),
+            'nea_animmat.nea_tex_scale_y':  (12, 'f32', None),
+        }
+        # Force STEP for inherently discrete types
+        FORCE_STEP = {1, 2, 6, 7}
+
+        # ---- Build track list ----
+        frame_start, frame_end = action.frame_range
+        num_frames = int(frame_end - frame_start) + 1
+        tracks = []  # list of (track_type_id, interp_mode, [(frame, value)])
+
+        # Process simple scalar tracks
+        for dp, (track_id, enc, mask) in SIMPLE_MAP.items():
+            if dp not in fc_map:
+                continue
+            fc = fc_map[dp].get(0)
+            if fc is None:
+                continue
+
+            # Determine interpolation from first keyframe
+            interp = 0  # STEP
+            if track_id not in FORCE_STEP and len(fc.keyframe_points) > 0:
+                kf_type = fc.keyframe_points[0].interpolation
+                if kf_type in ('LINEAR', 'BEZIER'):
+                    interp = 1  # LINEAR
+
+            keyframes = []
+            for kp in fc.keyframe_points:
+                frame = int(round(kp.co[0])) - int(frame_start)
+                if frame < 0:
+                    frame = 0
+                raw = kp.co[1]
+                if enc == 'f32':
+                    value = _float_to_f32(raw)
+                else:
+                    value = int(round(raw)) & mask
+                keyframes.append((frame, value))
+
+            keyframes.sort(key=lambda x: x[0])
+            if keyframes:
+                tracks.append((track_id, interp, keyframes))
+
+        # Process color tracks (3 F-Curves -> single RGB15 track)
+        COLOR_MAP = {
+            'nea_animmat.nea_color': 3,  # COLOR
+        }
+        for dp, track_id in COLOR_MAP.items():
+            if dp not in fc_map:
+                continue
+            fcs = fc_map[dp]
+            if not fcs:
+                continue
+
+            # Collect all unique frames
+            frames_set = set()
+            for idx, fc in fcs.items():
+                for kp in fc.keyframe_points:
+                    frames_set.add(int(round(kp.co[0])))
+            frames_sorted = sorted(frames_set)
+
+            interp = 1  # LINEAR default for colors
+            keyframes = []
+            for frame in frames_sorted:
+                r = fcs[0].evaluate(frame) if 0 in fcs else 1.0
+                g = fcs[1].evaluate(frame) if 1 in fcs else 1.0
+                b = fcs[2].evaluate(frame) if 2 in fcs else 1.0
+                value = _float_to_rgb15(r, g, b)
+                keyframes.append((int(frame - frame_start), value))
+
+            if keyframes:
+                tracks.append((track_id, interp, keyframes))
+
+        # Process compound tracks (diffuse+ambient -> packed, spec+emi -> packed)
+        COMPOUND = [
+            ('nea_animmat.nea_diffuse', 'nea_animmat.nea_ambient', 4),
+            ('nea_animmat.nea_specular', 'nea_animmat.nea_emission', 5),
+        ]
+        for dp_a, dp_b, track_id in COMPOUND:
+            fcs_a = fc_map.get(dp_a, {})
+            fcs_b = fc_map.get(dp_b, {})
+            if not fcs_a and not fcs_b:
+                continue
+
+            frames_set = set()
+            for fcs in (fcs_a, fcs_b):
+                for idx, fc in fcs.items():
+                    for kp in fc.keyframe_points:
+                        frames_set.add(int(round(kp.co[0])))
+            frames_sorted = sorted(frames_set)
+
+            interp = 1  # LINEAR
+            keyframes = []
+            for frame in frames_sorted:
+                # Color A (diffuse or specular) in lower 16 bits
+                ra = fcs_a[0].evaluate(frame) if 0 in fcs_a else 1.0
+                ga = fcs_a[1].evaluate(frame) if 1 in fcs_a else 1.0
+                ba = fcs_a[2].evaluate(frame) if 2 in fcs_a else 1.0
+                lo = _float_to_rgb15(ra, ga, ba)
+                # Color B (ambient or emission) in upper 16 bits
+                rb = fcs_b[0].evaluate(frame) if 0 in fcs_b else 0.5
+                gb = fcs_b[1].evaluate(frame) if 1 in fcs_b else 0.5
+                bb = fcs_b[2].evaluate(frame) if 2 in fcs_b else 0.5
+                hi = _float_to_rgb15(rb, gb, bb)
+                value = lo | (hi << 16)
+                keyframes.append((int(frame - frame_start), value))
+
+            if keyframes:
+                tracks.append((track_id, interp, keyframes))
+
+        if not tracks:
+            self.report({'WARNING'}, "No animated tracks found in Action")
+            return {'CANCELLED'}
+
+        if len(tracks) > 16:
+            self.report({'WARNING'}, "Too many tracks (max 16)")
+            return {'CANCELLED'}
+
+        # ---- Write binary .neaanimmat ----
+        ts = context.scene.nea_tool_settings
+        out_dir = _resolve_output_dir(ts)
+        if out_dir is None:
+            self.report({'WARNING'},
+                        "No output directory. Save the .blend file first.")
+            return {'CANCELLED'}
+
+        filename = f"{mat.name}_animmat.neaanimmat"
+        filepath = os.path.join(out_dir, filename)
+
+        try:
+            MAGIC = 0x464B4D41  # "AMKF"
+            VERSION = 1
+            header_size = 16
+            track_header_size = 12
+            num_tracks = len(tracks)
+            kf_data_start = header_size + track_header_size * num_tracks
+
+            with open(filepath, 'wb') as f:
+                # File header (16 bytes)
+                f.write(struct.pack('<IIHH4x',
+                                    MAGIC, VERSION, num_tracks,
+                                    num_frames))
+
+                # Track headers
+                offset = kf_data_start
+                for track_id, interp, keyframes in tracks:
+                    num_kf = len(keyframes)
+                    f.write(struct.pack('<BBHI4x',
+                                        track_id, interp,
+                                        num_kf, offset))
+                    offset += num_kf * 8
+
+                # Keyframe data
+                for track_id, interp, keyframes in tracks:
+                    for frame, value in keyframes:
+                        f.write(struct.pack('<HHI', frame, 0, value))
+
+            total = os.path.getsize(filepath)
+            self.report({'INFO'},
+                        f"Exported {filepath} ({total} bytes)")
+            print(f"[NEA] Exported animated material: {filepath} "
+                  f"({num_tracks} tracks, {num_frames} frames, {total} bytes)")
+
+        except Exception as e:
+            self.report({'WARNING'}, f"Export failed: {e}")
+            print(f"[NEA] AnimMat export error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+# =========================================================================
+# AnimMat visual preview (frame change handler)
+# =========================================================================
+
+_animmat_handler = None
+
+
+def _nea_animmat_frame_handler(scene, depsgraph):
+    """Frame change handler for visual preview of AnimMat properties.
+
+    Applies animated material effects to the Blender viewport:
+      - Material swap: sets the object's active material slot index.
+      - Texture scroll: updates a Mapping node's Location in the shader tree.
+      - Alpha: updates the Principled BSDF Alpha input.
+    """
+    for obj in scene.objects:
+        if obj.type != 'MESH':
+            continue
+
+        for slot_idx, slot in enumerate(obj.material_slots):
+            mat = slot.material
+            if mat is None or not hasattr(mat, 'nea_animmat'):
+                continue
+
+            props = mat.nea_animmat
+            if not props.enabled:
+                continue
+
+            # --- Material swap preview ---
+            # Check if nea_mat_index is animated on this material
+            if mat.animation_data and mat.animation_data.action:
+                has_swap = False
+                for fc in mat.animation_data.action.fcurves:
+                    if fc.data_path == 'nea_animmat.nea_mat_index':
+                        has_swap = True
+                        break
+                if has_swap:
+                    idx = int(props.nea_mat_index)
+                    if 0 <= idx < len(obj.material_slots):
+                        obj.active_material_index = idx
+
+            if mat.node_tree is None:
+                continue
+
+            # --- Texture scroll preview ---
+            # Update the first Mapping node if tex scroll is animated
+            if mat.animation_data and mat.animation_data.action:
+                has_scroll = False
+                for fc in mat.animation_data.action.fcurves:
+                    if fc.data_path in ('nea_animmat.nea_tex_scroll_x',
+                                        'nea_animmat.nea_tex_scroll_y'):
+                        has_scroll = True
+                        break
+                if has_scroll:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'MAPPING':
+                            node.inputs['Location'].default_value[0] = (
+                                props.nea_tex_scroll_x / 256.0)
+                            node.inputs['Location'].default_value[1] = (
+                                props.nea_tex_scroll_y / 256.0)
+                            break
+
+            # --- Alpha preview ---
+            for node in mat.node_tree.nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    # Check if alpha is animated
+                    has_alpha = False
+                    if mat.animation_data and mat.animation_data.action:
+                        for fc in mat.animation_data.action.fcurves:
+                            if fc.data_path == 'nea_animmat.nea_alpha':
+                                has_alpha = True
+                                break
+                    if has_alpha:
+                        node.inputs['Alpha'].default_value = (
+                            props.nea_alpha / 31.0)
+                    break
+
+
+class NEA_OT_RunObj2dl(bpy.types.Operator):
+    """Export active mesh as OBJ and convert to NDS display list with obj2dl"""
+    bl_idname = "nea.run_obj2dl"
+    bl_label = "Convert Mesh (obj2dl)"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            return self._run(context)
+        except Exception as e:
+            msg = f"obj2dl error: {e}"
+            print(f"NEA ERROR: {msg}")
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+    def _run(self, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'WARNING'}, "Select a mesh object first")
+            return {'CANCELLED'}
+
+        ts = context.scene.nea_tool_settings
+        out_dir = _resolve_output_dir(ts)
+        if not out_dir:
+            self.report({'WARNING'},
+                        "Set Output Directory or save .blend file first")
+            return {'CANCELLED'}
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"NEA: Output directory: {out_dir}")
+
+        name = re.sub(r'[^A-Za-z0-9_]', '_', obj.name)
+        obj_path = os.path.join(out_dir, name + ".obj")
+        bin_path = os.path.join(out_dir, name + ".bin")
+
+        # Find obj2dl first (fail early)
+        obj2dl_path = _find_nea_tool('obj2dl')
+        if not obj2dl_path:
+            self.report({'WARNING'},
+                        "obj2dl.py not found. Set repo path in "
+                        "Edit > Preferences > Add-ons > NEA")
+            return {'CANCELLED'}
+        print(f"NEA: Using obj2dl at {obj2dl_path}")
+
+        # Select only this object and export OBJ
+        prev_selection = context.selected_objects[:]
+        prev_active = context.view_layer.objects.active
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        try:
+            bpy.ops.wm.obj_export(
+                filepath=obj_path,
+                export_selected_objects=True,
+                export_uv=True,
+                export_normals=True,
+                export_materials=False,
+                forward_axis='NEGATIVE_Z',
+                up_axis='Y',
+            )
+        finally:
+            bpy.ops.object.select_all(action='DESELECT')
+            for o in prev_selection:
+                o.select_set(True)
+            context.view_layer.objects.active = prev_active
+
+        if not os.path.isfile(obj_path):
+            self.report({'WARNING'}, "OBJ export produced no file")
+            return {'CANCELLED'}
+        print(f"NEA: Exported OBJ to {obj_path}")
+
+        # Get texture size from first material
+        tex_w, tex_h = 0, 0
+        if obj.data.materials:
+            mat = obj.data.materials[0]
+            if mat and mat.node_tree:
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        tex_w, tex_h = node.image.size[0], node.image.size[1]
+                        break
+
+        cmd = ['/usr/bin/python3', obj2dl_path,
+               '--input', obj_path,
+               '--output', bin_path]
+        if tex_w > 0 and tex_h > 0:
+            cmd.extend(['--texture', str(tex_w), str(tex_h)])
+        if ts.obj2dl_scale != 1.0:
+            cmd.extend(['--scale', str(ts.obj2dl_scale)])
+        if ts.obj2dl_vertex_color:
+            cmd.append('--use-vertex-color')
+        if ts.obj2dl_multi_material:
+            cmd.append('--multi-material')
+        if ts.obj2dl_collision:
+            cmd.append('--collision')
+
+        print(f"NEA: Running: {' '.join(cmd)}")
+        if not _run_tool(cmd, self.report):
+            return {'CANCELLED'}
+
+        # Clean up temp OBJ/MTL
+        for ext in ('.obj', '.mtl'):
+            p = os.path.join(out_dir, name + ext)
+            if os.path.isfile(p):
+                os.remove(p)
+
+        self.report({'INFO'}, f"OK: {bin_path}")
+        print(f"NEA: Done -> {bin_path}")
+        return {'FINISHED'}
+
+
+class NEA_OT_RunMd5ToDsma(bpy.types.Operator):
+    """Convert MD5 mesh/anim files to DSM/DSA with md5_to_dsma"""
+    bl_idname = "nea.run_md5_to_dsma"
+    bl_label = "Convert MD5 (md5_to_dsma)"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            return self._run(context)
+        except Exception as e:
+            msg = f"md5_to_dsma error: {e}"
+            print(f"NEA ERROR: {msg}")
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+    def _run(self, context):
+        ts = context.scene.nea_tool_settings
+        out_dir = _resolve_output_dir(ts)
+        if not out_dir:
+            self.report({'WARNING'},
+                        "Set Output Directory or save .blend file first")
+            return {'CANCELLED'}
+        os.makedirs(out_dir, exist_ok=True)
+
+        md5_to_dsma_path = _find_nea_tool('md5_to_dsma')
+        if not md5_to_dsma_path:
+            self.report({'WARNING'},
+                        "md5_to_dsma.py not found. Set repo path in "
+                        "Edit > Preferences > Add-ons > NEA")
+            return {'CANCELLED'}
+        print(f"NEA: Using md5_to_dsma at {md5_to_dsma_path}")
+
+        mesh_path = bpy.path.abspath(ts.md5_mesh_path)
+        if not mesh_path or not os.path.isfile(mesh_path):
+            self.report({'WARNING'},
+                        f"MD5mesh file not found: {mesh_path or '(empty)'}")
+            return {'CANCELLED'}
+
+        # Get texture size from active object's mesh children
+        tex_w, tex_h = 0, 0
+        ao = context.active_object
+        if ao:
+            meshes = [ao] if ao.type == 'MESH' else []
+            meshes += [c for c in ao.children if c.type == 'MESH']
+            for child in meshes:
+                if child.data.materials:
+                    mat = child.data.materials[0]
+                    if mat and mat.node_tree:
+                        for node in mat.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                tex_w = node.image.size[0]
+                                tex_h = node.image.size[1]
+                                break
+                if tex_w > 0:
+                    break
+
+        cmd = ['/usr/bin/python3', md5_to_dsma_path,
+               '--name', ts.md5_model_name,
+               '--output', out_dir,
+               '--model', mesh_path,
+               '--bin']
+        if tex_w > 0 and tex_h > 0:
+            cmd.extend(['--texture', str(tex_w), str(tex_h)])
+        if ts.md5_blender_fix:
+            cmd.append('--blender-fix')
+        if ts.md5_export_base_pose:
+            cmd.append('--export-base-pose')
+        if ts.md5_multi_material:
+            cmd.append('--multi-material')
+
+        print(f"NEA: Running: {' '.join(cmd)}")
+        if not _run_tool(cmd, self.report):
+            return {'CANCELLED'}
+
+        result_path = f"{out_dir}/{ts.md5_model_name}"
+        self.report({'INFO'}, f"OK: {result_path}")
+        print(f"NEA: Done -> {result_path}")
+        return {'FINISHED'}
+
+
+class NEA_OT_RunPtexconv(bpy.types.Operator):
+    """Convert active object's material texture to NDS format with ptexconv"""
+    bl_idname = "nea.run_ptexconv"
+    bl_label = "Convert Texture (ptexconv)"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            return self._run(context)
+        except Exception as e:
+            msg = f"ptexconv error: {e}"
+            print(f"NEA ERROR: {msg}")
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+    def _run(self, context):
+        import tempfile
+
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH' or not obj.data.materials:
+            self.report({'WARNING'},
+                        "Select a mesh with a material first")
+            return {'CANCELLED'}
+
+        ptexconv_path = '/opt/wonderful/thirdparty/blocksds/external/' \
+                        'ptexconv/ptexconv'
+        if not os.path.isfile(ptexconv_path):
+            self.report({'WARNING'},
+                        f"ptexconv not found at {ptexconv_path}")
+            return {'CANCELLED'}
+
+        mat = obj.active_material
+        if not mat:
+            self.report({'WARNING'}, "No active material on object")
+            return {'CANCELLED'}
+
+        ptex = mat.nea_ptexconv
+
+        # Find texture image from material's node tree
+        tex_path = None
+        if mat.node_tree:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    img = node.image
+                    if img.packed_file:
+                        tmp = os.path.join(tempfile.gettempdir(),
+                                           img.name + '.png')
+                        img.save(filepath=tmp)
+                        tex_path = tmp
+                    else:
+                        tex_path = bpy.path.abspath(img.filepath)
+                    break
+
+        if not tex_path or not os.path.isfile(tex_path):
+            self.report({'WARNING'},
+                        "No texture image found on material. "
+                        "Assign a texture via Image Texture node.")
+            return {'CANCELLED'}
+
+        ts = context.scene.nea_tool_settings
+        out_dir = _resolve_output_dir(ts)
+        if not out_dir:
+            self.report({'WARNING'},
+                        "Set Output Directory or save .blend file first")
+            return {'CANCELLED'}
+        mat_name = re.sub(r'[^A-Za-z0-9_]', '_', mat.name)
+        mat_dir = os.path.join(out_dir, mat_name)
+        os.makedirs(mat_dir, exist_ok=True)
+
+        cmd = [ptexconv_path,
+               '-gt', '-ob',
+               '-o', mat_dir,
+               tex_path,
+               '-f', ptex.tex_format]
+
+        print(f"NEA: Running: {' '.join(cmd)}")
+        if not _run_tool(cmd, self.report):
+            return {'CANCELLED'}
+
+        self.report({'INFO'},
+                    f"OK: {mat_dir} ({ptex.tex_format})")
+        print(f"NEA: Done -> {mat_dir}")
+        return {'FINISHED'}
+
+
+class VIEW3D_PT_nea_tools(bpy.types.Panel):
+    """NEA conversion tools panel in 3D viewport N-panel"""
+    bl_label = "NEA Tools"
+    bl_idname = "VIEW3D_PT_nea_tools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "NEA"
+
+    def draw(self, context):
+        layout = self.layout
+        ts = context.scene.nea_tool_settings
+
+        # Show hint if no tools can be found
+        if not _find_nea_tool('obj2dl'):
+            layout.label(text="Tools not found!", icon='ERROR')
+            layout.label(text="Set repo path in:")
+            layout.label(text="  Preferences > Add-ons > NEA")
+            layout.separator()
+
+        # Shared output directory
+        layout.prop(ts, "output_dir")
+        resolved = _resolve_output_dir(ts)
+        if resolved:
+            layout.label(text=f"-> {resolved}", icon='CHECKMARK')
+        else:
+            layout.label(
+                text="Save .blend or set absolute path!",
+                icon='ERROR')
+        layout.separator()
+
+        # --- obj2dl ---
+        box = layout.box()
+        box.label(text="Static Mesh (obj2dl):", icon='MESH_DATA')
+        box.prop(ts, "obj2dl_scale")
+        box.prop(ts, "obj2dl_vertex_color")
+        box.prop(ts, "obj2dl_multi_material")
+        box.prop(ts, "obj2dl_collision")
+        row = box.row()
+        row.scale_y = 1.4
+        row.operator("nea.run_obj2dl", icon='EXPORT')
+
+        # --- md5_to_dsma ---
+        box2 = layout.box()
+        box2.label(text="Animated Mesh (md5_to_dsma):", icon='ARMATURE_DATA')
+        box2.prop(ts, "md5_mesh_path")
+        box2.prop(ts, "md5_model_name")
+        box2.prop(ts, "md5_blender_fix")
+        box2.prop(ts, "md5_export_base_pose")
+        box2.prop(ts, "md5_multi_material")
+        row2 = box2.row()
+        row2.scale_y = 1.4
+        row2.operator("nea.run_md5_to_dsma", icon='EXPORT')
+
+        # --- ptexconv ---
+        box3 = layout.box()
+        box3.label(text="Texture (ptexconv):", icon='TEXTURE')
+        obj = context.active_object
+        if obj and obj.type == 'MESH' and obj.active_material:
+            mat = obj.active_material
+            ptex = mat.nea_ptexconv
+            box3.prop(ptex, "tex_format")
+            box3.label(text=f"Material: {mat.name}")
+        else:
+            box3.label(text="Select mesh with material", icon='INFO')
+        row3 = box3.row()
+        row3.scale_y = 1.4
+        row3.operator("nea.run_ptexconv", icon='EXPORT')
 
 
 ###
@@ -2089,20 +4086,55 @@ def menu_func_export_anim(self, context):
 def menu_func_export_batch(self, context):
     self.layout.operator(
         MaybeExportMD5Batch.bl_idname, text="MD5 Mesh and Animation(s)")
+def menu_func_export_scene(self, context):
+    self.layout.operator(
+        NEA_OT_ExportScene.bl_idname, text="NEA Scene (.neascene)")
 
 classes = (
+    # Addon preferences (must be first)
+    NEA_AddonPreferences,
+    # PropertyGroups (must be registered before panels that use them)
     NEA_BoneCollisionProps,
+    NEA_SceneNodeProps,
+    NEA_SceneSettings,
+    NEA_ToolSettings,
+    NEA_PolyformatProps,
+    NEA_PtexconvProps,
+    NEA_TextureFlagsProps,
+    NEA_MaterialProps,
+    NEA_LightProps,
+    # Animated material
+    NEA_AnimMatProps,
+    # Import operators
     ImportMD5Mesh,
     MaybeImportMD5Anim,
     ImportMD5Anim,
+    # Bone collection management
     MD5BonesAdd,
     MD5BonesRemove,
     MD5BonesReplace,
     MD5BonesClear,
+    # Panels
     MD5Panel,
     BONE_PT_nea_collision,
+    OBJECT_PT_nea_polyformat,
+    OBJECT_PT_nea_scene_node,
+    MATERIAL_PT_nea_ptexconv,
+    SCENE_PT_nea_lights,
+    SCENE_PT_nea_vram,
+    VIEW3D_PT_nea_scene_export,
+    VIEW3D_PT_nea_tools,
+    MATERIAL_PT_nea_animmat,
+    # Operators
     NEA_OT_ToggleCollisionOverlay,
     NEA_OT_AutoFitCollision,
+    NEA_OT_ExportScene,
+    NEA_OT_ToggleTriggerOverlay,
+    NEA_OT_RunObj2dl,
+    NEA_OT_RunMd5ToDsma,
+    NEA_OT_RunPtexconv,
+    NEA_OT_ExportAnimMat,
+    # Export operators
     MaybeExportMD5Mesh,
     MaybeExportMD5Anim,
     MaybeExportMD5Batch,
@@ -2123,29 +4155,80 @@ def register():
         name="Show Collision Overlays",
         default=False)
 
+    bpy.types.Object.nea_scene_node = bpy.props.PointerProperty(
+        type=NEA_SceneNodeProps)
+    bpy.types.Object.nea_polyformat = bpy.props.PointerProperty(
+        type=NEA_PolyformatProps)
+    bpy.types.Scene.nea_scene_settings = bpy.props.PointerProperty(
+        type=NEA_SceneSettings)
+    bpy.types.Scene.nea_show_triggers = BoolProperty(
+        name="Show Trigger Overlays",
+        default=False)
+    bpy.types.Scene.nea_tool_settings = bpy.props.PointerProperty(
+        type=NEA_ToolSettings)
+    bpy.types.Scene.nea_light_props = bpy.props.PointerProperty(
+        type=NEA_LightProps)
+    bpy.types.Material.nea_ptexconv = bpy.props.PointerProperty(
+        type=NEA_PtexconvProps)
+    bpy.types.Material.nea_tex_flags = bpy.props.PointerProperty(
+        type=NEA_TextureFlagsProps)
+    bpy.types.Material.nea_mat_props = bpy.props.PointerProperty(
+        type=NEA_MaterialProps)
+    bpy.types.Material.nea_animmat = bpy.props.PointerProperty(
+        type=NEA_AnimMatProps)
+
+    # Register AnimMat visual preview handler
+    global _animmat_handler
+    if _animmat_handler is None:
+        bpy.app.handlers.frame_change_post.append(_nea_animmat_frame_handler)
+        _animmat_handler = _nea_animmat_frame_handler
+
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_mesh)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_mesh)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_anim)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_batch)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_scene)
 
 def unregister():
-    global _collision_draw_handler
+    global _collision_draw_handler, _trigger_draw_handler
     if _collision_draw_handler is not None:
         bpy.types.SpaceView3D.draw_handler_remove(
             _collision_draw_handler, 'WINDOW')
         _collision_draw_handler = None
+    if _trigger_draw_handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(
+            _trigger_draw_handler, 'WINDOW')
+        _trigger_draw_handler = None
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
     del bpy.types.Bone.nea_collision
     del bpy.types.Scene.nea_show_collision
+    del bpy.types.Object.nea_scene_node
+    del bpy.types.Object.nea_polyformat
+    del bpy.types.Scene.nea_scene_settings
+    del bpy.types.Scene.nea_show_triggers
+    del bpy.types.Scene.nea_tool_settings
+    del bpy.types.Scene.nea_light_props
+    del bpy.types.Material.nea_ptexconv
+    del bpy.types.Material.nea_tex_flags
+    del bpy.types.Material.nea_mat_props
+    del bpy.types.Material.nea_animmat
+
+    # Remove AnimMat visual preview handler
+    global _animmat_handler
+    if _animmat_handler is not None:
+        if _animmat_handler in bpy.app.handlers.frame_change_post:
+            bpy.app.handlers.frame_change_post.remove(_animmat_handler)
+        _animmat_handler = None
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_mesh)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_mesh)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_anim)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_batch)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_scene)
     del bpy.types.Scene.md5_bone_collection
 
 if __name__ == "__main__":

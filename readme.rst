@@ -20,6 +20,16 @@ Features:
 - Support for **animated models** with skeletal animation (MD5 format),
   converted with ``md5_to_dsma``. Supports animation blending for smooth
   transitions. Multi-material animated models are also supported.
+- **Animated material system**: keyframe-driven material animation with 13
+  track types (alpha, lights, culling, vertex color, diffuse/ambient,
+  specular/emission, material swap, polygon ID, texture scroll X/Y, texture
+  rotate, texture scale X/Y). Exported from Blender via F-Curves, loaded at
+  runtime as ``.neaanimmat`` binaries. Supports STEP and LINEAR interpolation.
+- **Scene system**: binary ``.neascene`` format with node hierarchy (mesh,
+  camera, trigger, empty), asset/material reference tables, parent-children
+  transforms, tag queries, and trigger zones with enter/exit/tick callbacks.
+  ``NEA_SceneLoadFAT()`` automatically loads meshes and GRF textures from
+  NitroFS, creating and binding materials to mesh nodes.
 - **Two-pass rendering** to double the polygon budget by splitting the screen
   into two halves, each rendered in a separate hardware frame (effective 30 FPS).
   Three modes available: FIFO, framebuffer, and HBL DMA.
@@ -129,14 +139,26 @@ Nitro Engine Advanced includes the following conversion tools under ``tools/``:
   data (``.boncol``) from a collision mesh exported by the Blender addon.
 - **img2ds**: Converts images to NDS textures and palettes (deprecated, except
   for DEPTHBMP conversion).
+- **neascene_export**: Converts JSON scene descriptions to binary ``.neascene``
+  files for the scene system.
 
-Blender Addon (MD5 Export)
-==========================
+Blender Addon
+=============
 
-The ``blender_addon/`` directory contains **io_scene_md5.py**, an MD5
-import/export addon for **Blender 5.0** and above.
+The ``blender_addon/`` directory contains **io_scene_md5.py**, a comprehensive
+addon for **Blender 5.0** and above. It provides:
 
-This addon is essential for the animated model pipeline:
+- MD5 mesh/animation import and export
+- **Animated material editor** (Material Properties panel): keyframe NDS material
+  properties (alpha, colors, material swap, texture scroll/rotate/scale) using
+  Blender's F-Curve system. Animated properties are previewed in the viewport
+  during playback. Export to ``.neaanimmat`` binary with one click.
+- **Scene node editor** (Object Properties panel): configure nodes for the scene
+  system with tags, trigger zones, and hierarchy.
+- **Per-bone collision editor** for animated models.
+- Integrated conversion tool execution (obj2dl, md5_to_dsma, ptexconv).
+
+Animated model pipeline:
 
 1. **Model and rig** your character in Blender with an armature.
 2. **Assign materials** — each material slot with a unique shader image becomes

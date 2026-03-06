@@ -422,7 +422,9 @@ typedef enum {
     /// NEA_HBLFunc() as a HBL interrupt handler for this flag to work.
     NEA_CAN_SKIP_VBL = BIT(3),
     /// Updates spatial sound sources (volume/panning from camera distance).
-    NEA_UPDATE_SOUND = BIT(4)
+    NEA_UPDATE_SOUND = BIT(4),
+    /// Updates animated material instances.
+    NEA_UPDATE_ANIM_MAT = BIT(5)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

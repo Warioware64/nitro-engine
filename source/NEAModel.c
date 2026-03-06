@@ -363,8 +363,11 @@ void NEA_ModelDraw(const NEA_Model *model)
     }
     else
     {
-        // Single-material path
-        NEA_MaterialUse(model->texture);
+        // Single-material path — if the model has a material, apply it.
+        // If NULL, skip so external material setup (e.g. NEA_AnimMatApply)
+        // is preserved.
+        if (model->texture != NULL)
+            NEA_MaterialUse(model->texture);
 
         ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
         const void *meshdata = mesh->address;

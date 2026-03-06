@@ -1,6 +1,52 @@
 Changelog
 =========
 
+Version 2.0.0 (2026-03-06)
+---------------------------
+
+- **Animated Material System**: keyframe-driven material animation with 13
+  track types (alpha, lights, culling, colors, material swap, polygon ID,
+  texture scroll/rotate/scale). Exported from Blender via F-Curves, loaded
+  at runtime as ``.neaanimmat`` binaries. Integrates with the scene system
+  (per-node ``animmat`` pointer applied automatically during scene draw).
+
+- **Scene System**: binary ``.neascene`` format with node hierarchy
+  (mesh, camera, trigger, empty), asset tables, material references, and
+  parent-children transforms. Supports tag queries, trigger zones with
+  enter/exit/tick callbacks, and recursive scene update/draw.
+
+- **Automatic NitroFS scene loading**: ``NEA_SceneLoadFAT()`` now auto-loads
+  meshes from the asset table and GRF textures from the material reference
+  table. Materials are created, loaded, and bound to mesh nodes automatically.
+
+- **Scene export tool** (``tools/neascene_export/``): converts JSON scene
+  descriptions to the binary ``.neascene`` format.
+
+- **Collision system**: multiple collision shapes (AABB, sphere, capsule),
+  collision testing between arbitrary shape pairs, and scene-integrated
+  trigger zones.
+
+- **Sound module**: spatial 3D sound with distance attenuation and stereo
+  panning (powered by Maxmod, enabled with ``NEA_MAXMOD=1``).
+
+- **Multiple texture support**: static and animated meshes support per-submesh
+  materials via DLMM format. ``NEA_MaterialClone()`` shares VRAM for
+  identical textures with different properties.
+
+- **Texture matrix manipulation**: translate, rotate, and scale textures at
+  runtime via ``NEA_TextureMatrix*`` functions. Identity reset prevents
+  state leaking between draw calls.
+
+- **Depth buffer mode selection**: switch between Z-buffering and W-buffering.
+
+- **Blender addon (v2.0.0)**: Animated material properties moved to Material
+  Properties panel. Visual preview via frame change handler (material swap,
+  texture scroll, alpha). Scene node properties, per-bone collision editing,
+  trigger zone overlays, and integrated conversion tool execution.
+
+
+- All public API prefixes changed from ``NE_`` to ``NEA_``.
+
 Version 0.15.5 (2026-01-23)
 ---------------------------
 

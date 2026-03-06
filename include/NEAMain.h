@@ -48,14 +48,16 @@ extern "C" {
 #include "NEAText.h"
 #include "NEATexture.h"
 #include "NEABoneCollision.h"
+#include "NEAScene.h"
 #include "NEASound.h"
+#include "NEAAnimMat.h"
 
 /// Major version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_MAJOR (0)
+#define NITRO_ENGINE_ADVANCED_MAJOR (2)
 /// Minor version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_MINOR (15)
+#define NITRO_ENGINE_ADVANCED_MINOR (0)
 /// Patch version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_PATCH (5)
+#define NITRO_ENGINE_ADVANCED_PATCH (0)
 
 /// Full version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_VERSION ((NITRO_ENGINE_ADVANCED_MAJOR << 16) |  \
@@ -63,7 +65,7 @@ extern "C" {
                               (NITRO_ENGINE_ADVANCED_PATCH))
 
 /// String with the version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_VERSION_STRING "0.15.4"
+#define NITRO_ENGINE_ADVANCED_VERSION_STRING "2.0.0"
 
 /// @}
 

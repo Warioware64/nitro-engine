@@ -1171,9 +1171,12 @@ def save_bone_collision(joints, collision_bones, output_path, blender_fix):
             col_type = cb['type']
             offset = cb['offset']
 
-            # Apply blender fix to offsets (rotate -90 on X: x, z, -y)
-            if blender_fix:
-                offset = (offset[0], offset[2], -offset[1])
+            # NOTE: Do NOT apply blender_fix to bone-local offsets.
+            # The bone's quaternion in the DSA file already includes the
+            # blender_fix rotation (q_rot * orient). At runtime,
+            # ne_quat_rotate_vec(bone_orient, offset) transforms the offset
+            # from bone-local to model space. Applying blender_fix here
+            # would double-convert the offset and produce wrong positions.
 
             # Determine type code and params
             if col_type == 'sphere':
@@ -1271,7 +1274,7 @@ if __name__ == "__main__":
                         help="export base pose of a md5mesh as a DSA file")
     parser.add_argument("--skip-frames", required=False,
                         default=0, type=int,
-                        help="number of frames to skip in an animation (0 = export all, 1 = export half, 2 = export 33%, etc)")
+                        help="number of frames to skip in an animation (0 = export all, 1 = export half, 2 = export 33%%, etc)")
     parser.add_argument("--draw-normal-polygons", required=False,
                         action='store_true',
                         help="draw polygons with the shape of normals for debugging")
