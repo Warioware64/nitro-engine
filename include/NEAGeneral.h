@@ -424,7 +424,9 @@ typedef enum {
     /// Updates spatial sound sources (volume/panning from camera distance).
     NEA_UPDATE_SOUND = BIT(4),
     /// Updates animated material instances.
-    NEA_UPDATE_ANIM_MAT = BIT(5)
+    NEA_UPDATE_ANIM_MAT = BIT(5),
+    /// Synchronizes ARM7 rigid body physics state.
+    NEA_UPDATE_RIGIDBODY = BIT(6)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

@@ -55,7 +55,7 @@ extern "C" {
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (2)
 /// Minor version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_MINOR (0)
+#define NITRO_ENGINE_ADVANCED_MINOR (2)
 /// Patch version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_PATCH (0)
 
@@ -65,7 +65,7 @@ extern "C" {
                               (NITRO_ENGINE_ADVANCED_PATCH))
 
 /// String with the version of Nitro Engine Advanced
-#define NITRO_ENGINE_ADVANCED_VERSION_STRING "2.0.0"
+#define NITRO_ENGINE_ADVANCED_VERSION_STRING "2.2.0"
 
 /// @}
 

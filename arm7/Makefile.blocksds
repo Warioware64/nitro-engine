@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# SPDX-FileContributor: Warioware64, 2026
+#
+# Builds two ARM7 ELF binaries with NEA rigid body physics:
+#   arm7_nea.elf         - basic libnds7 + physics (no audio)
+#   arm7_nea_maxmod.elf  - libnds7 + Maxmod + physics
+
+BLOCKSDS	?= /opt/blocksds/core
+BLOCKSDSEXT	?= /opt/blocksds/external
+
+WONDERFUL_TOOLCHAIN	?= /opt/wonderful
+ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
+
+# Source code paths
+# -----------------
+
+# Physics engine source (shared between both targets)
+PHYS_SOURCEDIRS	:= source
+INCLUDEDIRS	:= source ../include
+
+# Tools
+# -----
+
+PREFIX		:= $(ARM_NONE_EABI_PATH)arm-none-eabi-
+CC		:= $(PREFIX)gcc
+LD		:= $(PREFIX)gcc
+MKDIR		:= mkdir
+RM		:= rm -rf
+
+# Verbose flag
+# ------------
+
+ifeq ($(VERBOSE),1)
+V		:=
+else
+V		:= @
+endif
+
+# Compiler flags (ARM7)
+# ---------------------
+
+ARCH		:= -mthumb -mcpu=arm7tdmi
+
+SPECS		:= $(BLOCKSDS)/sys/crts/ds_arm7.specs
+
+WARNFLAGS	:= -Wall
+
+DEFINES		:= -DARM7
+
+INCLUDEFLAGS	:= $(foreach path,$(INCLUDEDIRS),-I$(path)) \
+		   -I$(BLOCKSDS)/libs/libnds/include
+
+CFLAGS		:= -std=gnu17 $(WARNFLAGS) $(DEFINES) $(INCLUDEFLAGS) \
+		   $(ARCH) -O2 -ffunction-sections -fdata-sections \
+		   -specs=$(SPECS)
+
+# Physics engine object files (shared)
+# ------------------------------------
+
+SOURCES_C	:= $(shell find -L $(PHYS_SOURCEDIRS) -name "*.c")
+
+BUILDDIR_BASE	:= build/arm7_nea
+BUILDDIR_MM	:= build/arm7_nea_maxmod
+
+OBJS_PHYS_BASE	:= $(addsuffix .o,$(addprefix $(BUILDDIR_BASE)/,$(SOURCES_C)))
+OBJS_PHYS_MM	:= $(addsuffix .o,$(addprefix $(BUILDDIR_MM)/,$(SOURCES_C)))
+
+# Target 1: arm7_nea.elf (basic, no audio)
+# -----------------------------------------
+
+ELF_BASE	:= arm7_nea.elf
+LIBS_BASE	:= -lnds7 -lc
+LIBDIRS_BASE	:= $(BLOCKSDS)/libs/libnds
+LIBDIRSFLAGS_BASE := $(foreach path,$(LIBDIRS_BASE),-L$(path)/lib)
+
+OBJ_MAIN_BASE	:= $(BUILDDIR_BASE)/main/main_nea.c.o
+OBJS_BASE	:= $(OBJS_PHYS_BASE) $(OBJ_MAIN_BASE)
+LDFLAGS_BASE	:= $(ARCH) $(LIBDIRSFLAGS_BASE) $(DEFINES) \
+		   -Wl,--start-group $(LIBS_BASE) -Wl,--end-group -specs=$(SPECS)
+
+# Target 2: arm7_nea_maxmod.elf (with Maxmod audio)
+# ---------------------------------------------------
+
+ELF_MM		:= arm7_nea_maxmod.elf
+LIBS_MM		:= -lmm7 -lnds7 -lc
+LIBDIRS_MM	:= $(BLOCKSDS)/libs/libnds $(BLOCKSDS)/libs/maxmod
+LIBDIRSFLAGS_MM	:= $(foreach path,$(LIBDIRS_MM),-L$(path)/lib)
+
+CFLAGS_MM	:= $(CFLAGS) -I$(BLOCKSDS)/libs/maxmod/include
+
+OBJ_MAIN_MM	:= $(BUILDDIR_MM)/main/main_nea_maxmod.c.o
+OBJS_MM		:= $(OBJS_PHYS_MM) $(OBJ_MAIN_MM)
+LDFLAGS_MM	:= $(ARCH) $(LIBDIRSFLAGS_MM) $(DEFINES) \
+		   -Wl,--start-group $(LIBS_MM) -Wl,--end-group -specs=$(SPECS)
+
+# Targets
+# -------
+
+.PHONY: all clean
+
+all: $(ELF_BASE) $(ELF_MM)
+
+# Basic ELF
+$(ELF_BASE): $(OBJS_BASE)
+	@echo "  LD.7    $@"
+	$(V)$(LD) -o $@ $(OBJS_BASE) $(LDFLAGS_BASE)
+
+# Maxmod ELF
+$(ELF_MM): $(OBJS_MM)
+	@echo "  LD.7    $@"
+	$(V)$(LD) -o $@ $(OBJS_MM) $(LDFLAGS_MM)
+
+clean:
+	@echo "  CLEAN.7"
+	$(V)$(RM) $(ELF_BASE) $(ELF_MM) build
+
+# Rules for basic target
+# ----------------------
+
+$(BUILDDIR_BASE)/%.c.o : %.c
+	@echo "  CC.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR_BASE)/main/main_nea.c.o : main/main_nea.c
+	@echo "  CC.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Rules for maxmod target
+# -----------------------
+
+$(BUILDDIR_MM)/%.c.o : %.c
+	@echo "  CC.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS_MM) -MMD -MP -c -o $@ $<
+
+$(BUILDDIR_MM)/main/main_nea_maxmod.c.o : main/main_nea_maxmod.c
+	@echo "  CC.7    $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(CC) $(CFLAGS_MM) -MMD -MP -c -o $@ $<
+
+# Include dependency files
+# ------------------------
+
+-include $(OBJS_BASE:.o=.d) $(OBJS_MM:.o=.d)

@@ -60,6 +60,14 @@ Features:
   sources can be attached to models so audio follows objects in the scene. Enabled
   by building with ``NEA_MAXMOD=1`` — when disabled, the module compiles to
   nothing and has no dependencies.
+- **Rigid body physics** *(experimental)*: ARM7-accelerated OBB rigid body
+  simulation with angular dynamics, impulse-based collision response, Coulomb
+  friction, and object sleeping. The ARM9 sends commands via FIFO and receives
+  position/rotation updates each frame. Supports dynamic bodies (OBB shape),
+  static colliders (axis-aligned rectangles for walls/floors/ceilings), and
+  integration with NEA's collision system (ColMesh, Sphere, Capsule) via contact
+  injection. Requires using one of the provided ARM7 binaries
+  (``arm7_nea.elf`` or ``arm7_nea_maxmod.elf``).
 
 Nitro Engine Advanced doesn't support any of the 2D hardware of the DS. In order
 to use the 2D hardware you can use libnds directly, or you can use a library like

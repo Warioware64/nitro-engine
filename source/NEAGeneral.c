@@ -1798,6 +1798,12 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if ((flags & NEA_UPDATE_ANIM_MAT) && NEA_AnimMatUpdateAll)
         NEA_AnimMatUpdateAll();
 
+    // Weak reference: rigid body sync is only linked when
+    // the user calls any NEA_RigidBody* function.
+    extern void NEA_RigidBodySync(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_RIGIDBODY) && NEA_RigidBodySync)
+        NEA_RigidBodySync();
+
     NEA_CPUPercent = div32(ne_cpucount * 100, 263);
     if (flags & NEA_CAN_SKIP_VBL)
     {
