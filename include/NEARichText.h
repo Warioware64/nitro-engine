@@ -297,6 +297,22 @@ int NEA_RichTextRender3DAlpha(u32 slot, const char *str, s32 x, s32 y,
 int NEA_RichTextRenderMaterial(u32 slot, const char *str, NEA_Material **mat,
                               NEA_Palette **pal);
 
+/// Retrieve internal bitmap font state for a rich text slot.
+///
+/// Used by NEA_Hw2DTextRender() to access font data for bitmap BG rendering.
+///
+/// @param slot        Rich text slot.
+/// @param handle      Output: dsf font handle (as uintptr_t).
+/// @param texture_buf Output: pointer to font texture bitmap in RAM.
+/// @param tex_w       Output: font texture width.
+/// @param tex_h       Output: font texture height.
+/// @param tex_fmt     Output: font texture format (GL_TEXTURE_TYPE_ENUM).
+/// @return 0 on success, -1 if slot is invalid or not initialized.
+int NEA_RichTextGetBitmapState(u32 slot, uintptr_t *handle,
+                                const void **texture_buf,
+                                size_t *tex_w, size_t *tex_h,
+                                unsigned int *tex_fmt);
+
 /// @}
 
 #endif // NEA_RICHTEXT_H__

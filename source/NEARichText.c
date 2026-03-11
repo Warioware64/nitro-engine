@@ -510,3 +510,24 @@ int NEA_RichTextRenderMaterial(u32 slot, const char *str, NEA_Material **mat,
 
     return 1;
 }
+
+int NEA_RichTextGetBitmapState(u32 slot, uintptr_t *handle,
+                                const void **texture_buf,
+                                size_t *tex_w, size_t *tex_h,
+                                unsigned int *tex_fmt)
+{
+    if (slot >= NEA_NumRichTextSlots)
+        return -1;
+
+    ne_rich_textinfo_t *info = &NEA_RichTextInfo[slot];
+
+    if (!info->active || info->handle == 0 || info->texture_buffer == NULL)
+        return -1;
+
+    *handle = info->handle;
+    *texture_buf = info->texture_buffer;
+    *tex_w = info->texture_width;
+    *tex_h = info->texture_height;
+    *tex_fmt = (unsigned int)info->fmt;
+    return 0;
+}

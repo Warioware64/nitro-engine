@@ -23,6 +23,73 @@ static bool ne_palette_system_inited = false;
 
 static int NEA_MAX_PALETTES;
 
+// Which VRAM bank(s) back the palette allocator (snapshot from NEA_GetTexPaletteBank)
+static NEA_VRAMBankFlags ne_pal_banks;
+// LCD-mode base address of the palette VRAM region (for GFX_PAL_FORMAT offset calc)
+static uintptr_t ne_pal_lcd_base;
+
+// Switch palette bank(s) to LCD mode (enables CPU writes)
+static void ne_pal_to_lcd(void)
+{
+    if (ne_pal_banks & NEA_VRAM_E)
+        vramSetBankE(VRAM_E_LCD);
+    if (ne_pal_banks & NEA_VRAM_F)
+        vramSetBankF(VRAM_F_LCD);
+    if (ne_pal_banks & NEA_VRAM_G)
+        vramSetBankG(VRAM_G_LCD);
+}
+
+// Switch palette bank(s) back to TEX_PALETTE mode
+static void ne_pal_to_tex(void)
+{
+    if (ne_pal_banks & NEA_VRAM_E)
+        vramSetBankE(VRAM_E_TEX_PALETTE);
+
+    if (ne_pal_banks & NEA_VRAM_F)
+        vramSetBankF(VRAM_F_TEX_PALETTE); // Slot 0
+
+    if (ne_pal_banks & NEA_VRAM_G)
+    {
+        // If F is also used, G goes to slot 1 (after F's slot 0)
+        if (ne_pal_banks & NEA_VRAM_F)
+            vramSetBankG(VRAM_G_TEX_PALETTE_SLOT1);
+        else
+            vramSetBankG(VRAM_G_TEX_PALETTE); // Slot 0
+    }
+}
+
+// Compute LCD address range for the configured palette banks.
+// Returns 0 on success, -1 if no banks configured.
+static int ne_pal_get_range(void **start, void **end)
+{
+    if (ne_pal_banks & NEA_VRAM_E)
+    {
+        // Bank E: 64KB at 0x06880000
+        *start = (void *)VRAM_E;
+        *end   = (void *)VRAM_F;
+    }
+    else if (ne_pal_banks & NEA_VRAM_F)
+    {
+        *start = (void *)VRAM_F;
+        if (ne_pal_banks & NEA_VRAM_G)
+            *end = (void *)((uintptr_t)VRAM_G + 0x4000); // F+G: 32KB
+        else
+            *end = (void *)VRAM_G; // F only: 16KB
+    }
+    else if (ne_pal_banks & NEA_VRAM_G)
+    {
+        *start = (void *)VRAM_G;
+        *end   = (void *)((uintptr_t)VRAM_G + 0x4000); // G only: 16KB
+    }
+    else
+    {
+        *start = NULL;
+        *end   = NULL;
+        return -1;
+    }
+    return 0;
+}
+
 NEA_Palette *NEA_PaletteCreate(void)
 {
     if (!ne_palette_system_inited)
@@ -119,10 +186,10 @@ int NEA_PaletteLoad(NEA_Palette *pal, const void *pointer, u16 numcolor,
 
     pal->index = slot;
 
-    // Allow CPU writes to VRAM_E
-    vramSetBankE(VRAM_E_LCD);
+    // Allow CPU writes to palette VRAM
+    ne_pal_to_lcd();
     swiCopy(pointer, NEA_PalInfo[slot].pointer, (numcolor / 2) | COPY_MODE_WORD);
-    vramSetBankE(VRAM_E_TEX_PALETTE);
+    ne_pal_to_tex();
 
     return 1;
 }
@@ -165,7 +232,8 @@ void NEA_PaletteUse(const NEA_Palette *pal)
     NEA_AssertPointer(pal, "NULL pointer");
     NEA_Assert(pal->index != NEA_NO_PALETTE, "No asigned palette");
     unsigned int shift = 4 - (NEA_PalInfo[pal->index].format == NEA_PAL4);
-    GFX_PAL_FORMAT = (uintptr_t)NEA_PalInfo[pal->index].pointer >> shift;
+    GFX_PAL_FORMAT = ((uintptr_t)NEA_PalInfo[pal->index].pointer
+                      - ne_pal_lcd_base) >> shift;
 }
 
 int NEA_PaletteSystemReset(int max_palettes)
@@ -183,8 +251,24 @@ int NEA_PaletteSystemReset(int max_palettes)
     if ((NEA_PalInfo == NULL) || (NEA_UserPalette == NULL))
         goto cleanup;
 
-    if (NEA_AllocInit(&NEA_PalAllocList, (void *)VRAM_E, (void *)VRAM_F) != 0)
-        goto cleanup;
+    // Snapshot which VRAM banks are configured for texture palettes
+    ne_pal_banks = NEA_GetTexPaletteBank();
+
+    void *pal_start = NULL, *pal_end = NULL;
+    if (ne_pal_get_range(&pal_start, &pal_end) == 0)
+    {
+        ne_pal_lcd_base = (uintptr_t)pal_start;
+
+        if (NEA_AllocInit(&NEA_PalAllocList, pal_start, pal_end) != 0)
+            goto cleanup;
+    }
+    else
+    {
+        // No palette VRAM configured — allocator stays NULL,
+        // palette loads will fail gracefully.
+        ne_pal_lcd_base = 0;
+        NEA_PalAllocList = NULL;
+    }
 
     GFX_PAL_FORMAT = 0;
 
@@ -291,8 +375,8 @@ void *NEA_PaletteModificationStart(const NEA_Palette *pal)
     palette_adress = NEA_PalInfo[pal->index].pointer;
     palette_format = NEA_PalInfo[pal->index].format;
 
-    // Enable CPU accesses to VRAM_E
-    vramSetBankE(VRAM_E_LCD);
+    // Enable CPU accesses to palette VRAM
+    ne_pal_to_lcd();
 
     return palette_adress;
 }
@@ -309,8 +393,8 @@ void NEA_PaletteModificationEnd(void)
 {
     NEA_Assert(palette_adress != NULL, "No active palette");
 
-    // Disable CPU accesses to VRAM_E
-    vramSetBankE(VRAM_E_TEX_PALETTE);
+    // Disable CPU accesses to palette VRAM
+    ne_pal_to_tex();
 
     palette_adress = NULL;
 }

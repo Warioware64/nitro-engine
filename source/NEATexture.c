@@ -768,6 +768,11 @@ int NEA_TextureSystemReset(int max_textures, int max_palettes,
     if ((bank_flags & 0xF) == 0)
         bank_flags = NEA_VRAM_ABCD;
 
+    // Exclude banks claimed by the Hw2D system (weak reference)
+    extern NEA_VRAMBankFlags NEA_Hw2DGetClaimedBanks(void) __attribute__((weak));
+    if (NEA_Hw2DGetClaimedBanks)
+        bank_flags &= ~NEA_Hw2DGetClaimedBanks();
+
     // VRAM_C and VRAM_D can't be used in dual 3D mode (they are used for
     // framebuffers). In two-pass FIFO/DMA modes, only VRAM_D is reserved (for
     // capture), so VRAM_C is available for textures. In two-pass FB mode,

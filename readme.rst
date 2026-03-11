@@ -68,10 +68,23 @@ Features:
   integration with NEA's collision system (ColMesh, Sphere, Capsule) via contact
   injection. Requires using one of the provided ARM7 binaries
   (``arm7_nea.elf`` or ``arm7_nea_maxmod.elf``).
+- **Hardware 2D pipeline** (``NEAHw2D``): use the NDS 2D hardware alongside
+  the 3D engine. Supports tiled backgrounds (4bpp/8bpp), bitmap backgrounds
+  (8bpp indexed and 16bpp direct color), and hardware OBJ sprites with
+  animation frames, flip, priority, palette slots, and affine transformations.
+  VRAM banks assigned to 2D are automatically excluded from 3D texture
+  allocation. Includes ``NEA_Hw2DTextRender()`` for rendering libDSF rich text
+  onto 16bpp bitmap backgrounds. OAM updates are integrated into
+  ``NEA_WaitForVBL()`` via the ``NEA_UPDATE_HW2D`` flag. See the examples
+  under ``examples/hw2d/`` for tiled backgrounds, bitmap backgrounds, sprites,
+  and text rendering on bitmap BGs.
+- **Configurable texture palette VRAM**: ``NEA_SetTexPaletteBank()`` lets you
+  choose which VRAM banks (E, F, G) back 3D texture palettes, freeing bank E
+  for 2D backgrounds when needed.
 
-Nitro Engine Advanced doesn't support any of the 2D hardware of the DS. In order
-to use the 2D hardware you can use libnds directly, or you can use a library like
-`NFlib <https://github.com/knightfox75/nds_nflib>`_. There is an example of how
+For features not covered by NEA (e.g. advanced 2D tilemaps, scrolling engines),
+you can also use libnds directly, or a library like `NFlib
+<https://github.com/knightfox75/nds_nflib>`_. There is an example of how
 to integrate Nitro Engine Advanced and NFlib in the same project `here
 <./examples/templates/using_nflib>`_.
 

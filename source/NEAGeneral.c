@@ -34,6 +34,11 @@ static int ne_main_screen = 1; // 1 = top, 0 = bottom
 
 static int ne_depth_buffer_mode = 0; // GL_ZBUFFERING by default
 
+// Which VRAM banks are used for 3D texture palettes during init.
+// Default: NEA_VRAM_E (64KB, backward compatible).
+// Valid banks: E (64KB), F (16KB), G (16KB), or combinations, or 0 (none).
+static NEA_VRAMBankFlags ne_tex_palette_banks = NEA_VRAM_E;
+
 static uint32_t ne_dma_enabled = 0;
 static uint32_t ne_dma_src = 0;
 static uint32_t ne_dma_dst = 0;
@@ -249,6 +254,11 @@ void NEA_SetFov(int fovValue)
 
 static void ne_systems_end_all(void)
 {
+    // Weak reference: Hw2D module is only linked when user calls NEA_Hw2D*
+    extern void NEA_Hw2DSystemEnd(void) __attribute__((weak));
+    if (NEA_Hw2DSystemEnd)
+        NEA_Hw2DSystemEnd();
+
     NEA_GUISystemEnd();
     NEA_SpriteSystemEnd();
     NEA_PhysicsSystemEnd();
@@ -301,7 +311,15 @@ static void ne_init_registers(void)
 
     videoSetMode(0);
 
-    vramSetBankE(VRAM_E_TEX_PALETTE);
+    // Set up VRAM banks for 3D texture palettes (configurable).
+    // Default: bank E (64KB). User can switch to F/G or disable via
+    // NEA_SetTexPaletteBank() before calling NEA_Init3D().
+    if (ne_tex_palette_banks & NEA_VRAM_E)
+        vramSetBankE(VRAM_E_TEX_PALETTE);
+    if (ne_tex_palette_banks & NEA_VRAM_F)
+        vramSetBankF(VRAM_F_TEX_PALETTE);
+    if (ne_tex_palette_banks & NEA_VRAM_G)
+        vramSetBankG(VRAM_G_TEX_PALETTE);
 
     // Wait for geometry engine operations to end
     while (GFX_STATUS & BIT(27));
@@ -386,6 +404,16 @@ void NEA_UpdateInput(void)
 void NEA_SetDepthBufferMode(NEA_DepthBufferMode mode)
 {
     ne_depth_buffer_mode = mode;
+}
+
+void NEA_SetTexPaletteBank(NEA_VRAMBankFlags banks)
+{
+    ne_tex_palette_banks = banks;
+}
+
+NEA_VRAMBankFlags NEA_GetTexPaletteBank(void)
+{
+    return ne_tex_palette_banks;
 }
 
 int NEA_Init3D(void)
@@ -1779,7 +1807,9 @@ static int NEA_CPUPercent;
 void NEA_WaitForVBL(NEA_UpdateFlags flags)
 {
     if (flags & NEA_UPDATE_GUI)
+    {
         NEA_GUIUpdate();
+    }
     if (flags & NEA_UPDATE_ANIMATIONS)
         NEA_ModelAnimateAll();
     if (flags & NEA_UPDATE_PHYSICS)
@@ -1803,6 +1833,12 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     extern void NEA_RigidBodySync(void) __attribute__((weak));
     if ((flags & NEA_UPDATE_RIGIDBODY) && NEA_RigidBodySync)
         NEA_RigidBodySync();
+
+    // Weak reference: Hw2D OAM flush is only linked when
+    // the user calls any NEA_Hw2D* function.
+    extern void NEA_Hw2DOBJUpdateAll(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_HW2D) && NEA_Hw2DOBJUpdateAll)
+        NEA_Hw2DOBJUpdateAll();
 
     NEA_CPUPercent = div32(ne_cpucount * 100, 263);
     if (flags & NEA_CAN_SKIP_VBL)

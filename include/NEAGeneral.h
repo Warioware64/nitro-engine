@@ -351,6 +351,24 @@ typedef enum {
 /// @param mode NEA_ZBUFFER or NEA_WBUFFER.
 void NEA_SetDepthBufferMode(NEA_DepthBufferMode mode);
 
+/// Set which VRAM banks are used for 3D texture palettes.
+///
+/// Default is NEA_VRAM_E (64KB, full palette space). Valid banks are E (64KB),
+/// F (16KB), G (16KB), or any combination. Pass 0 to disable texture palettes
+/// (useful when bank E is needed for 2D backgrounds via NEA_Hw2DInit).
+///
+/// Call before NEA_Init3D() so it takes effect during initialization.
+/// NEA_Hw2DInit() automatically removes bank E from texture palettes when it
+/// claims bank E for 2D backgrounds.
+///
+/// @param banks Bitmask of NEA_VRAM_E, NEA_VRAM_F, NEA_VRAM_G, or 0.
+void NEA_SetTexPaletteBank(NEA_VRAMBankFlags banks);
+
+/// Returns the current VRAM bank(s) configured for 3D texture palettes.
+///
+/// @return Bitmask of NEA_VRAM_E, NEA_VRAM_F, NEA_VRAM_G, or 0 if disabled.
+NEA_VRAMBankFlags NEA_GetTexPaletteBank(void);
+
 /// Returns the number of polygons drawn since the last glFlush().
 ///
 /// @return Returns the number of polygons (0 - 2048).
@@ -426,7 +444,9 @@ typedef enum {
     /// Updates animated material instances.
     NEA_UPDATE_ANIM_MAT = BIT(5),
     /// Synchronizes ARM7 rigid body physics state.
-    NEA_UPDATE_RIGIDBODY = BIT(6)
+    NEA_UPDATE_RIGIDBODY = BIT(6),
+    /// Flushes hardware 2D OAM data for sprites.
+    NEA_UPDATE_HW2D = BIT(7)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

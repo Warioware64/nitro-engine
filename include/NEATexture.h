@@ -263,6 +263,12 @@ typedef enum {
     NEA_VRAM_BCD = NEA_VRAM_B | NEA_VRAM_C | NEA_VRAM_D, ///< Banks B, C and D
 
     NEA_VRAM_ABCD = NEA_VRAM_A | NEA_VRAM_B | NEA_VRAM_C | NEA_VRAM_D, ///< All main banks
+
+    NEA_VRAM_E = (1 << 4), ///< Bank E (64KB)
+    NEA_VRAM_F = (1 << 5), ///< Bank F (16KB)
+    NEA_VRAM_G = (1 << 6), ///< Bank G (16KB)
+    NEA_VRAM_H = (1 << 7), ///< Bank H (32KB)
+    NEA_VRAM_I = (1 << 8), ///< Bank I (16KB)
 } NEA_VRAMBankFlags;
 
 /// Resets the material system and sets the new max number of objects.
