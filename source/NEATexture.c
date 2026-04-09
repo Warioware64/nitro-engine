@@ -225,10 +225,13 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
     int ret = 0;
 
     void *gfxDst = NULL;
+    void *pidxDst = NULL;
     void *palDst = NULL;
+    size_t palSize = 0;
+
     GRFHeader header = { 0 };
-    GRFError err = grfLoadPath(path, &header, &gfxDst, NULL, NULL, NULL,
-                               &palDst, NULL);
+    GRFError err = grfLoadPath(path, &header, &gfxDst, NULL, &pidxDst, NULL,
+                               &palDst, &palSize);
     if (err != GRF_NO_ERROR)
     {
         NEA_DebugPrint("Couldn't load GRF file: %d", err);
@@ -273,12 +276,25 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
             goto cleanup;
     }
 
-    if (NEA_MaterialTexLoad(tex, fmt, header.gfxWidth, header.gfxHeight,
-                           flags, gfxDst) == 0)
+    if (header.gfxAttr == GRF_TEXFMT_4x4)
     {
-        NEA_DebugPrint("Failed to load GRF texture");
-        goto cleanup;
+        if (NEA_MaterialTex4x4Load(tex, header.gfxWidth, header.gfxHeight,
+                           flags, gfxDst, pidxDst) == 0)
+        {
+            NEA_DebugPrint("Failed to load GRF texture");
+            goto cleanup;
+        }
     }
+    else
+    {
+        if (NEA_MaterialTexLoad(tex, fmt, header.gfxWidth, header.gfxHeight,
+                            flags, gfxDst) == 0)
+        {
+            NEA_DebugPrint("Failed to load GRF texture");
+            goto cleanup;
+        }
+    }
+
 
     // If there is no palette to be loaded there is nothing else to do
     if (palDst == NULL)
@@ -310,7 +326,7 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
         }
     }
 
-    if (NEA_PaletteLoadSize(pal, palDst, header.palAttr * 2, fmt) == 0)
+    if (NEA_PaletteLoadSize(pal, palDst, palSize, fmt) == 0)
     {
         NEA_DebugPrint("Failed to load GRF palette");
         if (create_palette)
@@ -327,6 +343,7 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
 
 cleanup:
     free(gfxDst);
+    free(pidxDst);
     free(palDst);
     return ret;
 #endif // NEA_BLOCKSDS
