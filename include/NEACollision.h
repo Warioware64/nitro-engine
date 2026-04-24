@@ -294,16 +294,31 @@ NEA_ColResult NEA_ColTestSphereVsSphere(const NEA_ColSphere *a, NEA_Vec3 pos_a,
 NEA_ColResult NEA_ColTestAABBvsSphere(const NEA_ColAABB *a, NEA_Vec3 pos_a,
                                       const NEA_ColSphere *b, NEA_Vec3 pos_b);
 
+/// Test Sphere vs AABB collision.
+NEA_ColResult NEA_ColTestSphereVsAABB(const NEA_ColSphere *a, NEA_Vec3 pos_a,
+                                      const NEA_ColAABB *b, NEA_Vec3 pos_b);
+
 /// Test Capsule vs Sphere collision.
 NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
                                          NEA_Vec3 pos_a,
                                          const NEA_ColSphere *b,
                                          NEA_Vec3 pos_b);
 
+/// Test Sphere vs Capsule collision.
+NEA_ColResult NEA_ColTestSphereVsCapsule(const NEA_ColSphere *a,
+                                         NEA_Vec3 pos_a,
+                                         const NEA_ColCapsule *b,
+                                         NEA_Vec3 pos_b);
+
 /// Test Capsule vs AABB collision.
 NEA_ColResult NEA_ColTestCapsuleVsAABB(const NEA_ColCapsule *a,
                                        NEA_Vec3 pos_a,
                                        const NEA_ColAABB *b, NEA_Vec3 pos_b);
+
+/// Test AABB vs Capsule collision.
+NEA_ColResult NEA_ColTestAABBvsCapsule(const NEA_ColAABB *a, NEA_Vec3 pos_a,
+                                       const NEA_ColCapsule *b,
+                                       NEA_Vec3 pos_b);
 
 /// Test Capsule vs Capsule collision.
 NEA_ColResult NEA_ColTestCapsuleVsCapsule(const NEA_ColCapsule *a,
@@ -316,16 +331,32 @@ NEA_ColResult NEA_ColTestSphereVsMesh(const NEA_ColSphere *a, NEA_Vec3 pos_a,
                                       const NEA_ColMesh *mesh,
                                       NEA_Vec3 mesh_pos);
 
+/// Test ColMesh vs Sphere collision.
+NEA_ColResult NEA_ColTestMeshVsSphere(const NEA_ColMesh *mesh,
+                                      NEA_Vec3 mesh_pos,
+                                      const NEA_ColSphere *b, NEA_Vec3 pos_b);
+
 /// Test AABB vs ColMesh collision.
 NEA_ColResult NEA_ColTestAABBvsMesh(const NEA_ColAABB *a, NEA_Vec3 pos_a,
                                     const NEA_ColMesh *mesh,
                                     NEA_Vec3 mesh_pos);
+
+/// Test ColMesh vs AABB collision.
+NEA_ColResult NEA_ColTestMeshVsAABB(const NEA_ColMesh *mesh,
+                                    NEA_Vec3 mesh_pos,
+                                    const NEA_ColAABB *b, NEA_Vec3 pos_b);
 
 /// Test Capsule vs ColMesh collision.
 NEA_ColResult NEA_ColTestCapsuleVsMesh(const NEA_ColCapsule *a,
                                        NEA_Vec3 pos_a,
                                        const NEA_ColMesh *mesh,
                                        NEA_Vec3 mesh_pos);
+
+/// Test ColMesh vs Capsule collision.
+NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
+                                       NEA_Vec3 mesh_pos,
+                                       const NEA_ColCapsule *b,
+                                       NEA_Vec3 pos_b);
 
 /// Generic collision test dispatcher.
 ///

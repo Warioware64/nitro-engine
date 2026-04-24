@@ -503,6 +503,16 @@ static inline NEA_Vec3 ne_closest_point_on_segment_y(NEA_Vec3 pos,
     return NEA_Vec3Make(pos.x, y, pos.z);
 }
 
+// --- Sphere vs AABB ---
+
+NEA_ColResult NEA_ColTestSphereVsAABB(const NEA_ColSphere *a, NEA_Vec3 pos_a,
+                                      const NEA_ColAABB *b, NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestAABBvsSphere(b, pos_b, a, pos_a);
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
+}
+
 // --- Capsule vs Sphere ---
 
 NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
@@ -517,6 +527,18 @@ NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
     // Now treat as sphere-vs-sphere from closest point
     NEA_ColSphere cap_sphere = { .radius = a->radius };
     return NEA_ColTestSphereVsSphere(&cap_sphere, closest, b, pos_b);
+}
+
+// --- Sphere vs Capsule ---
+
+NEA_ColResult NEA_ColTestSphereVsCapsule(const NEA_ColSphere *a,
+                                         NEA_Vec3 pos_a,
+                                         const NEA_ColCapsule *b,
+                                         NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestCapsuleVsSphere(b, pos_b, a, pos_a);
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
 }
 
 // --- Capsule vs AABB ---
@@ -535,6 +557,17 @@ NEA_ColResult NEA_ColTestCapsuleVsAABB(const NEA_ColCapsule *a,
 
     // Flip normal (AABBvsSphere returns normal from AABB to sphere)
     // We want normal from capsule (A) to AABB (B)
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
+}
+
+// --- AABB vs Capsule ---
+
+NEA_ColResult NEA_ColTestAABBvsCapsule(const NEA_ColAABB *a, NEA_Vec3 pos_a,
+                                       const NEA_ColCapsule *b,
+                                       NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestCapsuleVsAABB(b, pos_b, a, pos_a);
     r.normal = NEA_Vec3Neg(r.normal);
     return r;
 }
@@ -851,6 +884,40 @@ NEA_ColResult NEA_ColTestCapsuleVsMesh(const NEA_ColCapsule *a,
     return best;
 }
 
+// --- ColMesh vs Sphere ---
+
+NEA_ColResult NEA_ColTestMeshVsSphere(const NEA_ColMesh *mesh,
+                                      NEA_Vec3 mesh_pos,
+                                      const NEA_ColSphere *b, NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestSphereVsMesh(b, pos_b, mesh, mesh_pos);
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
+}
+
+// --- ColMesh vs AABB ---
+
+NEA_ColResult NEA_ColTestMeshVsAABB(const NEA_ColMesh *mesh,
+                                    NEA_Vec3 mesh_pos,
+                                    const NEA_ColAABB *b, NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestAABBvsMesh(b, pos_b, mesh, mesh_pos);
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
+}
+
+// --- ColMesh vs Capsule ---
+
+NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
+                                       NEA_Vec3 mesh_pos,
+                                       const NEA_ColCapsule *b,
+                                       NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = NEA_ColTestCapsuleVsMesh(b, pos_b, mesh, mesh_pos);
+    r.normal = NEA_Vec3Neg(r.normal);
+    return r;
+}
+
 // =========================================================================
 // Generic collision dispatcher
 // =========================================================================
@@ -889,10 +956,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_SPHERE && b->type == NEA_COL_AABB)
     {
-        r = NEA_ColTestAABBvsSphere(&b->shape.aabb, pos_b,
-                                    &a->shape.sphere, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestSphereVsAABB(&a->shape.sphere, pos_a,
+                                       &b->shape.aabb, pos_b);
     }
 
     // Capsule vs Sphere (and reverse)
@@ -903,10 +968,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_SPHERE && b->type == NEA_COL_CAPSULE)
     {
-        r = NEA_ColTestCapsuleVsSphere(&b->shape.capsule, pos_b,
-                                       &a->shape.sphere, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestSphereVsCapsule(&a->shape.sphere, pos_a,
+                                          &b->shape.capsule, pos_b);
     }
 
     // Capsule vs AABB (and reverse)
@@ -917,10 +980,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_AABB && b->type == NEA_COL_CAPSULE)
     {
-        r = NEA_ColTestCapsuleVsAABB(&b->shape.capsule, pos_b,
-                                     &a->shape.aabb, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestAABBvsCapsule(&a->shape.aabb, pos_a,
+                                        &b->shape.capsule, pos_b);
     }
 
     // Capsule vs Capsule
@@ -938,10 +999,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_TRIMESH && b->type == NEA_COL_SPHERE)
     {
-        r = NEA_ColTestSphereVsMesh(&b->shape.sphere, pos_b,
-                                    a->shape.mesh, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestMeshVsSphere(a->shape.mesh, pos_a,
+                                       &b->shape.sphere, pos_b);
     }
 
     // AABB vs ColMesh (and reverse)
@@ -952,10 +1011,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_TRIMESH && b->type == NEA_COL_AABB)
     {
-        r = NEA_ColTestAABBvsMesh(&b->shape.aabb, pos_b,
-                                  a->shape.mesh, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestMeshVsAABB(a->shape.mesh, pos_a,
+                                     &b->shape.aabb, pos_b);
     }
 
     // Capsule vs ColMesh (and reverse)
@@ -966,10 +1023,8 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
     }
     if (a->type == NEA_COL_TRIMESH && b->type == NEA_COL_CAPSULE)
     {
-        r = NEA_ColTestCapsuleVsMesh(&b->shape.capsule, pos_b,
-                                     a->shape.mesh, pos_a);
-        r.normal = NEA_Vec3Neg(r.normal);
-        return r;
+        return NEA_ColTestMeshVsCapsule(a->shape.mesh, pos_a,
+                                        &b->shape.capsule, pos_b);
     }
 
     // ColMesh vs ColMesh: not supported
