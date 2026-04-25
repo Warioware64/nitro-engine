@@ -358,6 +358,12 @@ NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
                                        const NEA_ColCapsule *b,
                                        NEA_Vec3 pos_b);
 
+/// Test ColMesh vs ColMesh collision.
+///
+/// Uses bounding AABB approximation for performance on DS hardware.
+NEA_ColResult NEA_ColTestMeshVsMesh(const NEA_ColMesh *a, NEA_Vec3 pos_a,
+                                    const NEA_ColMesh *b, NEA_Vec3 pos_b);
+
 /// Generic collision test dispatcher.
 ///
 /// Tests any pair of collision shapes. Automatically selects the correct

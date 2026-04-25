@@ -320,8 +320,10 @@ void NEA_ColMeshFree(NEA_ColMesh *mesh)
 
 // --- AABB vs AABB ---
 
-NEA_ColResult NEA_ColTestAABBvsAABB(const NEA_ColAABB *a, NEA_Vec3 pos_a,
-                                    const NEA_ColAABB *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestAABBvsAABB(const NEA_ColAABB *a,
+                                             NEA_Vec3 pos_a,
+                                             const NEA_ColAABB *b,
+                                             NEA_Vec3 pos_b)
 {
     NEA_ColResult r = { .hit = false };
     NEA_Vec3 d = NEA_Vec3Sub(pos_b, pos_a);
@@ -364,10 +366,10 @@ NEA_ColResult NEA_ColTestAABBvsAABB(const NEA_ColAABB *a, NEA_Vec3 pos_a,
 
 // --- Sphere vs Sphere ---
 
-NEA_ColResult NEA_ColTestSphereVsSphere(const NEA_ColSphere *a,
-                                        NEA_Vec3 pos_a,
-                                        const NEA_ColSphere *b,
-                                        NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestSphereVsSphere(const NEA_ColSphere *a,
+                                                  NEA_Vec3 pos_a,
+                                                  const NEA_ColSphere *b,
+                                                  NEA_Vec3 pos_b)
 {
     NEA_ColResult r = { .hit = false };
     NEA_Vec3 d = NEA_Vec3Sub(pos_b, pos_a);
@@ -409,8 +411,10 @@ NEA_ColResult NEA_ColTestSphereVsSphere(const NEA_ColSphere *a,
 
 // --- AABB vs Sphere ---
 
-NEA_ColResult NEA_ColTestAABBvsSphere(const NEA_ColAABB *a, NEA_Vec3 pos_a,
-                                      const NEA_ColSphere *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestAABBvsSphere(const NEA_ColAABB *a,
+                                               NEA_Vec3 pos_a,
+                                               const NEA_ColSphere *b,
+                                               NEA_Vec3 pos_b)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -505,8 +509,10 @@ static inline NEA_Vec3 ne_closest_point_on_segment_y(NEA_Vec3 pos,
 
 // --- Sphere vs AABB ---
 
-NEA_ColResult NEA_ColTestSphereVsAABB(const NEA_ColSphere *a, NEA_Vec3 pos_a,
-                                      const NEA_ColAABB *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestSphereVsAABB(const NEA_ColSphere *a,
+                                               NEA_Vec3 pos_a,
+                                               const NEA_ColAABB *b,
+                                               NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestAABBvsSphere(b, pos_b, a, pos_a);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -515,10 +521,10 @@ NEA_ColResult NEA_ColTestSphereVsAABB(const NEA_ColSphere *a, NEA_Vec3 pos_a,
 
 // --- Capsule vs Sphere ---
 
-NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
-                                         NEA_Vec3 pos_a,
-                                         const NEA_ColSphere *b,
-                                         NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
+                                                   NEA_Vec3 pos_a,
+                                                   const NEA_ColSphere *b,
+                                                   NEA_Vec3 pos_b)
 {
     // Find closest point on capsule segment to sphere center
     NEA_Vec3 closest = ne_closest_point_on_segment_y(pos_a, a->half_height,
@@ -531,10 +537,10 @@ NEA_ColResult NEA_ColTestCapsuleVsSphere(const NEA_ColCapsule *a,
 
 // --- Sphere vs Capsule ---
 
-NEA_ColResult NEA_ColTestSphereVsCapsule(const NEA_ColSphere *a,
-                                         NEA_Vec3 pos_a,
-                                         const NEA_ColCapsule *b,
-                                         NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestSphereVsCapsule(const NEA_ColSphere *a,
+                                                   NEA_Vec3 pos_a,
+                                                   const NEA_ColCapsule *b,
+                                                   NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestCapsuleVsSphere(b, pos_b, a, pos_a);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -543,9 +549,10 @@ NEA_ColResult NEA_ColTestSphereVsCapsule(const NEA_ColSphere *a,
 
 // --- Capsule vs AABB ---
 
-NEA_ColResult NEA_ColTestCapsuleVsAABB(const NEA_ColCapsule *a,
-                                       NEA_Vec3 pos_a,
-                                       const NEA_ColAABB *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestCapsuleVsAABB(const NEA_ColCapsule *a,
+                                                NEA_Vec3 pos_a,
+                                                const NEA_ColAABB *b,
+                                                NEA_Vec3 pos_b)
 {
     // Find closest point on capsule's Y-axis segment to the AABB center
     NEA_Vec3 seg_point = ne_closest_point_on_segment_y(pos_a, a->half_height,
@@ -563,9 +570,10 @@ NEA_ColResult NEA_ColTestCapsuleVsAABB(const NEA_ColCapsule *a,
 
 // --- AABB vs Capsule ---
 
-NEA_ColResult NEA_ColTestAABBvsCapsule(const NEA_ColAABB *a, NEA_Vec3 pos_a,
-                                       const NEA_ColCapsule *b,
-                                       NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestAABBvsCapsule(const NEA_ColAABB *a,
+                                                NEA_Vec3 pos_a,
+                                                const NEA_ColCapsule *b,
+                                                NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestCapsuleVsAABB(b, pos_b, a, pos_a);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -576,10 +584,10 @@ NEA_ColResult NEA_ColTestAABBvsCapsule(const NEA_ColAABB *a, NEA_Vec3 pos_a,
 // Capsule vs Capsule: closest points between two Y-axis segments
 // =========================================================================
 
-NEA_ColResult NEA_ColTestCapsuleVsCapsule(const NEA_ColCapsule *a,
-                                          NEA_Vec3 pos_a,
-                                          const NEA_ColCapsule *b,
-                                          NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestCapsuleVsCapsule(const NEA_ColCapsule *a,
+                                                    NEA_Vec3 pos_a,
+                                                    const NEA_ColCapsule *b,
+                                                    NEA_Vec3 pos_b)
 {
     // Capsule A segment: (pos_a.x, pos_a.y ± a->half_height, pos_a.z)
     // Capsule B segment: (pos_b.x, pos_b.y ± b->half_height, pos_b.z)
@@ -608,8 +616,9 @@ NEA_ColResult NEA_ColTestCapsuleVsCapsule(const NEA_ColCapsule *a,
 // =========================================================================
 
 // Test a sphere against a single triangle. Returns collision result.
-static NEA_ColResult ne_sphere_vs_triangle(NEA_Vec3 center, int32_t radius,
-                                           const NEA_ColTriangle *tri)
+ARM_CODE static NEA_ColResult ne_sphere_vs_triangle(NEA_Vec3 center,
+                                                     int32_t radius,
+                                                     const NEA_ColTriangle *tri)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -772,9 +781,10 @@ static inline bool ne_aabb_overlap_check(NEA_Vec3 shape_pos,
         && (abs(d.z) < sum_half.z);
 }
 
-NEA_ColResult NEA_ColTestSphereVsMesh(const NEA_ColSphere *a, NEA_Vec3 pos_a,
-                                      const NEA_ColMesh *mesh,
-                                      NEA_Vec3 mesh_pos)
+ARM_CODE NEA_ColResult NEA_ColTestSphereVsMesh(const NEA_ColSphere *a,
+                                               NEA_Vec3 pos_a,
+                                               const NEA_ColMesh *mesh,
+                                               NEA_Vec3 mesh_pos)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -812,9 +822,10 @@ NEA_ColResult NEA_ColTestSphereVsMesh(const NEA_ColSphere *a, NEA_Vec3 pos_a,
     return best;
 }
 
-NEA_ColResult NEA_ColTestAABBvsMesh(const NEA_ColAABB *a, NEA_Vec3 pos_a,
-                                    const NEA_ColMesh *mesh,
-                                    NEA_Vec3 mesh_pos)
+ARM_CODE NEA_ColResult NEA_ColTestAABBvsMesh(const NEA_ColAABB *a,
+                                             NEA_Vec3 pos_a,
+                                             const NEA_ColMesh *mesh,
+                                             NEA_Vec3 mesh_pos)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -833,10 +844,10 @@ NEA_ColResult NEA_ColTestAABBvsMesh(const NEA_ColAABB *a, NEA_Vec3 pos_a,
     return NEA_ColTestSphereVsMesh(&approx, pos_a, mesh, mesh_pos);
 }
 
-NEA_ColResult NEA_ColTestCapsuleVsMesh(const NEA_ColCapsule *a,
-                                       NEA_Vec3 pos_a,
-                                       const NEA_ColMesh *mesh,
-                                       NEA_Vec3 mesh_pos)
+ARM_CODE NEA_ColResult NEA_ColTestCapsuleVsMesh(const NEA_ColCapsule *a,
+                                                NEA_Vec3 pos_a,
+                                                const NEA_ColMesh *mesh,
+                                                NEA_Vec3 mesh_pos)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -884,11 +895,172 @@ NEA_ColResult NEA_ColTestCapsuleVsMesh(const NEA_ColCapsule *a,
     return best;
 }
 
+// =========================================================================
+// Triangle vs Triangle (SAT — Separating Axis Theorem)
+// =========================================================================
+
+// Project three vertices onto an axis, return min and max.
+static void ne_tri_project(NEA_Vec3 v0, NEA_Vec3 v1, NEA_Vec3 v2,
+                           NEA_Vec3 axis,
+                           int32_t *out_min, int32_t *out_max)
+{
+    int32_t d0 = NEA_Vec3Dot(v0, axis);
+    int32_t d1 = NEA_Vec3Dot(v1, axis);
+    int32_t d2 = NEA_Vec3Dot(v2, axis);
+
+    *out_min = d0;
+    if (d1 < *out_min) *out_min = d1;
+    if (d2 < *out_min) *out_min = d2;
+
+    *out_max = d0;
+    if (d1 > *out_max) *out_max = d1;
+    if (d2 > *out_max) *out_max = d2;
+}
+
+// Test two triangles using SAT. Vertices must be in the same space.
+ARM_CODE static NEA_ColResult ne_triangle_vs_triangle(
+    const NEA_ColTriangle *a, const NEA_ColTriangle *b)
+{
+    NEA_ColResult r = { .hit = false };
+
+    NEA_Vec3 a_edges[3] = {
+        NEA_Vec3Sub(a->v1, a->v0),
+        NEA_Vec3Sub(a->v2, a->v1),
+        NEA_Vec3Sub(a->v0, a->v2)
+    };
+    NEA_Vec3 b_edges[3] = {
+        NEA_Vec3Sub(b->v1, b->v0),
+        NEA_Vec3Sub(b->v2, b->v1),
+        NEA_Vec3Sub(b->v0, b->v2)
+    };
+
+    // 11 potential separating axes: 2 face normals + 9 edge cross products
+    NEA_Vec3 axes[11];
+    axes[0] = a->normal;
+    axes[1] = b->normal;
+    int idx = 2;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            axes[idx++] = NEA_Vec3Cross(a_edges[i], b_edges[j]);
+
+    int32_t min_depth = INT32_MAX;
+    NEA_Vec3 min_axis = NEA_Vec3Make(0, inttof32(1), 0);
+
+    for (int i = 0; i < 11; i++)
+    {
+        // Skip degenerate axes (parallel edges)
+        if (NEA_Vec3LengthSq(axes[i]) == 0)
+            continue;
+
+        NEA_Vec3 axis = NEA_Vec3Normalize(axes[i]);
+
+        int32_t a_min, a_max, b_min, b_max;
+        ne_tri_project(a->v0, a->v1, a->v2, axis, &a_min, &a_max);
+        ne_tri_project(b->v0, b->v1, b->v2, axis, &b_min, &b_max);
+
+        if (a_max <= b_min || b_max <= a_min)
+            return r; // Separated on this axis
+
+        int32_t overlap1 = a_max - b_min;
+        int32_t overlap2 = b_max - a_min;
+        int32_t overlap = overlap1 < overlap2 ? overlap1 : overlap2;
+
+        if (overlap < min_depth)
+        {
+            min_depth = overlap;
+            min_axis = axis;
+        }
+    }
+
+    // All axes overlap — collision
+    r.hit = true;
+    r.depth = min_depth;
+    r.normal = min_axis;
+
+    // Ensure normal points from A toward B
+    NEA_Vec3 center_a = NEA_Vec3Make(
+        (a->v0.x + a->v1.x + a->v2.x) / 3,
+        (a->v0.y + a->v1.y + a->v2.y) / 3,
+        (a->v0.z + a->v1.z + a->v2.z) / 3);
+    NEA_Vec3 center_b = NEA_Vec3Make(
+        (b->v0.x + b->v1.x + b->v2.x) / 3,
+        (b->v0.y + b->v1.y + b->v2.y) / 3,
+        (b->v0.z + b->v1.z + b->v2.z) / 3);
+
+    if (NEA_Vec3Dot(NEA_Vec3Sub(center_b, center_a), r.normal) < 0)
+        r.normal = NEA_Vec3Neg(r.normal);
+
+    // Contact point: midpoint of centroids
+    r.point = NEA_Vec3Make(
+        (center_a.x + center_b.x) >> 1,
+        (center_a.y + center_b.y) >> 1,
+        (center_a.z + center_b.z) >> 1);
+
+    return r;
+}
+
+// --- ColMesh vs ColMesh ---
+
+ARM_CODE NEA_ColResult NEA_ColTestMeshVsMesh(const NEA_ColMesh *a,
+                                             NEA_Vec3 pos_a,
+                                             const NEA_ColMesh *b,
+                                             NEA_Vec3 pos_b)
+{
+    NEA_ColResult r = { .hit = false };
+
+    // AABB early rejection on mesh bounds
+    NEA_Vec3 center_a = NEA_Vec3Add(pos_a, a->center);
+    NEA_Vec3 center_b = NEA_Vec3Add(pos_b, b->center);
+    NEA_ColResult bounds = NEA_ColTestAABBvsAABB(&a->bounds, center_a,
+                                                 &b->bounds, center_b);
+    if (!bounds.hit)
+        return r;
+
+    const NEA_ColTriangle *tris_a = ne_colmesh_get_tris(a);
+    const NEA_ColTriangle *tris_b = ne_colmesh_get_tris(b);
+
+    // Determine space offsets. For static meshes, triangles are in local
+    // space and need pos offset. For dynamic meshes, already world space.
+    NEA_Vec3 off_a = (a->flags & NEA_COLMESH_DYNAMIC)
+                     ? NEA_Vec3Make(0, 0, 0) : pos_a;
+    NEA_Vec3 off_b = (b->flags & NEA_COLMESH_DYNAMIC)
+                     ? NEA_Vec3Make(0, 0, 0) : pos_b;
+
+    NEA_ColResult best = { .hit = false, .depth = 0 };
+
+    for (int i = 0; i < a->num_triangles; i++)
+    {
+        // Build world-space triangle A
+        NEA_ColTriangle wa;
+        wa.v0 = NEA_Vec3Add(tris_a[i].v0, off_a);
+        wa.v1 = NEA_Vec3Add(tris_a[i].v1, off_a);
+        wa.v2 = NEA_Vec3Add(tris_a[i].v2, off_a);
+        wa.normal = tris_a[i].normal;
+
+        for (int j = 0; j < b->num_triangles; j++)
+        {
+            // Build world-space triangle B
+            NEA_ColTriangle wb;
+            wb.v0 = NEA_Vec3Add(tris_b[j].v0, off_b);
+            wb.v1 = NEA_Vec3Add(tris_b[j].v1, off_b);
+            wb.v2 = NEA_Vec3Add(tris_b[j].v2, off_b);
+            wb.normal = tris_b[j].normal;
+
+            NEA_ColResult tri_r = ne_triangle_vs_triangle(&wa, &wb);
+            if (tri_r.hit && tri_r.depth > best.depth)
+                best = tri_r;
+        }
+    }
+
+    return best;
+}
+
 // --- ColMesh vs Sphere ---
 
-NEA_ColResult NEA_ColTestMeshVsSphere(const NEA_ColMesh *mesh,
-                                      NEA_Vec3 mesh_pos,
-                                      const NEA_ColSphere *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestMeshVsSphere(const NEA_ColMesh *mesh,
+                                               NEA_Vec3 mesh_pos,
+                                               const NEA_ColSphere *b,
+                                               NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestSphereVsMesh(b, pos_b, mesh, mesh_pos);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -897,9 +1069,10 @@ NEA_ColResult NEA_ColTestMeshVsSphere(const NEA_ColMesh *mesh,
 
 // --- ColMesh vs AABB ---
 
-NEA_ColResult NEA_ColTestMeshVsAABB(const NEA_ColMesh *mesh,
-                                    NEA_Vec3 mesh_pos,
-                                    const NEA_ColAABB *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestMeshVsAABB(const NEA_ColMesh *mesh,
+                                             NEA_Vec3 mesh_pos,
+                                             const NEA_ColAABB *b,
+                                             NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestAABBvsMesh(b, pos_b, mesh, mesh_pos);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -908,10 +1081,10 @@ NEA_ColResult NEA_ColTestMeshVsAABB(const NEA_ColMesh *mesh,
 
 // --- ColMesh vs Capsule ---
 
-NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
-                                       NEA_Vec3 mesh_pos,
-                                       const NEA_ColCapsule *b,
-                                       NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
+                                                NEA_Vec3 mesh_pos,
+                                                const NEA_ColCapsule *b,
+                                                NEA_Vec3 pos_b)
 {
     NEA_ColResult r = NEA_ColTestCapsuleVsMesh(b, pos_b, mesh, mesh_pos);
     r.normal = NEA_Vec3Neg(r.normal);
@@ -922,8 +1095,8 @@ NEA_ColResult NEA_ColTestMeshVsCapsule(const NEA_ColMesh *mesh,
 // Generic collision dispatcher
 // =========================================================================
 
-NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
-                          const NEA_ColShape *b, NEA_Vec3 pos_b)
+ARM_CODE NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
+                                   const NEA_ColShape *b, NEA_Vec3 pos_b)
 {
     NEA_ColResult r = { .hit = false };
 
@@ -1027,6 +1200,12 @@ NEA_ColResult NEA_ColTest(const NEA_ColShape *a, NEA_Vec3 pos_a,
                                         &b->shape.capsule, pos_b);
     }
 
-    // ColMesh vs ColMesh: not supported
+    // ColMesh vs ColMesh
+    if (a->type == NEA_COL_TRIMESH && b->type == NEA_COL_TRIMESH)
+    {
+        return NEA_ColTestMeshVsMesh(a->shape.mesh, pos_a,
+                                     b->shape.mesh, pos_b);
+    }
+
     return r;
 }
