@@ -207,7 +207,7 @@ def joint_info_to_m4x3(q, trans):
             [    xz - wy,     yz + wx, 1 - x2 - y2, trans.z]]
 
 def parse_md5mesh(input_file):
-    Joint = namedtuple("Joint", "name parent pos orient")
+    Joint = namedtuple("Joint", "name parent pos orient scale")
     Vert = namedtuple("Vert", "st startWeight countWeight")
     Weight = namedtuple("Weight", "joint bias pos")
     Mesh = namedtuple("Mesh", "shader numverts verts numtris tris numweights weights")
@@ -318,7 +318,7 @@ def parse_md5mesh(input_file):
                     if tokens[10] != ')':
                         raise MD5FormatError(f"Unexpected token 10 for joint': {tokens}")
 
-                    joints.append(Joint(name, parent, pos, q_orient))
+                    joints.append(Joint(name, parent, pos, q_orient, Vector(1.0, 1.0, 1.0)))
 
             elif mode == "mesh":
                 if cmd == '}':
@@ -432,8 +432,8 @@ def parse_md5mesh(input_file):
 
     return (joints, meshes)
 
-def parse_md5anim(input_file):
-    Joint = namedtuple("Joint", "name parent pos orient")
+def parse_md5anim(input_file, old_md5=False):
+    Joint = namedtuple("Joint", "name parent pos orient scale")
 
     joints = []
     frames = []
@@ -548,7 +548,7 @@ def parse_md5anim(input_file):
 
                     parent_index = int(tokens[0])
                     flags = int(tokens[1])
-                    if flags != 63:
+                    if flags != 63 and flags != 511:
                         raise MD5FormatError(f"Unexpected flags in hierarchy: {flags}")
                     frame_data_index = int(tokens[2])
 
@@ -570,7 +570,14 @@ def parse_md5anim(input_file):
                     mode = "root"
                 else:
                     values = line.strip().split()
-                    assert_num_args('baseframe joint', len(values), 10, values)
+
+                    # Auto-detect old (10 tokens) vs new (15 tokens) format
+                    has_scale = len(values) == 15
+
+                    if has_scale:
+                        assert_num_args('baseframe joint', len(values), 15, values)
+                    else:
+                        assert_num_args('baseframe joint', len(values), 10, values)
 
                     if values[0] != '(':
                         raise MD5FormatError(f"Unexpected token 0 for baseframe': {values}")
@@ -585,7 +592,16 @@ def parse_md5anim(input_file):
                     if values[9] != ')':
                         raise MD5FormatError(f"Unexpected token 9 for baseframe': {values}")
 
-                    baseframe.append(Joint("", -1, pos, q_orient))
+                    if has_scale:
+                        if values[10] != '(':
+                            raise MD5FormatError(f"Unexpected token 10 for baseframe': {values}")
+                        scale = Vector(float(values[11]), float(values[12]), float(values[13]))
+                        if values[14] != ')':
+                            raise MD5FormatError(f"Unexpected token 14 for baseframe': {values}")
+                    else:
+                        scale = Vector(1.0, 1.0, 1.0)
+
+                    baseframe.append(Joint("", -1, pos, q_orient, scale))
 
             elif mode == "frame":
                 if cmd == '}':
@@ -606,31 +622,57 @@ def parse_md5anim(input_file):
                         else:
                             parent_pos = transformed_joints[parent_index].pos
                             parent_orient = transformed_joints[parent_index].orient
+                            parent_scale = transformed_joints[parent_index].scale
 
                             this_pos = joint.pos
                             this_orient = joint.orient
+                            this_scale = joint.scale
+
+                            # Apply parent scale to child position
+                            scaled_pos = Vector(
+                                this_pos.x * parent_scale.x,
+                                this_pos.y * parent_scale.y,
+                                this_pos.z * parent_scale.z)
 
                             q = parent_orient
                             qt = q.complement()
-                            q_pos_delta = q.mul(this_pos.to_q()).mul(qt)
+                            q_pos_delta = q.mul(scaled_pos.to_q()).mul(qt)
                             pos_delta = q_pos_delta.to_v3()
 
                             pos = parent_pos.add(pos_delta)
                             orient = parent_orient.mul(this_orient).normalize()
 
-                            transformed_joints.append(Joint("", -1, pos, orient))
+                            # Combine scales
+                            scale = Vector(
+                                parent_scale.x * this_scale.x,
+                                parent_scale.y * this_scale.y,
+                                parent_scale.z * this_scale.z)
+
+                            transformed_joints.append(Joint("", -1, pos, orient, scale))
 
                     frames[frame_index] = transformed_joints
                 else:
                     values = line.strip().split()
-                    assert_num_args('frame joint', len(values), 6, values)
+
+                    # Auto-detect old (6 values) vs new (9 values) format
+                    has_scale = len(values) == 9
+
+                    if has_scale:
+                        assert_num_args('frame joint', len(values), 9, values)
+                    else:
+                        assert_num_args('frame joint', len(values), 6, values)
 
                     pos = Vector(float(values[0]), float(values[1]), float(values[2]))
 
                     orient = (float(values[3]), float(values[4]), float(values[5]))
                     q_orient = quaternion_fill_incomplete_w(orient)
 
-                    joints.append(Joint("", -1, pos, q_orient))
+                    if has_scale:
+                        scale = Vector(float(values[6]), float(values[7]), float(values[8]))
+                    else:
+                        scale = Vector(1.0, 1.0, 1.0)
+
+                    joints.append(Joint("", -1, pos, q_orient, scale))
 
         if mode != "root":
             raise MD5FormatError("Unexpected end of file (expected '}')")
@@ -647,10 +689,21 @@ def parse_md5anim(input_file):
 
 def save_animation(frames, output_file, blender_fix):
 
-    version = 1
     num_frames = len(frames)
     num_bones = len(frames[0])
 
+    # Auto-detect whether any joint uses non-unit scale
+    needs_scale = False
+    for joints in frames:
+        for joint in joints:
+            s = joint.scale
+            if abs(s.x - 1.0) > 1e-6 or abs(s.y - 1.0) > 1e-6 or abs(s.z - 1.0) > 1e-6:
+                needs_scale = True
+                break
+        if needs_scale:
+            break
+
+    version = 2 if needs_scale else 1
     u32_array = [version, num_frames, num_bones]
 
     for joints in frames:
@@ -660,6 +713,7 @@ def save_animation(frames, output_file, blender_fix):
         for joint in joints:
             this_pos = joint.pos
             this_orient = joint.orient
+            this_scale = joint.scale
 
             if blender_fix:
                 # It is needed to rotate all bones because all bones have
@@ -668,6 +722,7 @@ def save_animation(frames, output_file, blender_fix):
                 q_rot = Quaternion(0.7071068, -0.7071068, 0, 0)
                 this_orient = q_rot.mul(this_orient)
                 this_pos = Vector(this_pos.x, this_pos.z, -this_pos.y)
+                this_scale = Vector(this_scale.x, this_scale.z, this_scale.y)
 
             pos = [float_to_f32(this_pos.x), float_to_f32(this_pos.y),
                    float_to_f32(this_pos.z)]
@@ -676,6 +731,11 @@ def save_animation(frames, output_file, blender_fix):
 
             u32_array.extend(pos)
             u32_array.extend(orient)
+
+            if needs_scale:
+                scale = [float_to_f32(this_scale.x), float_to_f32(this_scale.y),
+                         float_to_f32(this_scale.z)]
+                u32_array.extend(scale)
 
     with open(output_file, "wb") as f:
         for u32 in u32_array:
@@ -1219,11 +1279,11 @@ def save_bone_collision(joints, collision_bones, output_path, blender_fix):
 
 
 def convert_md5anim(name, output_folder, anim_file, skip_frames, extension_anim,
-                    blender_fix):
+                    blender_fix, old_md5=False):
 
     print(f"Converting animation: {anim_file}")
 
-    frames = parse_md5anim(anim_file)
+    frames = parse_md5anim(anim_file, old_md5=old_md5)
 
     # Create name of animation based on file name
     file_basename = os.path.basename(anim_file).replace(".md5anim", "")
@@ -1285,6 +1345,10 @@ if __name__ == "__main__":
                         action='store_true',
                         help="output DLMM format with per-mesh materials "
                              "(texture sizes auto-detected from shader images)")
+    parser.add_argument("--old-md5", required=False,
+                        action='store_true',
+                        help="parse old MD5 format without per-bone scale "
+                             "(6 values per joint instead of 9)")
     parser.add_argument("--collision", required=False, type=str, default=None,
                         help="path to .md5collimesh file for per-bone collision "
                              "data (generates .boncol binary)")
@@ -1329,7 +1393,7 @@ if __name__ == "__main__":
 
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,
-                            extension_anim, args.blender_fix)
+                            extension_anim, args.blender_fix, args.old_md5)
 
         if args.collision is not None:
             if args.model is None:

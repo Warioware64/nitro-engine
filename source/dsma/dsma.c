@@ -2,7 +2,7 @@
 //
 // Copyright (c) 2022 Antonio Niño Díaz <antonio_nd@outlook.com>
 
-// DS Model Animation Library v0.2.0
+// DS Model Animation Library v0.3.0
 
 #include <nds.h>
 
@@ -12,21 +12,29 @@
 // Engine's functions to draw display lists instead of relying on libnds.
 #include "NEAMain.h"
 
-// Format of a joint in a DSA file.
+// Format of a joint in a DSA v1 file.
 typedef struct {
     int32_t pos[3];    // Translation (x, y, z)
     int32_t orient[4]; // Orientation (w, x, y, z)
-} dsa_joint_t;
+} dsa_joint_v1_t;
 
-#define DSA_VERSION_NUMBER 1
-
-// Format of a DSA file.
+// Format of a joint in a DSA v2 file (with per-bone scale).
 typedef struct {
-    uint32_t version;      // Version number
+    int32_t pos[3];    // Translation (x, y, z)
+    int32_t orient[4]; // Orientation (w, x, y, z)
+    int32_t scale[3];  // Scale (x, y, z)
+} dsa_joint_v2_t;
+
+#define DSA_VERSION_1 1
+#define DSA_VERSION_2 2
+
+// Format of a DSA file header (shared by v1 and v2).
+typedef struct {
+    uint32_t version;      // Version number (1 or 2)
     uint32_t num_frames;   // Frames in the file
     uint32_t num_joints;   // Joints per frame
-    dsa_joint_t joints[0]; // Array of joints
-} dsa_t;
+    // Followed by joint data (v1 or v2 depending on version)
+} dsa_header_t;
 
 // Private functions
 // =================
@@ -72,11 +80,49 @@ void matrix_mult_by_joint(const int32_t *v, const int32_t *q)
     MATRIX_MULT4x3 = v[2];
 }
 
-// Gets a pointer to the list of joints of the specified frame.
+// Generates a 4x3 matrix from quaternion, translation, and scale, then
+// multiplies the current geometry engine matrix by it.
 ITCM_CODE ARM_CODE static inline
-const dsa_joint_t *dsa_get_frame(const dsa_t *dsa, uint32_t frame)
+void matrix_mult_by_joint_scaled(const int32_t *v, const int32_t *q,
+                                 const int32_t *s)
 {
-    return &dsa->joints[frame * dsa->num_joints];
+    int32_t wx = mulf32_by_2(q[0], q[1]);
+    int32_t wy = mulf32_by_2(q[0], q[2]);
+    int32_t wz = mulf32_by_2(q[0], q[3]);
+    int32_t x2 = mulf32_by_2(q[1], q[1]);
+    int32_t xy = mulf32_by_2(q[1], q[2]);
+    int32_t xz = mulf32_by_2(q[1], q[3]);
+    int32_t y2 = mulf32_by_2(q[2], q[2]);
+    int32_t yz = mulf32_by_2(q[2], q[3]);
+    int32_t z2 = mulf32_by_2(q[3], q[3]);
+
+    // Rotation columns scaled by per-axis scale
+    MATRIX_MULT4x3 = mulf32(inttof32(1) - y2 - z2, s[0]);
+    MATRIX_MULT4x3 = mulf32(xy + wz, s[0]);
+    MATRIX_MULT4x3 = mulf32(xz - wy, s[0]);
+
+    MATRIX_MULT4x3 = mulf32(xy - wz, s[1]);
+    MATRIX_MULT4x3 = mulf32(inttof32(1) - x2 - z2, s[1]);
+    MATRIX_MULT4x3 = mulf32(yz + wx, s[1]);
+
+    MATRIX_MULT4x3 = mulf32(xz + wy, s[2]);
+    MATRIX_MULT4x3 = mulf32(yz - wx, s[2]);
+    MATRIX_MULT4x3 = mulf32(inttof32(1) - x2 - y2, s[2]);
+
+    MATRIX_MULT4x3 = v[0];
+    MATRIX_MULT4x3 = v[1];
+    MATRIX_MULT4x3 = v[2];
+}
+
+// Gets a pointer to the joint data for the specified frame.
+// For v1: each joint is 7 int32s (pos[3] + orient[4])
+// For v2: each joint is 10 int32s (pos[3] + orient[4] + scale[3])
+ITCM_CODE ARM_CODE static inline
+const void *dsa_get_frame_ptr(const dsa_header_t *hdr, uint32_t frame,
+                              uint32_t joint_stride)
+{
+    const uint8_t *base = (const uint8_t *)(hdr + 1);
+    return base + frame * hdr->num_joints * joint_stride;
 }
 
 // Interpolates linearly between 'start' and 'end'. The position is a floating
@@ -118,25 +164,46 @@ void dsa_interpolate_frames(const int32_t *v_pos_1, const int32_t *q_orient_1,
     q_nlerp(q_orient_1, q_orient_2, interp, q_orient);
 }
 
+// Interpolate between two positions, two orientations, and two scales.
+ITCM_CODE ARM_CODE static inline
+void dsa_interpolate_frames_v2(const int32_t *v_pos_1, const int32_t *q_orient_1,
+                               const int32_t *v_scale_1,
+                               const int32_t *v_pos_2, const int32_t *q_orient_2,
+                               const int32_t *v_scale_2,
+                               uint32_t interp,
+                               int32_t *v_pos, int32_t *q_orient, int32_t *v_scale)
+{
+    v_pos[0] = lerp(v_pos_1[0], v_pos_2[0], interp);
+    v_pos[1] = lerp(v_pos_1[1], v_pos_2[1], interp);
+    v_pos[2] = lerp(v_pos_1[2], v_pos_2[2], interp);
+
+    q_nlerp(q_orient_1, q_orient_2, interp, q_orient);
+
+    v_scale[0] = lerp(v_scale_1[0], v_scale_2[0], interp);
+    v_scale[1] = lerp(v_scale_1[1], v_scale_2[1], interp);
+    v_scale[2] = lerp(v_scale_1[2], v_scale_2[2], interp);
+}
+
 // Public functions
 // ================
 
 uint32_t DSMA_GetNumFrames(const void *dsa_file)
 {
-    const dsa_t *dsa = dsa_file;
-    return dsa->num_frames;
+    const dsa_header_t *hdr = dsa_file;
+    return hdr->num_frames;
 }
 
 ITCM_CODE ARM_CODE
 int DSMA_PrepareBones(const void *dsa_file, uint32_t frame_interp)
 {
-    const dsa_t *dsa = dsa_file;
+    const dsa_header_t *hdr = dsa_file;
 
-    if (dsa->version != DSA_VERSION_NUMBER)
+    uint32_t version = hdr->version;
+    if (version != DSA_VERSION_1 && version != DSA_VERSION_2)
         return DSMA_INVALID_VERSION;
 
-    uint32_t num_joints = dsa->num_joints;
-    uint32_t num_frames = dsa->num_frames;
+    uint32_t num_joints = hdr->num_joints;
+    uint32_t num_frames = hdr->num_frames;
 
     uint32_t frame = frame_interp >> 12;
     uint32_t interp = frame_interp & 0xFFF;
@@ -161,53 +228,92 @@ int DSMA_PrepareBones(const void *dsa_file, uint32_t frame_interp)
     // Generate matrices with bone transformations
     // -------------------------------------------
 
-    if (interp != 0)
+    if (version == DSA_VERSION_2)
     {
-        uint32_t next_frame = frame + 1;
-        if (next_frame == num_frames)
-            next_frame = 0;
+        uint32_t stride = sizeof(dsa_joint_v2_t);
+        const dsa_joint_v2_t *frame_ptr_1 =
+            dsa_get_frame_ptr(hdr, frame, stride);
 
-        const dsa_joint_t *frame_ptr_1 = dsa_get_frame(dsa, frame);
-        const dsa_joint_t *frame_ptr_2 = dsa_get_frame(dsa, next_frame);
-
-        for (uint32_t i = 0; i < num_joints; i++)
+        if (interp != 0)
         {
-            int32_t v_pos[3];
-            int32_t q_orient[4];
+            uint32_t next_frame = frame + 1;
+            if (next_frame == num_frames)
+                next_frame = 0;
 
-            dsa_interpolate_frames(&frame_ptr_1->pos[0],
-                                   &frame_ptr_1->orient[0],
-                                   &frame_ptr_2->pos[0],
-                                   &frame_ptr_2->orient[0],
-                                   interp, &v_pos[0], &q_orient[0]);
-            frame_ptr_1++;
-            frame_ptr_2++;
+            const dsa_joint_v2_t *frame_ptr_2 =
+                dsa_get_frame_ptr(hdr, next_frame, stride);
 
-            // Generate new matrix
-            MATRIX_RESTORE = curr_stack_level;
-            matrix_mult_by_joint(v_pos, q_orient);
+            for (uint32_t i = 0; i < num_joints; i++)
+            {
+                int32_t v_pos[3];
+                int32_t q_orient[4];
+                int32_t v_scale[3];
 
-            // Store it in the right position in the stack
-            MATRIX_STORE = base_matrix + i;
+                dsa_interpolate_frames_v2(
+                    frame_ptr_1->pos, frame_ptr_1->orient, frame_ptr_1->scale,
+                    frame_ptr_2->pos, frame_ptr_2->orient, frame_ptr_2->scale,
+                    interp, v_pos, q_orient, v_scale);
+                frame_ptr_1++;
+                frame_ptr_2++;
+
+                MATRIX_RESTORE = curr_stack_level;
+                matrix_mult_by_joint_scaled(v_pos, q_orient, v_scale);
+                MATRIX_STORE = base_matrix + i;
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < num_joints; i++)
+            {
+                MATRIX_RESTORE = curr_stack_level;
+                matrix_mult_by_joint_scaled(frame_ptr_1->pos,
+                                            frame_ptr_1->orient,
+                                            frame_ptr_1->scale);
+                frame_ptr_1++;
+                MATRIX_STORE = base_matrix + i;
+            }
         }
     }
-    else
+    else // DSA_VERSION_1
     {
-        const dsa_joint_t *frame_ptr = dsa_get_frame(dsa, frame);
+        uint32_t stride = sizeof(dsa_joint_v1_t);
+        const dsa_joint_v1_t *frame_ptr_1 =
+            dsa_get_frame_ptr(hdr, frame, stride);
 
-        for (uint32_t i = 0; i < num_joints; i++)
+        if (interp != 0)
         {
-            // Get transformation
-            const int32_t *v_pos = frame_ptr->pos;
-            const int32_t *q_orient = frame_ptr->orient;
-            frame_ptr++;
+            uint32_t next_frame = frame + 1;
+            if (next_frame == num_frames)
+                next_frame = 0;
 
-            // Generate new matrix
-            MATRIX_RESTORE = curr_stack_level;
-            matrix_mult_by_joint(v_pos, q_orient);
+            const dsa_joint_v1_t *frame_ptr_2 =
+                dsa_get_frame_ptr(hdr, next_frame, stride);
 
-            // Store it in the right position in the stack
-            MATRIX_STORE = base_matrix + i;
+            for (uint32_t i = 0; i < num_joints; i++)
+            {
+                int32_t v_pos[3];
+                int32_t q_orient[4];
+
+                dsa_interpolate_frames(frame_ptr_1->pos, frame_ptr_1->orient,
+                                       frame_ptr_2->pos, frame_ptr_2->orient,
+                                       interp, v_pos, q_orient);
+                frame_ptr_1++;
+                frame_ptr_2++;
+
+                MATRIX_RESTORE = curr_stack_level;
+                matrix_mult_by_joint(v_pos, q_orient);
+                MATRIX_STORE = base_matrix + i;
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < num_joints; i++)
+            {
+                MATRIX_RESTORE = curr_stack_level;
+                matrix_mult_by_joint(frame_ptr_1->pos, frame_ptr_1->orient);
+                frame_ptr_1++;
+                MATRIX_STORE = base_matrix + i;
+            }
         }
     }
 
@@ -237,22 +343,24 @@ int DSMA_PrepareBonesBlend(const void *dsa_file_1, uint32_t frame_interp_1,
         const void *dsa_file_2, uint32_t frame_interp_2,
         uint32_t blend)
 {
-    const dsa_t *dsa_1 = dsa_file_1;
-    const dsa_t *dsa_2 = dsa_file_2;
+    const dsa_header_t *hdr_1 = dsa_file_1;
+    const dsa_header_t *hdr_2 = dsa_file_2;
 
-    if (dsa_1->version != DSA_VERSION_NUMBER)
+    uint32_t ver_1 = hdr_1->version;
+    uint32_t ver_2 = hdr_2->version;
+
+    if (ver_1 != DSA_VERSION_1 && ver_1 != DSA_VERSION_2)
+        return DSMA_INVALID_VERSION;
+    if (ver_2 != DSA_VERSION_1 && ver_2 != DSA_VERSION_2)
         return DSMA_INVALID_VERSION;
 
-    if (dsa_2->version != DSA_VERSION_NUMBER)
-        return DSMA_INVALID_VERSION;
+    uint32_t num_joints = hdr_1->num_joints;
 
-    uint32_t num_joints = dsa_1->num_joints;
-
-    if (num_joints != dsa_2->num_joints)
+    if (num_joints != hdr_2->num_joints)
         return DSMA_INCOMPATIBLE_ANIMATIONS;
 
-    uint32_t num_frames_1 = dsa_1->num_frames;
-    uint32_t num_frames_2 = dsa_2->num_frames;
+    uint32_t num_frames_1 = hdr_1->num_frames;
+    uint32_t num_frames_2 = hdr_2->num_frames;
 
     uint32_t frame_1 = frame_interp_1 >> 12;
     uint32_t interp_1 = frame_interp_1 & 0xFFF;
@@ -294,49 +402,101 @@ int DSMA_PrepareBonesBlend(const void *dsa_file_1, uint32_t frame_interp_1,
     if (next_frame_2 == num_frames_2)
         next_frame_2 = 0;
 
-    const dsa_joint_t *frame_1_ptr_1 = dsa_get_frame(dsa_1, frame_1);
-    const dsa_joint_t *frame_1_ptr_2 = dsa_get_frame(dsa_1, next_frame_1);
+    // Use v2 path if either animation has scale data
+    bool use_scale = (ver_1 == DSA_VERSION_2) || (ver_2 == DSA_VERSION_2);
 
-    const dsa_joint_t *frame_2_ptr_1 = dsa_get_frame(dsa_2, frame_2);
-    const dsa_joint_t *frame_2_ptr_2 = dsa_get_frame(dsa_2, next_frame_2);
-
-    for (uint32_t i = 0; i < num_joints; i++)
+    if (use_scale)
     {
-        int32_t v_pos_1[3];
-        int32_t q_orient_1[4];
+        // Default scale for v1 joints: 1.0 in f32
+        static const int32_t unit_scale[3] = {
+            1 << 12, 1 << 12, 1 << 12
+        };
 
-        dsa_interpolate_frames(&frame_1_ptr_1->pos[0],
-                               &frame_1_ptr_1->orient[0],
-                               &frame_1_ptr_2->pos[0],
-                               &frame_1_ptr_2->orient[0],
-                               interp_1, &v_pos_1[0], &q_orient_1[0]);
-        frame_1_ptr_1++;
-        frame_1_ptr_2++;
+        uint32_t stride_1 = (ver_1 == DSA_VERSION_2)
+            ? sizeof(dsa_joint_v2_t) : sizeof(dsa_joint_v1_t);
+        uint32_t stride_2 = (ver_2 == DSA_VERSION_2)
+            ? sizeof(dsa_joint_v2_t) : sizeof(dsa_joint_v1_t);
 
-        int32_t v_pos_2[3];
-        int32_t q_orient_2[4];
+        const uint8_t *f1_p1 = dsa_get_frame_ptr(hdr_1, frame_1, stride_1);
+        const uint8_t *f1_p2 = dsa_get_frame_ptr(hdr_1, next_frame_1, stride_1);
+        const uint8_t *f2_p1 = dsa_get_frame_ptr(hdr_2, frame_2, stride_2);
+        const uint8_t *f2_p2 = dsa_get_frame_ptr(hdr_2, next_frame_2, stride_2);
 
-        dsa_interpolate_frames(&frame_2_ptr_1->pos[0],
-                               &frame_2_ptr_1->orient[0],
-                               &frame_2_ptr_2->pos[0],
-                               &frame_2_ptr_2->orient[0],
-                               interp_2, &v_pos_2[0], &q_orient_2[0]);
-        frame_2_ptr_1++;
-        frame_2_ptr_2++;
+        for (uint32_t i = 0; i < num_joints; i++)
+        {
+            const dsa_joint_v1_t *j1_1 = (const dsa_joint_v1_t *)f1_p1;
+            const dsa_joint_v1_t *j1_2 = (const dsa_joint_v1_t *)f1_p2;
+            const int32_t *s1_1 = (ver_1 == DSA_VERSION_2)
+                ? ((const dsa_joint_v2_t *)f1_p1)->scale : unit_scale;
+            const int32_t *s1_2 = (ver_1 == DSA_VERSION_2)
+                ? ((const dsa_joint_v2_t *)f1_p2)->scale : unit_scale;
 
-        int32_t v_pos[3];
-        int32_t q_orient[4];
+            int32_t v_pos_1[3], q_orient_1[4], v_scale_1[3];
+            dsa_interpolate_frames_v2(j1_1->pos, j1_1->orient, s1_1,
+                                      j1_2->pos, j1_2->orient, s1_2,
+                                      interp_1, v_pos_1, q_orient_1, v_scale_1);
+            f1_p1 += stride_1;
+            f1_p2 += stride_1;
 
-        dsa_interpolate_frames(&v_pos_1[0], &q_orient_1[0],
-                               &v_pos_2[0], &q_orient_2[0],
-                               blend, &v_pos[0], &q_orient[0]);
+            const dsa_joint_v1_t *j2_1 = (const dsa_joint_v1_t *)f2_p1;
+            const dsa_joint_v1_t *j2_2 = (const dsa_joint_v1_t *)f2_p2;
+            const int32_t *s2_1 = (ver_2 == DSA_VERSION_2)
+                ? ((const dsa_joint_v2_t *)f2_p1)->scale : unit_scale;
+            const int32_t *s2_2 = (ver_2 == DSA_VERSION_2)
+                ? ((const dsa_joint_v2_t *)f2_p2)->scale : unit_scale;
 
-        // Generate new matrix
-        MATRIX_RESTORE = curr_stack_level;
-        matrix_mult_by_joint(v_pos, q_orient);
+            int32_t v_pos_2[3], q_orient_2[4], v_scale_2[3];
+            dsa_interpolate_frames_v2(j2_1->pos, j2_1->orient, s2_1,
+                                      j2_2->pos, j2_2->orient, s2_2,
+                                      interp_2, v_pos_2, q_orient_2, v_scale_2);
+            f2_p1 += stride_2;
+            f2_p2 += stride_2;
 
-        // Store it in the right position in the stack
-        MATRIX_STORE = base_matrix + i;
+            int32_t v_pos[3], q_orient[4], v_scale[3];
+            dsa_interpolate_frames_v2(v_pos_1, q_orient_1, v_scale_1,
+                                      v_pos_2, q_orient_2, v_scale_2,
+                                      blend, v_pos, q_orient, v_scale);
+
+            MATRIX_RESTORE = curr_stack_level;
+            matrix_mult_by_joint_scaled(v_pos, q_orient, v_scale);
+            MATRIX_STORE = base_matrix + i;
+        }
+    }
+    else
+    {
+        // Both v1 — original fast path, no scale
+        uint32_t stride = sizeof(dsa_joint_v1_t);
+
+        const dsa_joint_v1_t *f1_p1 = dsa_get_frame_ptr(hdr_1, frame_1, stride);
+        const dsa_joint_v1_t *f1_p2 = dsa_get_frame_ptr(hdr_1, next_frame_1, stride);
+        const dsa_joint_v1_t *f2_p1 = dsa_get_frame_ptr(hdr_2, frame_2, stride);
+        const dsa_joint_v1_t *f2_p2 = dsa_get_frame_ptr(hdr_2, next_frame_2, stride);
+
+        for (uint32_t i = 0; i < num_joints; i++)
+        {
+            int32_t v_pos_1[3], q_orient_1[4];
+            dsa_interpolate_frames(f1_p1->pos, f1_p1->orient,
+                                   f1_p2->pos, f1_p2->orient,
+                                   interp_1, v_pos_1, q_orient_1);
+            f1_p1++;
+            f1_p2++;
+
+            int32_t v_pos_2[3], q_orient_2[4];
+            dsa_interpolate_frames(f2_p1->pos, f2_p1->orient,
+                                   f2_p2->pos, f2_p2->orient,
+                                   interp_2, v_pos_2, q_orient_2);
+            f2_p1++;
+            f2_p2++;
+
+            int32_t v_pos[3], q_orient[4];
+            dsa_interpolate_frames(v_pos_1, q_orient_1,
+                                   v_pos_2, q_orient_2,
+                                   blend, v_pos, q_orient);
+
+            MATRIX_RESTORE = curr_stack_level;
+            matrix_mult_by_joint(v_pos, q_orient);
+            MATRIX_STORE = base_matrix + i;
+        }
     }
 
     return DSMA_SUCCESS;

@@ -2705,9 +2705,9 @@ def make_hierarchy_block(bones, boneIndexLookup):
             parentIndex = boneIndexLookup[b.parent.name]
         else:
             parentIndex = -1
-        block.append("  \"{}\" {} 63 {} //\n".format(
+        block.append("  \"{}\" {} 511 {} //\n".format(
             b.name, parentIndex, xformIndex))
-        xformIndex += 6
+        xformIndex += 9
     block.append("}\n")
     block.append("\n")
     return block
@@ -2729,8 +2729,10 @@ def make_baseframe_block(bones, correctionMatrix):
             bMatrix = correctionMatrix @ objSpaceMatrix
         xPos, yPos, zPos = bMatrix.translation
         xOrient, yOrient, zOrient = (-bMatrix.to_quaternion()).normalized()[1:]
-        block.append("  ( {:.10f} {:.10f} {:.10f} ) ( {:.10f} {:.10f} {:.10f} )\n".\
-        format(xPos, yPos, zPos, xOrient, yOrient, zOrient))
+        boneScale = bMatrix.to_scale()
+        xScale, yScale, zScale = boneScale[0], boneScale[1], boneScale[2]
+        block.append("  ( {:.10f} {:.10f} {:.10f} ) ( {:.10f} {:.10f} {:.10f} ) ( {:.10f} {:.10f} {:.10f} )\n".\
+        format(xPos, yPos, zPos, xOrient, yOrient, zOrient, xScale, yScale, zScale))
     block.append("}\n")
     block.append("\n")
     return block
@@ -2947,9 +2949,12 @@ def write_md5anim(filePath, prerequisites, correctionMatrix, previewKeys, frame_
             xPos, yPos, zPos = diffMatrix.translation
             xOrient, yOrient, zOrient =\
             (-diffMatrix.to_quaternion()).normalized()[1:]
+            # Extract per-bone scale from the difference matrix
+            boneScale = diffMatrix.to_scale()
+            xScale, yScale, zScale = boneScale[0], boneScale[1], boneScale[2]
             frameBlock.append(\
-            "  {:.10f} {:.10f} {:.10f} {:.10f} {:.10f} {:.10f}\n".\
-            format(xPos, yPos, zPos, xOrient, yOrient, zOrient))
+            "  {:.10f} {:.10f} {:.10f} {:.10f} {:.10f} {:.10f} {:.10f} {:.10f} {:.10f}\n".\
+            format(xPos, yPos, zPos, xOrient, yOrient, zOrient, xScale, yScale, zScale))
         frameBlock.append("}\n")
         frameBlock.append("\n")
         frames.extend(frameBlock)
@@ -2965,7 +2970,7 @@ def write_md5anim(filePath, prerequisites, correctionMatrix, previewKeys, frame_
     lines.append("numFrames " + str(endFrame - startFrame + 1) + "\n")
     lines.append("numJoints " + str(numJoints) + "\n")
     lines.append("frameRate " + str(bpy.context.scene.render.fps) + "\n")
-    lines.append("numAnimatedComponents " + str(numJoints * 6) + "\n")
+    lines.append("numAnimatedComponents " + str(numJoints * 9) + "\n")
     lines.append("\n")
     for chunk in [hierarchy, bounds, baseframe, frames]:
         lines.extend(chunk)

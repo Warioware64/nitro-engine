@@ -100,9 +100,9 @@ int NEA_AnimationLoadFAT(NEA_Animation *animation, const char *dsa_path)
 
     // Check version
     uint32_t version = pointer[0];
-    if (version != 1)
+    if (version != 1 && version != 2)
     {
-        NEA_DebugPrint("file version is %ld, it should be 1", version);
+        NEA_DebugPrint("file version is %ld, it should be 1 or 2", version);
         free(pointer);
         return 0;
     }
@@ -128,10 +128,9 @@ int NEA_AnimationLoad(NEA_Animation *animation, const void *dsa_pointer)
 
     // Check version
     uint32_t version = pointer[0];
-    if (version != 1)
+    if (version != 1 && version != 2)
     {
-        NEA_DebugPrint("file version is %ld, it should be 1", version);
-        free((void *)pointer);
+        NEA_DebugPrint("file version is %ld, it should be 1 or 2", version);
         return 0;
     }
 
