@@ -313,9 +313,13 @@ void NEA_ModelDraw(const NEA_Model *model)
 
     if (NEA_TestTouch)
     {
+        // Touch test: start async position test, skip materials, but still
+        // draw the mesh so that polygons are submitted to the GPU (needed
+        // for the vertex count check in NEA_TouchTestResult).
         PosTest_Asynch(0, 0, 0);
     }
-    else if (model->multi != NULL)
+
+    if (model->multi != NULL)
     {
         // Multi-material draw path
         // For animated models, set up bone matrices first
@@ -344,16 +348,19 @@ void NEA_ModelDraw(const NEA_Model *model)
         for (int i = 0; i < model->multi->num_submeshes; i++)
         {
             NEA_SubMesh *sub = &model->multi->submeshes[i];
-            if (sub->material != NULL)
+            if (!NEA_TestTouch)
             {
-                NEA_MaterialUse(sub->material);
-            }
-            else
-            {
-                GFX_DIFFUSE_AMBIENT = sub->diffuse_ambient;
-                GFX_SPECULAR_EMISSION = sub->specular_emission;
-                GFX_COLOR = sub->color;
-                GFX_TEX_FORMAT = 0;
+                if (sub->material != NULL)
+                {
+                    NEA_MaterialUse(sub->material);
+                }
+                else
+                {
+                    GFX_DIFFUSE_AMBIENT = sub->diffuse_ambient;
+                    GFX_SPECULAR_EMISSION = sub->specular_emission;
+                    GFX_COLOR = sub->color;
+                    GFX_TEX_FORMAT = 0;
+                }
             }
             NEA_DisplayListDrawDefault(sub->dl_data);
         }
@@ -363,10 +370,9 @@ void NEA_ModelDraw(const NEA_Model *model)
     }
     else
     {
-        // Single-material path — if the model has a material, apply it.
-        // If NULL, skip so external material setup (e.g. NEA_AnimMatApply)
-        // is preserved.
-        if (model->texture != NULL)
+        // Single-material path — skip material setup during touch test
+        // or if texture is NULL (preserves external setup like NEA_AnimMatApply).
+        if (!NEA_TestTouch && model->texture != NULL)
             NEA_MaterialUse(model->texture);
 
         ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
