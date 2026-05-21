@@ -208,47 +208,29 @@ void NEA_MaterialColorDelete(NEA_Material *tex)
     tex->color = NEA_White;
 }
 
-int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
-                          NEA_TextureFlags flags, const char *path)
+#ifdef NEA_BLOCKSDS
+// Applies the data decoded from a GRF file to a material (and palette). The
+// decoded buffers (gfxDst, pidxDst, palDst) are not freed by this function.
+//
+// This is shared by NEA_MaterialTexLoadGRF() (synchronous, decodes with
+// grfLoadPath()) and the asynchronous GRF loader (decodes with grfLoadMemEx()
+// in the worker thread).
+static int ne_grf_apply(NEA_Material *tex, NEA_Palette *pal,
+                        NEA_TextureFlags flags, const GRFHeader *header,
+                        void *gfxDst, void *pidxDst,
+                        void *palDst, size_t palSize)
 {
-#ifndef NEA_BLOCKSDS
-    (void)tex;
-    (void)pal;
-    (void)flags;
-    (void)path;
-    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
-    return 0;
-#else // NEA_BLOCKSDS
-    NEA_AssertPointer(tex, "NULL material pointer");
-    NEA_AssertPointer(path, "NULL path pointer");
-
-    int ret = 0;
-
-    void *gfxDst = NULL;
-    void *pidxDst = NULL;
-    void *palDst = NULL;
-    size_t palSize = 0;
-
-    GRFHeader header = { 0 };
-    GRFError err = grfLoadPath(path, &header, &gfxDst, NULL, &pidxDst, NULL,
-                               &palDst, &palSize);
-    if (err != GRF_NO_ERROR)
-    {
-        NEA_DebugPrint("Couldn't load GRF file: %d", err);
-        goto cleanup;
-    }
-
-    if (header.flags & GRF_FLAG_COLOR0_TRANSPARENT)
+    if (header->flags & GRF_FLAG_COLOR0_TRANSPARENT)
         flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
 
     if (gfxDst == NULL)
     {
         NEA_DebugPrint("No graphics found in GRF file");
-        goto cleanup;
+        return 0;
     }
 
     NEA_TextureFormat fmt;
-    switch (header.gfxAttr)
+    switch (header->gfxAttr)
     {
         case GRF_TEXFMT_A5I3:
             fmt = NEA_A5PAL8;
@@ -273,35 +255,31 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
             break;
         default:
             NEA_DebugPrint("Invalid format in GRF file");
-            goto cleanup;
+            return 0;
     }
 
-    if (header.gfxAttr == GRF_TEXFMT_4x4)
+    if (header->gfxAttr == GRF_TEXFMT_4x4)
     {
-        if (NEA_MaterialTex4x4Load(tex, header.gfxWidth, header.gfxHeight,
+        if (NEA_MaterialTex4x4Load(tex, header->gfxWidth, header->gfxHeight,
                            flags, gfxDst, pidxDst) == 0)
         {
             NEA_DebugPrint("Failed to load GRF texture");
-            goto cleanup;
+            return 0;
         }
     }
     else
     {
-        if (NEA_MaterialTexLoad(tex, fmt, header.gfxWidth, header.gfxHeight,
+        if (NEA_MaterialTexLoad(tex, fmt, header->gfxWidth, header->gfxHeight,
                             flags, gfxDst) == 0)
         {
             NEA_DebugPrint("Failed to load GRF texture");
-            goto cleanup;
+            return 0;
         }
     }
 
-
     // If there is no palette to be loaded there is nothing else to do
     if (palDst == NULL)
-    {
-        ret = 1; // Success
-        goto cleanup;
-    }
+        return 1; // Success
 
     // There is a palette to load.
 
@@ -322,7 +300,7 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
         if (pal == NULL)
         {
             NEA_DebugPrint("Not enough memory for palette object");
-            goto cleanup;
+            return 0;
         }
     }
 
@@ -331,7 +309,7 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
         NEA_DebugPrint("Failed to load GRF palette");
         if (create_palette)
             NEA_PaletteDelete(pal);
-        goto cleanup;
+        return 0;
     }
 
     NEA_MaterialSetPalette(tex, pal);
@@ -339,9 +317,44 @@ int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
     if (create_palette)
         NEA_MaterialAutodeletePalette(tex);
 
-    ret = 1; // Success
+    return 1; // Success
+}
+#endif // NEA_BLOCKSDS
 
-cleanup:
+int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
+                          NEA_TextureFlags flags, const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)tex;
+    (void)pal;
+    (void)flags;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return 0;
+#else // NEA_BLOCKSDS
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    void *gfxDst = NULL;
+    void *pidxDst = NULL;
+    void *palDst = NULL;
+    size_t palSize = 0;
+
+    GRFHeader header = { 0 };
+    GRFError err = grfLoadPath(path, &header, &gfxDst, NULL, &pidxDst, NULL,
+                               &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
+        free(gfxDst);
+        free(pidxDst);
+        free(palDst);
+        return 0;
+    }
+
+    int ret = ne_grf_apply(tex, pal, flags, &header, gfxDst, pidxDst,
+                           palDst, palSize);
+
     free(gfxDst);
     free(pidxDst);
     free(palDst);
@@ -401,6 +414,245 @@ int NEA_MaterialTex4x4LoadFAT(NEA_Material *tex, int sizeX, int sizeY,
     free(texture1);
 
     return ret;
+}
+
+//--------------------------------------------------------------------------
+// Asynchronous texture loading
+//--------------------------------------------------------------------------
+
+// Parameters of an asynchronous NEA_MaterialTexLoadFATAsync() job.
+typedef struct {
+    NEA_Material *tex;
+    NEA_TextureFormat fmt;
+    int sizeX, sizeY;
+    NEA_TextureFlags flags;
+} ne_async_tex_param;
+
+// Runs on the main thread during the vertical blank: uploads the loaded data
+// to VRAM with the regular (synchronous) texture loader.
+static void ne_async_tex_finalize(NEA_AsyncFile *job)
+{
+    ne_async_tex_param *p = __NEA_AsyncParam(job);
+    char *buffer = __NEA_AsyncBuffer(job, NULL);
+
+    int ret = NEA_MaterialTexLoad(p->tex, p->fmt, p->sizeX, p->sizeY,
+                                  p->flags, buffer);
+    __NEA_AsyncSetResult(job, ret);
+}
+
+NEA_AsyncFile *NEA_MaterialTexLoadFATAsync(NEA_Material *tex,
+                NEA_TextureFormat fmt, int sizeX, int sizeY,
+                NEA_TextureFlags flags, const char *path)
+{
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
+
+    ne_async_tex_param *p = malloc(sizeof(ne_async_tex_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->tex = tex;
+    p->fmt = fmt;
+    p->sizeX = sizeX;
+    p->sizeY = sizeY;
+    p->flags = flags;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_tex_finalize,
+                                          NULL, p);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
+// Parameters of an asynchronous NEA_MaterialTex4x4LoadFATAsync() job.
+typedef struct {
+    NEA_Material *tex;
+    int sizeX, sizeY;
+    NEA_TextureFlags flags;
+    char *path1;        // Path of the second file (owned, freed after read)
+    void *texture1;     // Contents of the second file (owned)
+} ne_async_tex4x4_param;
+
+// Runs in the worker thread: loads the second file of a tex4x4 texture.
+static bool ne_async_tex4x4_stage2(NEA_AsyncFile *job)
+{
+    ne_async_tex4x4_param *p = __NEA_AsyncParam(job);
+
+    p->texture1 = NEA_FATLoadData(p->path1);
+    free(p->path1);
+    p->path1 = NULL;
+
+    if (p->texture1 == NULL)
+    {
+        NEA_DebugPrint("Couldn't load second tex4x4 file");
+        return false;
+    }
+
+    return true;
+}
+
+static void ne_async_tex4x4_finalize(NEA_AsyncFile *job)
+{
+    ne_async_tex4x4_param *p = __NEA_AsyncParam(job);
+    char *buffer = __NEA_AsyncBuffer(job, NULL);
+
+    int ret = NEA_MaterialTex4x4Load(p->tex, p->sizeX, p->sizeY, p->flags,
+                                     buffer, p->texture1);
+    __NEA_AsyncSetResult(job, ret);
+
+    free(p->texture1);
+    p->texture1 = NULL;
+}
+
+static void ne_async_tex4x4_discard(NEA_AsyncFile *job)
+{
+    ne_async_tex4x4_param *p = __NEA_AsyncParam(job);
+    free(p->path1);
+    free(p->texture1);
+}
+
+NEA_AsyncFile *NEA_MaterialTex4x4LoadFATAsync(NEA_Material *tex,
+                int sizeX, int sizeY, NEA_TextureFlags flags,
+                const char *path02, const char *path1)
+{
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path02, "NULL path02 pointer");
+    NEA_AssertPointer(path1, "NULL path1 pointer");
+    NEA_Assert(sizeX > 0 && sizeY > 0, "Size must be positive");
+
+    ne_async_tex4x4_param *p = calloc(1, sizeof(ne_async_tex4x4_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    size_t len = strlen(path1) + 1;
+    p->path1 = malloc(len);
+    if (p->path1 == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        free(p);
+        return NULL;
+    }
+    memcpy(p->path1, path1, len);
+
+    p->tex = tex;
+    p->sizeX = sizeX;
+    p->sizeY = sizeY;
+    p->flags = flags;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path02, ne_async_tex4x4_stage2,
+                                          ne_async_tex4x4_finalize,
+                                          ne_async_tex4x4_discard, p);
+    if (job == NULL)
+    {
+        free(p->path1);
+        free(p);
+    }
+
+    return job;
+}
+
+#ifdef NEA_BLOCKSDS
+// Parameters of an asynchronous NEA_MaterialTexLoadGRFAsync() job.
+typedef struct {
+    NEA_Material *tex;
+    NEA_Palette *pal;
+    NEA_TextureFlags flags;
+    GRFHeader header;
+    void *gfxDst;       // Decoded buffers (owned)
+    void *pidxDst;
+    void *palDst;
+    size_t palSize;
+} ne_async_grf_param;
+
+// Runs in the worker thread: decodes the GRF file from the RAM buffer.
+static bool ne_async_grf_stage2(NEA_AsyncFile *job)
+{
+    ne_async_grf_param *p = __NEA_AsyncParam(job);
+    char *raw = __NEA_AsyncBuffer(job, NULL);
+
+    GRFError err = grfLoadMemEx(raw, &p->header,
+                                &p->gfxDst, NULL, &p->pidxDst, NULL,
+                                &p->palDst, &p->palSize, NULL, NULL,
+                                NULL, NULL);
+
+    // The raw GRF file isn't needed once it has been decoded.
+    __NEA_AsyncFreeBuffer(job);
+
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't decode GRF file: %d", err);
+        return false;
+    }
+
+    return true;
+}
+
+static void ne_async_grf_finalize(NEA_AsyncFile *job)
+{
+    ne_async_grf_param *p = __NEA_AsyncParam(job);
+
+    int ret = ne_grf_apply(p->tex, p->pal, p->flags, &p->header,
+                           p->gfxDst, p->pidxDst, p->palDst, p->palSize);
+    __NEA_AsyncSetResult(job, ret);
+
+    free(p->gfxDst);
+    free(p->pidxDst);
+    free(p->palDst);
+    p->gfxDst = NULL;
+    p->pidxDst = NULL;
+    p->palDst = NULL;
+}
+
+static void ne_async_grf_discard(NEA_AsyncFile *job)
+{
+    ne_async_grf_param *p = __NEA_AsyncParam(job);
+    free(p->gfxDst);
+    free(p->pidxDst);
+    free(p->palDst);
+}
+#endif // NEA_BLOCKSDS
+
+NEA_AsyncFile *NEA_MaterialTexLoadGRFAsync(NEA_Material *tex, NEA_Palette *pal,
+                NEA_TextureFlags flags, const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)tex;
+    (void)pal;
+    (void)flags;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return NULL;
+#else // NEA_BLOCKSDS
+    NEA_AssertPointer(tex, "NULL material pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    ne_async_grf_param *p = calloc(1, sizeof(ne_async_grf_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->tex = tex;
+    p->pal = pal;
+    p->flags = flags;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, ne_async_grf_stage2,
+                                          ne_async_grf_finalize,
+                                          ne_async_grf_discard, p);
+    if (job == NULL)
+        free(p);
+
+    return job;
+#endif // NEA_BLOCKSDS
 }
 
 // This function takes as argument the size of the chunk of the compressed

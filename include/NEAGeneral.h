@@ -446,7 +446,9 @@ typedef enum {
     /// Synchronizes ARM7 rigid body physics state.
     NEA_UPDATE_RIGIDBODY = BIT(6),
     /// Flushes hardware 2D OAM data for sprites.
-    NEA_UPDATE_HW2D = BIT(7)
+    NEA_UPDATE_HW2D = BIT(7),
+    /// Advances asynchronous asset loads (calls NEA_AsyncProcess()).
+    NEA_UPDATE_ASSETS = BIT(8)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

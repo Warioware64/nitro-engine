@@ -77,21 +77,16 @@ static int ne_model_load_ram_common(NEA_Model *model, const void *pointer)
     return 1;
 }
 
-static int ne_model_load_filesystem_common(NEA_Model *model, const char *path)
+// Assigns an already-loaded mesh buffer to a model. The model takes ownership
+// of the buffer and frees it when the model is deleted.
+static int ne_model_assign_loaded_mesh(NEA_Model *model, void *pointer)
 {
-    NEA_AssertPointer(model, "NULL model pointer");
-    NEA_AssertPointer(path, "NULL path pointer");
-
     // Check if a mesh exists
     if (model->meshindex != NEA_NO_MESH)
         ne_mesh_delete(model->meshindex);
 
     int slot = ne_model_get_free_mesh_slot();
     if (slot == NEA_NO_MESH)
-        return 0;
-
-    void *pointer = NEA_FATLoadData(path);
-    if (pointer == NULL)
         return 0;
 
     model->meshindex = slot;
@@ -101,6 +96,24 @@ static int ne_model_load_filesystem_common(NEA_Model *model, const char *path)
     mesh->address = pointer;
     mesh->has_to_free = true;
     mesh->uses = 1;
+
+    return 1;
+}
+
+static int ne_model_load_filesystem_common(NEA_Model *model, const char *path)
+{
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    void *pointer = NEA_FATLoadData(path);
+    if (pointer == NULL)
+        return 0;
+
+    if (ne_model_assign_loaded_mesh(model, pointer) == 0)
+    {
+        free(pointer);
+        return 0;
+    }
 
     return 1;
 }
@@ -807,6 +820,110 @@ int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path)
         return 0;
 
     return ne_multimesh_load(model, data, true);
+}
+
+//--------------------------------------------------------------------------
+// Asynchronous model loading
+//--------------------------------------------------------------------------
+
+// Kind of model an asynchronous load targets.
+typedef enum {
+    NE_ASYNC_MESH_STATIC = 0,
+    NE_ASYNC_MESH_DSM,
+    NE_ASYNC_MESH_MULTIMESH
+} ne_async_mesh_kind;
+
+// Parameters of an asynchronous model load job.
+typedef struct {
+    NEA_Model *model;
+    ne_async_mesh_kind kind;
+} ne_async_model_param;
+
+// Runs on the main thread during the vertical blank: assigns the loaded mesh
+// data to the model. Model mesh data lives in main RAM, so there is no VRAM
+// step here; this just parses/assigns the buffer.
+static void ne_async_model_finalize(NEA_AsyncFile *job)
+{
+    ne_async_model_param *p = __NEA_AsyncParam(job);
+
+    // Take ownership of the buffer: the model frees it when it is deleted.
+    char *buffer = __NEA_AsyncTakeBuffer(job, NULL);
+    int ret = 0;
+
+    if (buffer != NULL)
+    {
+        if (p->kind == NE_ASYNC_MESH_MULTIMESH)
+        {
+            ret = ne_multimesh_load(p->model, buffer, true);
+        }
+        else
+        {
+            ret = ne_model_assign_loaded_mesh(p->model, buffer);
+            if (ret == 0)
+                free(buffer);
+        }
+    }
+
+    __NEA_AsyncSetResult(job, ret);
+}
+
+static NEA_AsyncFile *ne_model_load_async_common(NEA_Model *model,
+                                                 const char *path,
+                                                 ne_async_mesh_kind kind)
+{
+    ne_async_model_param *p = malloc(sizeof(ne_async_model_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->model = model;
+    p->kind = kind;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_model_finalize,
+                                          NULL, p);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
+NEA_AsyncFile *NEA_ModelLoadStaticMeshFATAsync(NEA_Model *model,
+                                               const char *path)
+{
+    if (!ne_model_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(model->modeltype == NEA_Static, "Not a static model");
+
+    return ne_model_load_async_common(model, path, NE_ASYNC_MESH_STATIC);
+}
+
+NEA_AsyncFile *NEA_ModelLoadDSMFATAsync(NEA_Model *model, const char *path)
+{
+    if (!ne_model_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+
+    return ne_model_load_async_common(model, path, NE_ASYNC_MESH_DSM);
+}
+
+NEA_AsyncFile *NEA_ModelLoadMultiMeshFATAsync(NEA_Model *model,
+                                              const char *path)
+{
+    if (!ne_model_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    return ne_model_load_async_common(model, path, NE_ASYNC_MESH_MULTIMESH);
 }
 
 int NEA_ModelSetSubMeshMaterial(NEA_Model *model, int submesh_index,

@@ -81,6 +81,21 @@ Features:
 - **Configurable texture palette VRAM**: ``NEA_SetTexPaletteBank()`` lets you
   choose which VRAM banks (E, F, G) back 3D texture palettes, freeing bank E
   for 2D backgrounds when needed.
+- **Asynchronous asset loading**: load files in the background using BlocksDS
+  cooperative threads, so the main loop keeps running — audio keeps streaming
+  and the scene keeps rendering — while a file is read from the filesystem.
+  This avoids the audio gaps and frame stutter caused by blocking loads. A
+  worker thread reads the file in chunks, then a finalize step (such as a
+  texture VRAM upload) runs during the vertical blank. ``NEA_FATLoadDataAsync()``
+  reads any file, with async variants for textures (``NEA_MaterialTexLoadFATAsync()``,
+  ``NEA_MaterialTex4x4LoadFATAsync()``, ``NEA_MaterialTexLoadGRFAsync()``) and
+  models (``NEA_ModelLoadStaticMeshFATAsync()``, ``NEA_ModelLoadDSMFATAsync()``,
+  ``NEA_ModelLoadMultiMeshFATAsync()``). Loads are advanced with the
+  ``NEA_UPDATE_ASSETS`` flag of ``NEA_WaitForVBL()`` or by calling
+  ``NEA_AsyncProcess()`` directly. See the ``examples/loading/async_loading``
+  example. Note: for the loading to truly overlap on DS hardware, the
+  filesystem driver must run on the ARM7 (DSi SD and cartridge NitroFS already
+  do; on a DS flashcard call ``dldiSetMode(DLDI_MODE_ARM7)``).
 
 For features not covered by NEA (e.g. advanced 2D tilemaps, scrolling engines),
 you can also use libnds directly, or a library like `NFlib

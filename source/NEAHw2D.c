@@ -15,6 +15,30 @@
 
 #define NEA_HW2D_MAX_OAM 128
 
+// BG VRAM block tracking — modeled on nflib (NF_TILEBLOCKS / NF_MAPBLOCKS).
+//
+// Each "tile block" is 16 KB (the BG_TILE_BASE / BG_BMP_BASE unit on NDS).
+// Each "map block" is 2 KB (the BG_MAP_BASE unit). 8 map blocks = 1 tile block.
+//
+// At init, the first NEA_HW2D_RESERVED_TILE_BANKS tile blocks are reserved
+// to host map data (marked with sentinel 128). Maps allocate from
+// map_blocks_*; tile / bitmap data allocate from tile_blocks_*. This
+// prevents the silent map↔tile overlap the previous "advance-by-one"
+// scheme allowed (e.g. 9 small tiled BGs, or 2 BGs with 512x512 maps).
+#define NEA_HW2D_TILE_BANKS          8 // up to 8 * 16 KB = 128 KB per engine
+#define NEA_HW2D_MAP_BANKS           8 // 8 * 2 KB = 16 KB of map region
+#define NEA_HW2D_RESERVED_TILE_BANKS 1 // first N tile blocks reserved for maps
+#define NEA_HW2D_BLOCK_FREE          0
+#define NEA_HW2D_BLOCK_MAP_RESERVED  128
+#define NEA_HW2D_BLOCK_USED          255
+
+typedef struct {
+    u8 tile_base;   // First tile block used (16 KB units)
+    u8 tile_blocks; // Number of tile blocks used
+    u8 map_base;    // First map block used (2 KB units), 0xFF if not applicable
+    u8 map_blocks;  // Number of map blocks used
+} ne_hw2d_bg_alloc_t;
+
 static struct {
     bool initialized;
     NEA_Hw2DVRAMConfig vram_config;
@@ -26,10 +50,13 @@ static struct {
     NEA_Hw2DOBJ objs_main[NEA_HW2D_MAX_OAM];
     NEA_Hw2DOBJ objs_sub[NEA_HW2D_MAX_OAM];
 
-    int tile_base_next_main;
-    int map_base_next_main;
-    int tile_base_next_sub;
-    int map_base_next_sub;
+    u8 tile_blocks_main[NEA_HW2D_TILE_BANKS];
+    u8 tile_blocks_sub[NEA_HW2D_TILE_BANKS];
+    u8 map_blocks_main[NEA_HW2D_MAP_BANKS];
+    u8 map_blocks_sub[NEA_HW2D_MAP_BANKS];
+
+    ne_hw2d_bg_alloc_t bg_alloc_main[4];
+    ne_hw2d_bg_alloc_t bg_alloc_sub[4];
 
     int next_oam_main;
     int next_oam_sub;
@@ -38,6 +65,32 @@ static struct {
     bool sub_obj_inited;
     bool main_has_bitmap;
 } ne_hw2d_state;
+
+// Find a contiguous run of `needed` blocks marked with `free_value`.
+// Returns the starting index, or -1 if none found.
+static int ne_find_contiguous(const u8 *blocks, int count, int needed,
+                               u8 free_value)
+{
+    int run_start = -1;
+    int run_len = 0;
+    for (int i = 0; i < count; i++)
+    {
+        if (blocks[i] == free_value)
+        {
+            if (run_len == 0)
+                run_start = i;
+            run_len++;
+            if (run_len >= needed)
+                return run_start;
+        }
+        else
+        {
+            run_len = 0;
+            run_start = -1;
+        }
+    }
+    return -1;
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1: System initialization
@@ -168,16 +221,63 @@ int NEA_Hw2DInit(const NEA_Hw2DVRAMConfig *config)
         videoSetModeSub(sub_mode);
     }
 
-    // Allocation layout (matching standard NDS/BlocksDS convention):
-    // Maps at low offsets (base 0+), tiles at higher offsets (base 1+ = 16KB+).
-    // This keeps map and tile data separate with no overlap.
-    ne_hw2d_state.map_base_next_main = 0;
-    ne_hw2d_state.map_base_next_sub = 0;
-    ne_hw2d_state.tile_base_next_main = 1;
-    ne_hw2d_state.tile_base_next_sub = 1;
+    // BG VRAM block allocation: mark the first
+    // NEA_HW2D_RESERVED_TILE_BANKS tile blocks as reserved for map data
+    // (sentinel 128 = the same value nflib uses for this state). Map
+    // blocks live inside that region; tile/bitmap data allocates from
+    // tile_blocks[N..].
+    for (int i = 0; i < NEA_HW2D_RESERVED_TILE_BANKS; i++)
+    {
+        ne_hw2d_state.tile_blocks_main[i] = NEA_HW2D_BLOCK_MAP_RESERVED;
+        ne_hw2d_state.tile_blocks_sub[i]  = NEA_HW2D_BLOCK_MAP_RESERVED;
+    }
+    // bg_alloc_* slots default to 0xFF (no allocation) so Delete can
+    // skip freeing for BG slots that were never created.
+    memset(ne_hw2d_state.bg_alloc_main, 0xFF,
+           sizeof(ne_hw2d_state.bg_alloc_main));
+    memset(ne_hw2d_state.bg_alloc_sub, 0xFF,
+           sizeof(ne_hw2d_state.bg_alloc_sub));
 
     ne_hw2d_state.initialized = true;
     return 0;
+}
+
+int NEA_Hw2DAutoInit(void)
+{
+    NEA_ExecutionModes mode = NEA_CurrentExecutionMode();
+    if (mode == NEA_ModeUninitialized)
+    {
+        NEA_DebugPrint("NEA_Hw2DAutoInit: 3D not initialized");
+        return -1;
+    }
+
+    NEA_Hw2DVRAMConfig cfg = { 0 };
+
+    // Sub engine: banks H (32 KB) and I (16 KB) are never used by 3D and
+    // are free unless libnds already owns the sub engine for dual-3D
+    // display (Dual3D modes route the sub LCD via banks C/D and configure
+    // sub video themselves).
+    bool sub_free = (mode != NEA_ModeDual3D)
+                 && (mode != NEA_ModeDual3D_FB)
+                 && (mode != NEA_ModeDual3D_DMA);
+    if (sub_free)
+    {
+        cfg.sub_bg = NEA_VRAM_H;
+        cfg.sub_obj = NEA_VRAM_I;
+    }
+
+    // Main engine: bank E (64 KB) is the only main-engine 2D bank reachable
+    // without displacing 3D textures (banks A-D). Only safe in single 3D
+    // mode (two-pass modes drive the main display via FIFO or BG2 capture,
+    // and dual 3D claims the main output for the 3D engine), and only if
+    // the texture palette system isn't currently using bank E.
+    if (mode == NEA_ModeSingle3D
+        && !(NEA_GetTexPaletteBank() & NEA_VRAM_E))
+    {
+        cfg.main_bg = NEA_VRAM_E;
+    }
+
+    return NEA_Hw2DInit(&cfg);
 }
 
 void NEA_Hw2DSystemEnd(void)
@@ -359,41 +459,96 @@ NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
         }
     }
 
-    // Allocate tile and map bases.
-    // Layout: maps at low offsets (growing up), tiles at higher offsets
-    // (growing up from base 1 = 16KB). This matches the standard libnds
-    // convention (e.g. mapBase=0, tileBase=1 in BlocksDS examples).
-    int tile_base, map_base;
+    // Allocate VRAM blocks for this BG using the nflib-style block-bitmap
+    // allocator. Each tile block is 16 KB (BG_TILE_BASE / BG_BMP_BASE unit);
+    // each map block is 2 KB (BG_MAP_BASE unit). Map blocks live in the
+    // tile blocks reserved at init time. find_contiguous() picks the
+    // first free run, matching nflib's first-fit behaviour.
+    u8 *tile_blocks = (engine == NEA_ENGINE_MAIN)
+                      ? ne_hw2d_state.tile_blocks_main
+                      : ne_hw2d_state.tile_blocks_sub;
+    u8 *map_blocks = (engine == NEA_ENGINE_MAIN)
+                     ? ne_hw2d_state.map_blocks_main
+                     : ne_hw2d_state.map_blocks_sub;
+    ne_hw2d_bg_alloc_t *alloc_slot = (engine == NEA_ENGINE_MAIN)
+                                     ? &ne_hw2d_state.bg_alloc_main[layer]
+                                     : &ne_hw2d_state.bg_alloc_sub[layer];
+
+    int tile_base = 0;
+    int map_base = 0;
+    int tile_blocks_needed;
+    int map_blocks_needed;
+
     if (is_bitmap)
     {
+        // Bitmap BGs occupy contiguous 16 KB units. The libnds bgInit
+        // mapBase parameter is the bitmap base for bitmap BG types
+        // (BG_BMP_BASE = 16 KB units), so we pass our tile_base index as
+        // map_base and leave tile_base = 0.
+        int bmp_bytes = width * height
+                        * ((type == NEA_HW2D_BG_BITMAP_16) ? 2 : 1);
+        tile_blocks_needed = (bmp_bytes + 16383) / 16384;
+        map_blocks_needed = 0;
+
+        int start = ne_find_contiguous(tile_blocks, NEA_HW2D_TILE_BANKS,
+                                        tile_blocks_needed,
+                                        NEA_HW2D_BLOCK_FREE);
+        if (start < 0)
+        {
+            NEA_DebugPrint("NEA_Hw2DBGCreate: out of BG VRAM (bitmap %d KB)",
+                           bmp_bytes / 1024);
+            return NULL;
+        }
+        for (int i = 0; i < tile_blocks_needed; i++)
+            tile_blocks[start + i] = NEA_HW2D_BLOCK_USED;
+
         tile_base = 0;
-        map_base = 0;
+        map_base = start;
+        alloc_slot->tile_base = start;
+        alloc_slot->tile_blocks = tile_blocks_needed;
+        alloc_slot->map_base = 0xFF;
+        alloc_slot->map_blocks = 0;
     }
     else
     {
-        // Map slot count: each SBB is 2KB, 32x32 tiles
-        int map_slots = 1;
+        // Tiled BG: 1 tile block for the tileset, plus map slots
+        // proportional to the screen size (each 32x32 quadrant = 2 KB).
+        map_blocks_needed = 1;
         if (width == 512)
-            map_slots *= 2;
+            map_blocks_needed *= 2;
         if (height == 512)
-            map_slots *= 2;
+            map_blocks_needed *= 2;
+        tile_blocks_needed = 1;
 
-        if (engine == NEA_ENGINE_MAIN)
+        int tile_start = ne_find_contiguous(tile_blocks,
+                                             NEA_HW2D_TILE_BANKS,
+                                             tile_blocks_needed,
+                                             NEA_HW2D_BLOCK_FREE);
+        if (tile_start < 0)
         {
-            map_base = ne_hw2d_state.map_base_next_main;
-            ne_hw2d_state.map_base_next_main += map_slots;
-
-            tile_base = ne_hw2d_state.tile_base_next_main;
-            ne_hw2d_state.tile_base_next_main += 1;
+            NEA_DebugPrint("NEA_Hw2DBGCreate: out of tile VRAM");
+            return NULL;
         }
-        else
+
+        int map_start = ne_find_contiguous(map_blocks, NEA_HW2D_MAP_BANKS,
+                                            map_blocks_needed,
+                                            NEA_HW2D_BLOCK_FREE);
+        if (map_start < 0)
         {
-            map_base = ne_hw2d_state.map_base_next_sub;
-            ne_hw2d_state.map_base_next_sub += map_slots;
-
-            tile_base = ne_hw2d_state.tile_base_next_sub;
-            ne_hw2d_state.tile_base_next_sub += 1;
+            NEA_DebugPrint("NEA_Hw2DBGCreate: out of map VRAM");
+            return NULL;
         }
+
+        tile_blocks[tile_start] = NEA_HW2D_BLOCK_USED;
+        for (int i = 0; i < map_blocks_needed; i++)
+            map_blocks[map_start + i] = NEA_HW2D_BLOCK_USED;
+
+        tile_base = tile_start;
+        map_base = map_start;
+        alloc_slot->tile_base = tile_start;
+        alloc_slot->tile_blocks = 1;
+        alloc_slot->map_base = map_start;
+        alloc_slot->map_blocks = map_blocks_needed;
     }
 
     int bg_id;
@@ -428,6 +583,32 @@ void NEA_Hw2DBGDelete(NEA_Hw2DBG *bg)
 {
     if (bg == NULL || !bg->used)
         return;
+
+    // Return the BG's tile and map blocks to the free pool. Without this,
+    // the allocator would treat them as used forever and repeated
+    // create/delete cycles would exhaust VRAM after a few iterations.
+    int layer = bg->layer;
+    u8 *tile_blocks = (bg->engine == NEA_ENGINE_MAIN)
+                      ? ne_hw2d_state.tile_blocks_main
+                      : ne_hw2d_state.tile_blocks_sub;
+    u8 *map_blocks = (bg->engine == NEA_ENGINE_MAIN)
+                     ? ne_hw2d_state.map_blocks_main
+                     : ne_hw2d_state.map_blocks_sub;
+    ne_hw2d_bg_alloc_t *alloc_slot = (bg->engine == NEA_ENGINE_MAIN)
+                                     ? &ne_hw2d_state.bg_alloc_main[layer]
+                                     : &ne_hw2d_state.bg_alloc_sub[layer];
+
+    if (alloc_slot->tile_base != 0xFF)
+    {
+        for (int i = 0; i < alloc_slot->tile_blocks; i++)
+            tile_blocks[alloc_slot->tile_base + i] = NEA_HW2D_BLOCK_FREE;
+    }
+    if (alloc_slot->map_base != 0xFF)
+    {
+        for (int i = 0; i < alloc_slot->map_blocks; i++)
+            map_blocks[alloc_slot->map_base + i] = NEA_HW2D_BLOCK_FREE;
+    }
+    memset(alloc_slot, 0xFF, sizeof(*alloc_slot));
 
     bgHide(bg->bg_id);
     memset(bg, 0, sizeof(*bg));
@@ -683,6 +864,107 @@ void NEA_Hw2DBGClearBitmap(NEA_Hw2DBG *bg, u32 value)
     dmaFillWords(fill, bg->gfx_ptr, total);
 }
 
+int NEA_Hw2DBGLoadGRFFAT(NEA_Hw2DBG *bg, const char *path, int palette_slot)
+{
+#ifndef NEA_BLOCKSDS
+    (void)bg;
+    (void)path;
+    (void)palette_slot;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return -1;
+#else
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(bg->used, "BG not active");
+
+    int ret = -1;
+    void *gfxDst = NULL;
+    void *mapDst = NULL;
+    void *palDst = NULL;
+    size_t gfxSize = 0;
+    size_t mapSize = 0;
+    size_t palSize = 0;
+
+    GRFHeader header = { 0 };
+    GRFError err = grfLoadPath(path, &header, &gfxDst, &gfxSize,
+                               &mapDst, &mapSize, &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
+        goto cleanup;
+    }
+
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("No graphics found in GRF file");
+        goto cleanup;
+    }
+
+    switch (bg->type)
+    {
+        case NEA_HW2D_BG_TILED_4BPP:
+            if (header.gfxAttr != 4 ||
+                (header.mapAttr != GRF_BGFMT_SBB_4BPP &&
+                 header.mapAttr != GRF_BGFMT_FLAT_4BPP))
+            {
+                NEA_DebugPrint("GRF format mismatch for tiled 4bpp BG");
+                goto cleanup;
+            }
+            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
+            if (mapDst != NULL)
+                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
+            break;
+
+        case NEA_HW2D_BG_TILED_8BPP:
+            if (header.gfxAttr != 8 ||
+                (header.mapAttr != GRF_BGFMT_SBB_8BPP &&
+                 header.mapAttr != GRF_BGFMT_AFF_8BPP &&
+                 header.mapAttr != GRF_BGFMT_FLAT_8BPP))
+            {
+                NEA_DebugPrint("GRF format mismatch for tiled 8bpp BG");
+                goto cleanup;
+            }
+            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
+            if (mapDst != NULL)
+                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
+            break;
+
+        case NEA_HW2D_BG_BITMAP_8:
+            if (header.gfxAttr != 8 || header.mapAttr != GRF_BGFMT_NO_DATA)
+            {
+                NEA_DebugPrint("GRF format mismatch for 8bpp bitmap BG");
+                goto cleanup;
+            }
+            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
+            break;
+
+        case NEA_HW2D_BG_BITMAP_16:
+            if (header.gfxAttr != 16 || header.mapAttr != GRF_BGFMT_NO_DATA)
+            {
+                NEA_DebugPrint("GRF format mismatch for 16bpp bitmap BG");
+                goto cleanup;
+            }
+            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
+            break;
+
+        default:
+            NEA_DebugPrint("Unknown BG type");
+            goto cleanup;
+    }
+
+    if (palDst != NULL)
+        NEA_Hw2DBGLoadPalette(bg, palDst, palSize / 2, palette_slot);
+
+    ret = 0;
+
+cleanup:
+    free(gfxDst);
+    free(mapDst);
+    free(palDst);
+    return ret;
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Phase 4: OBJ sprites
 // ---------------------------------------------------------------------------
@@ -872,6 +1154,61 @@ int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
     pal += slot * 16;
     memcpy(pal, data, num_colors * 2);
     return 0;
+}
+
+int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
+{
+#ifndef NEA_BLOCKSDS
+    (void)obj;
+    (void)path;
+    (void)palette_slot;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return -1;
+#else
+    NEA_AssertPointer(obj, "NULL obj");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(obj->used, "OBJ not active");
+
+    int ret = -1;
+    void *gfxDst = NULL;
+    void *palDst = NULL;
+    size_t gfxSize = 0;
+    size_t palSize = 0;
+
+    GRFHeader header = { 0 };
+    GRFError err = grfLoadPath(path, &header, &gfxDst, &gfxSize,
+                               NULL, NULL, &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
+        goto cleanup;
+    }
+
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("No graphics found in GRF file");
+        goto cleanup;
+    }
+
+    int expected_bpp = (obj->color == NEA_OBJ_COLOR_16) ? 4 : 8;
+    if (header.gfxAttr != expected_bpp)
+    {
+        NEA_DebugPrint("GRF color depth mismatch for OBJ sprite");
+        goto cleanup;
+    }
+
+    NEA_Hw2DOBJLoadGfx(obj, gfxDst, gfxSize);
+
+    if (palDst != NULL)
+        NEA_Hw2DOBJLoadPalette(obj->engine, palDst, palSize / 2, palette_slot);
+
+    ret = 0;
+
+cleanup:
+    free(gfxDst);
+    free(palDst);
+    return ret;
+#endif
 }
 
 void NEA_Hw2DOBJSetPos(NEA_Hw2DOBJ *obj, int x, int y)

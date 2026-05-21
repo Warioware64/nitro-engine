@@ -138,6 +138,30 @@ typedef struct {
 /// @return 0 on success, -1 on error (invalid config or overlap).
 int NEA_Hw2DInit(const NEA_Hw2DVRAMConfig *config);
 
+/// Auto-configure the 2D hardware pipeline based on the current 3D state.
+///
+/// Inspects the current NEA execution mode and texture-palette bank, and
+/// assigns VRAM banks to 2D that do not displace 3D textures or
+/// framebuffers. The chosen layout is:
+///
+/// - **Sub BG  -> bank H (32 KB)**: when the sub engine is free (all modes
+///   except Dual3D / Dual3D_FB / Dual3D_DMA, where libnds owns C/D for
+///   sub display).
+/// - **Sub OBJ -> bank I (16 KB)**: same condition as sub BG.
+/// - **Main BG -> bank E (64 KB)**: only in NEA_ModeSingle3D, and only if
+///   no texture-palette banks (NEA_GetTexPaletteBank()) include E.
+/// - **Main OBJ -> none**: no main-engine OBJ bank is free without
+///   displacing 3D textures.
+///
+/// Call NEA_Hw2DInit() directly with a custom NEA_Hw2DVRAMConfig if you
+/// need a richer layout (e.g. claim bank A or C for main BG after shrinking
+/// the 3D texture footprint via NEA_TextureSystemReset()).
+///
+/// Must be called after one of NEA_Init3D*().
+///
+/// @return 0 on success, -1 if 3D is not initialized.
+int NEA_Hw2DAutoInit(void);
+
 /// Shut down the 2D hardware pipeline and release all resources.
 void NEA_Hw2DSystemEnd(void);
 
@@ -236,6 +260,23 @@ int NEA_Hw2DBGLoadBitmap(NEA_Hw2DBG *bg, const void *data, size_t size);
 /// Load bitmap data from a NitroFS file.
 int NEA_Hw2DBGLoadBitmapFAT(NEA_Hw2DBG *bg, const char *path);
 
+/// Load a background from a NitroFS GRF file (BlocksDS only).
+///
+/// Loads tile graphics + map + palette (for tiled backgrounds) or pixel data +
+/// palette (for bitmap backgrounds) in a single call. Format is auto-detected
+/// from the GRF header and must match the BG's type:
+///   NEA_HW2D_BG_TILED_4BPP : gfxAttr=4, mapAttr in {SBB_4BPP, FLAT_4BPP}
+///   NEA_HW2D_BG_TILED_8BPP : gfxAttr=8, mapAttr in {SBB_8BPP, AFF_8BPP, FLAT_8BPP}
+///   NEA_HW2D_BG_BITMAP_8   : gfxAttr=8, mapAttr = NO_DATA
+///   NEA_HW2D_BG_BITMAP_16  : gfxAttr=16, mapAttr = NO_DATA
+///
+/// @param bg           Background previously created with NEA_Hw2DBGCreate().
+/// @param path         NitroFS path to the .grf file.
+/// @param palette_slot Palette slot for 4bpp backgrounds (0-15). Ignored for
+///                     8bpp/16bpp.
+/// @return 0 on success, -1 on error.
+int NEA_Hw2DBGLoadGRFFAT(NEA_Hw2DBG *bg, const char *path, int palette_slot);
+
 /// Get the raw VRAM pointer for a bitmap background.
 void *NEA_Hw2DBGGetBitmapPtr(const NEA_Hw2DBG *bg);
 
@@ -291,6 +332,23 @@ int NEA_Hw2DOBJLoadGfxFAT(NEA_Hw2DOBJ *obj, const char *path);
 /// @return 0 on success, -1 on error.
 int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
                             int num_colors, int slot);
+
+/// Load a sprite from a NitroFS GRF file (BlocksDS only).
+///
+/// Loads sprite graphics + palette in a single call. The GRF's color depth
+/// must match the OBJ's color mode:
+///   NEA_OBJ_COLOR_16  : gfxAttr = 4
+///   NEA_OBJ_COLOR_256 : gfxAttr = 8
+/// Multi-frame sprite sheets are supported: the gfx size may be a multiple of
+/// the sprite's frame size.
+///
+/// @param obj          OBJ sprite previously created with NEA_Hw2DOBJCreate().
+/// @param path         NitroFS path to the .grf file.
+/// @param palette_slot Palette slot for 16-color sprites (0-15). Ignored for
+///                     256-color sprites.
+/// @return 0 on success, -1 on error.
+int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path,
+                           int palette_slot);
 
 /// Set sprite screen position.
 void NEA_Hw2DOBJSetPos(NEA_Hw2DOBJ *obj, int x, int y);

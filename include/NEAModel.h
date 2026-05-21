@@ -394,6 +394,45 @@ int NEA_ModelLoadMultiMesh(NEA_Model *model, const void *pointer);
 /// @return 1 on success, 0 on error.
 int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path);
 
+/// Asynchronously loads a display list from a filesystem to a static model.
+///
+/// This works like NEA_ModelLoadStaticMeshFAT(), but the file is read in the
+/// background. The mesh is assigned to the model by NEA_AsyncProcess() once the
+/// data is in RAM. See @ref async for details.
+///
+/// The model must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param model Pointer to a static model.
+/// @param path Path to the display list.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_ModelLoadStaticMeshFATAsync(NEA_Model *model,
+                                               const char *path);
+
+/// Asynchronously loads a DSM file from a filesystem to an animated model.
+///
+/// This works like NEA_ModelLoadDSMFAT(), but the file is read in the
+/// background. See @ref async for details.
+///
+/// The model must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param model Pointer to an animated model.
+/// @param path Path to the file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_ModelLoadDSMFATAsync(NEA_Model *model, const char *path);
+
+/// Asynchronously loads a multi-material mesh file (DLMM) from a filesystem.
+///
+/// This works like NEA_ModelLoadMultiMeshFAT(), but the file is read in the
+/// background. See @ref async for details.
+///
+/// The model must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param model Pointer to a static model.
+/// @param path Path to the DLMM file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_ModelLoadMultiMeshFATAsync(NEA_Model *model,
+                                              const char *path);
+
 /// Assign a material to a submesh by index.
 ///
 /// @param model Pointer to the model.

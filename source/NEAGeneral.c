@@ -6,6 +6,7 @@
 
 #include <nds/arm9/background.h>
 #include <nds/arm9/postest.h>
+#include <nds/cothread.h>
 #include <nds/dma.h>
 
 #include "NEAMain.h"
@@ -67,6 +68,9 @@ void NEA_End(void)
 {
     if (ne_execution_mode == NEA_ModeUninitialized)
         return;
+
+    // Stop any background asset loading before tearing down video hardware.
+    __NEA_AsyncEnd();
 
     vramSetBankA(VRAM_A_LCD);
     vramSetBankB(VRAM_B_LCD);
@@ -1852,7 +1856,16 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
         }
     }
 
-    swiWaitForVBlank();
+    // Wait for the vertical blank yielding to other cothreads (such as the
+    // asynchronous asset loader) instead of halting the whole CPU. With no
+    // other threads running this behaves like swiWaitForVBlank().
+    cothread_yield_irq(IRQ_VBLANK);
+
+    // Run finalize steps of asynchronous loads (such as texture VRAM uploads)
+    // now, during the vertical blank, where it is safe to touch VRAM.
+    if (flags & NEA_UPDATE_ASSETS)
+        NEA_AsyncProcess();
+
     ne_cpucount = 0;
 }
 

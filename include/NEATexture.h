@@ -9,6 +9,7 @@
 
 #include <nds.h>
 
+#include "NEAFAT.h"
 #include "NEAPalette.h"
 #include "NEAPolygon.h"
 
@@ -151,6 +152,63 @@ int NEA_MaterialTex4x4LoadFAT(NEA_Material *tex, int sizeX, int sizeY,
 /// @return It returns 1 on success, 0 on error.
 int NEA_MaterialTexLoadGRF(NEA_Material *tex, NEA_Palette *pal,
                           NEA_TextureFlags flags, const char *path);
+
+/// Asynchronously loads a texture from the filesystem into a material object.
+///
+/// This works like NEA_MaterialTexLoadFAT(), but the file is read in the
+/// background. The texture is uploaded to VRAM by NEA_AsyncProcess() once the
+/// data is in RAM. See @ref async for details.
+///
+/// The material must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param tex Material.
+/// @param fmt Texture format.
+/// @param sizeX (sizeX, sizeY) Texture size.
+/// @param sizeY (sizeX, sizeY) Texture size.
+/// @param flags Parameters of the texture.
+/// @param path Path of the texture file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_MaterialTexLoadFATAsync(NEA_Material *tex,
+                NEA_TextureFormat fmt, int sizeX, int sizeY,
+                NEA_TextureFlags flags, const char *path);
+
+/// Asynchronously loads a Texel 4x4 texture from the filesystem.
+///
+/// This works like NEA_MaterialTex4x4LoadFAT(), but the files are read in the
+/// background. See @ref async for details.
+///
+/// The material must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param tex Material.
+/// @param sizeX (sizeX, sizeY) Texture size.
+/// @param sizeY (sizeX, sizeY) Texture size.
+/// @param flags Parameters of the texture.
+/// @param path02 Path of the texture file (part that goes in slot 0/2).
+/// @param path1 Path of the texture file (part that goes in slot 1).
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_MaterialTex4x4LoadFATAsync(NEA_Material *tex,
+                int sizeX, int sizeY, NEA_TextureFlags flags,
+                const char *path02, const char *path1);
+
+/// Asynchronously loads a texture from a GRF file to a material and palette.
+///
+/// This works like NEA_MaterialTexLoadGRF(), but the file is read in the
+/// background. The GRF data is decoded in the worker thread and the texture is
+/// uploaded to VRAM by NEA_AsyncProcess(). See @ref async for details.
+///
+/// Note: decoding a large compressed GRF runs as a single step in the worker
+/// thread and may cause a single dropped frame, unlike the chunked file read.
+///
+/// The material and palette must not be deleted until the load reaches
+/// NEA_ASYNC_DONE.
+///
+/// @param tex Material.
+/// @param pal Palette. If the format is 16 bit, nothing will be loaded here.
+/// @param flags Parameters of the texture.
+/// @param path Path of the GRF file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_MaterialTexLoadGRFAsync(NEA_Material *tex, NEA_Palette *pal,
+                NEA_TextureFlags flags, const char *path);
 
 /// Loads a texture from RAM and assigns it to a material object.
 ///
