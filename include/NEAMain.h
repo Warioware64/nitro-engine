@@ -52,6 +52,7 @@ extern "C" {
 #include "NEASound.h"
 #include "NEAAnimMat.h"
 #include "NEAHw2D.h"
+#include "NEAParticle.h"
 
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (2)

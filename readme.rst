@@ -96,6 +96,20 @@ Features:
   example. Note: for the loading to truly overlap on DS hardware, the
   filesystem driver must run on the ARM7 (DSi SD and cartridge NitroFS already
   do; on a DS flashcard call ``dldiSetMode(DLDI_MODE_ARM7)``).
+- **Particle system (NEAParticle / NPE)**: SPL-style particle effects in a
+  compact binary format (``.npe`` -- "Nitro Particle Entity"). Each emitter
+  owns a fixed particle pool and runs a simple physics model (initial
+  position inside a box, direction inside a cone with random speed, constant
+  gravity, per-frame drag) with key-framed RGBA color and size over each
+  particle's life. Particles draw as billboarded textured quads by default,
+  with a per-effect axis-aligned mode for waterfalls / flame planes, plus
+  sprite-sheet animation, per-particle angular velocity, and attachment to
+  a ``NEA_Model`` (the emitter follows the model's position). Pump emitters
+  with the ``NEA_UPDATE_PARTICLES`` flag of ``NEA_WaitForVBL()``. Design
+  effects visually with ``tools/npe_editor/npe_editor.py`` -- a standalone
+  tkinter editor with a live 2D preview that runs the same simulation logic
+  as the runtime. See the ``examples/effects/particles`` example for fire /
+  smoke / explosion presets.
 
 For features not covered by NEA (e.g. advanced 2D tilemaps, scrolling engines),
 you can also use libnds directly, or a library like `NFlib

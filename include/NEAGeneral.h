@@ -448,7 +448,9 @@ typedef enum {
     /// Flushes hardware 2D OAM data for sprites.
     NEA_UPDATE_HW2D = BIT(7),
     /// Advances asynchronous asset loads (calls NEA_AsyncProcess()).
-    NEA_UPDATE_ASSETS = BIT(8)
+    NEA_UPDATE_ASSETS = BIT(8),
+    /// Advances every particle emitter (calls NEA_ParticleUpdateAll()).
+    NEA_UPDATE_PARTICLES = BIT(9)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

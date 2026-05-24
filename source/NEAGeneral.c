@@ -72,6 +72,8 @@ void NEA_End(void)
     // Stop any background asset loading before tearing down video hardware.
     __NEA_AsyncEnd();
 
+    NEA_ParticleSystemEnd();
+
     vramSetBankA(VRAM_A_LCD);
     vramSetBankB(VRAM_B_LCD);
 
@@ -1865,6 +1867,10 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     // now, during the vertical blank, where it is safe to touch VRAM.
     if (flags & NEA_UPDATE_ASSETS)
         NEA_AsyncProcess();
+
+    // Advance particle emitters once per frame.
+    if (flags & NEA_UPDATE_PARTICLES)
+        NEA_ParticleUpdateAll();
 
     ne_cpucount = 0;
 }

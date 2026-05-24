@@ -5,4 +5,5 @@
 
 # Binary format generator scripts (example helpers, not for end users)
 gen_scene.py
+gen_npe.py
 gen_animmat.py
