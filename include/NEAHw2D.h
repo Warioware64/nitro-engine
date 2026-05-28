@@ -104,6 +104,9 @@ typedef struct {
     bool visible;            ///< Whether the BG is visible
 } NEA_Hw2DBG;
 
+/// Forward declaration of shared OBJ asset (see NEA_Hw2DOBJAssetCreate).
+typedef struct NEA_Hw2DOBJAsset NEA_Hw2DOBJAsset;
+
 /// Hardware OBJ sprite state.
 typedef struct {
     bool used;               ///< Whether this OBJ slot is active
@@ -122,7 +125,29 @@ typedef struct {
     int num_frames;          ///< Total animation frames
     int affine_index;        ///< Affine matrix (-1 = none)
     bool double_size;        ///< Double area for affine sprites
+    NEA_Hw2DOBJAsset *asset; ///< Shared asset (NULL if OBJ owns its gfx)
 } NEA_Hw2DOBJ;
+
+/// Shared OBJ sprite asset.
+///
+/// Holds a single VRAM gfx allocation and an optional palette slot that can
+/// be bound to many NEA_Hw2DOBJ entries. Use this when the same sprite
+/// graphic is rendered multiple times on screen (enemies, bullets, tiles):
+/// load the gfx and palette once into an asset, then point each OBJ at it
+/// via NEA_Hw2DOBJCreateFromAsset() or NEA_Hw2DOBJBindAsset(). This avoids
+/// the per-sprite duplicate gfx allocation that fragments OAM gfx memory
+/// over create/delete cycles.
+struct NEA_Hw2DOBJAsset {
+    bool used;               ///< Whether this asset slot is active
+    NEA_Hw2DEngine engine;   ///< Engine the asset lives in
+    NEA_OBJSize size;        ///< Sprite size class
+    NEA_OBJColorMode color;  ///< Color mode (16 or 256)
+    u16 *gfx;                ///< VRAM gfx pointer (owned by asset)
+    int gfx_size;            ///< Bytes per frame
+    int num_frames;          ///< Frames present in gfx (set by Load*)
+    int palette_slot;        ///< Palette slot in OBJ palette, -1 if none
+    int ref_count;           ///< Number of OBJs currently bound
+};
 
 // ---------------------------------------------------------------------------
 // System initialization
@@ -350,6 +375,76 @@ int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
 int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path,
                            int palette_slot);
 
+// ---------------------------------------------------------------------------
+// Shared OBJ assets (de-duplicated gfx + palette slot)
+// ---------------------------------------------------------------------------
+
+/// Create a shared sprite asset.
+///
+/// Allocates one sprite's worth of OAM gfx VRAM and reserves an asset slot.
+/// Palette slot allocation is deferred until a palette is loaded. The asset
+/// can then be bound to one or more NEA_Hw2DOBJ entries to share its gfx
+/// and palette slot.
+///
+/// @param engine NEA_ENGINE_MAIN or NEA_ENGINE_SUB.
+/// @param size   Sprite dimensions.
+/// @param mode   Color mode.
+/// @return Pointer to the asset, or NULL on error (pool full, gfx alloc fail).
+NEA_Hw2DOBJAsset *NEA_Hw2DOBJAssetCreate(NEA_Hw2DEngine engine,
+                                          NEA_OBJSize size,
+                                          NEA_OBJColorMode mode);
+
+/// Delete a shared asset. Fails (prints a warning, no-op) if any OBJ is still
+/// bound to it — call NEA_Hw2DOBJDelete() on the dependents first, or rebind
+/// them to another asset.
+void NEA_Hw2DOBJAssetDelete(NEA_Hw2DOBJAsset *asset);
+
+/// Load sprite graphics into an asset from RAM. Updates the asset's
+/// frame count (size / per-frame size).
+int NEA_Hw2DOBJAssetLoadGfx(NEA_Hw2DOBJAsset *asset,
+                             const void *data, size_t size);
+
+/// Load sprite graphics into an asset from a NitroFS file.
+int NEA_Hw2DOBJAssetLoadGfxFAT(NEA_Hw2DOBJAsset *asset, const char *path);
+
+/// Load palette data for an asset.
+///
+/// For 16-color assets, auto-allocates a free 16-color palette slot on the
+/// asset's engine the first time it is called, and reuses that slot on
+/// subsequent calls. For 256-color assets, always uses slot 0.
+///
+/// @param asset      Asset previously created by NEA_Hw2DOBJAssetCreate().
+/// @param data       Palette data (RGB15 colors).
+/// @param num_colors Number of colors.
+/// @return 0 on success, -1 on error (no free 16-color slot).
+int NEA_Hw2DOBJAssetLoadPalette(NEA_Hw2DOBJAsset *asset,
+                                 const void *data, int num_colors);
+
+/// Load gfx + palette into an asset from a NitroFS GRF file (BlocksDS only).
+///
+/// Color depth must match the asset's color mode. Palette slot is allocated
+/// automatically (see NEA_Hw2DOBJAssetLoadPalette).
+int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path);
+
+/// Create an OBJ that shares the asset's gfx and palette slot.
+///
+/// Unlike NEA_Hw2DOBJCreate(), this does NOT allocate a new gfx block — the
+/// returned OBJ points at the asset's gfx, and the asset's ref count is
+/// incremented. The OBJ inherits the asset's size, color mode, and palette
+/// slot. Call NEA_Hw2DOBJDelete() as usual; it will release the OBJ entry
+/// without freeing the shared gfx.
+NEA_Hw2DOBJ *NEA_Hw2DOBJCreateFromAsset(NEA_Hw2DOBJAsset *asset);
+
+/// Bind an existing OBJ to a shared asset.
+///
+/// If the OBJ previously owned its own gfx (created with NEA_Hw2DOBJCreate()),
+/// that gfx is freed back to the OAM allocator. If it was bound to a
+/// different asset, that asset's ref count is decremented. The OBJ's
+/// size and color mode must match the asset's.
+///
+/// @return 0 on success, -1 on engine / size / color mismatch.
+int NEA_Hw2DOBJBindAsset(NEA_Hw2DOBJ *obj, NEA_Hw2DOBJAsset *asset);
+
 /// Set sprite screen position.
 void NEA_Hw2DOBJSetPos(NEA_Hw2DOBJ *obj, int x, int y);
 
@@ -393,14 +488,20 @@ void NEA_Hw2DOBJUpdateAll(void);
 // Text rendering on bitmap backgrounds
 // ---------------------------------------------------------------------------
 
-/// Render text onto a 16bpp bitmap background using a rich text font slot.
+/// Render text onto a bitmap background using a rich text font slot.
 ///
 /// The rich text slot must have been initialized with font metadata and a
 /// bitmap loaded to RAM (via NEA_RichTextBitmapLoadGRF or
-/// NEA_RichTextBitmapSet). The font must use GL_RGBA (A1RGB5) format for
-/// correct rendering on 16bpp bitmap backgrounds.
+/// NEA_RichTextBitmapSet). The font's texture format must match the BG type:
+///   NEA_HW2D_BG_BITMAP_16 needs an A1RGB5 (NEA_A1RGB5) font;
+///   NEA_HW2D_BG_BITMAP_8  needs a PAL256 (NEA_PAL256) font, and the font
+///   palette must already be loaded into BG_PALETTE / BG_PALETTE_SUB.
 ///
-/// @param bg   16bpp bitmap background (NEA_HW2D_BG_BITMAP_16).
+/// One-shot rendering: each call lays the whole string down at (x, y) with
+/// libdsf's default canvas (the full BG) and default settings (word wrap on).
+/// For typewriter / stateful canvas / cursor control, use NEA_Hw2DTextCtx*.
+///
+/// @param bg   8bpp or 16bpp bitmap background.
 /// @param slot Rich text font slot (previously set up via NEA_RichText*).
 /// @param str  Null-terminated UTF-8 string to render.
 /// @param x    X position in pixels on the background.
@@ -408,6 +509,140 @@ void NEA_Hw2DOBJUpdateAll(void);
 /// @return 0 on success, -1 on error.
 int NEA_Hw2DTextRender(NEA_Hw2DBG *bg, u32 slot, const char *str,
                         int x, int y);
+
+// ---------------------------------------------------------------------------
+// Persistent text context (stateful canvas / cursor / typewriter)
+// ---------------------------------------------------------------------------
+
+/// Opaque handle for a persistent text rendering context.
+typedef struct NEA_Hw2DTextCtx NEA_Hw2DTextCtx;
+
+/// Behaviour when text reaches the right edge of the canvas.
+typedef enum {
+    NEA_HW2D_TEXT_RIGHT_WRAP  = 0, ///< Glyph wraps to the next line (default).
+    NEA_HW2D_TEXT_RIGHT_TRIM  = 1, ///< Glyph is clipped; full overflow = full.
+    NEA_HW2D_TEXT_RIGHT_ERROR = 2  ///< Any partial fit = full.
+} NEA_Hw2DTextRightMode;
+
+/// Behaviour when text reaches the bottom edge of the canvas.
+typedef enum {
+    NEA_HW2D_TEXT_BOTTOM_TRIM  = 0, ///< Glyph is clipped (default).
+    NEA_HW2D_TEXT_BOTTOM_ERROR = 1  ///< Any partial fit = full.
+} NEA_Hw2DTextBottomMode;
+
+/// Create a persistent text context attached to a bitmap background.
+///
+/// The context wraps a libdsf renderer aimed at `bg->gfx_ptr` with a
+/// clipping canvas. The newly-created ctx has no font yet — call
+/// NEA_Hw2DTextCtxMetadataLoad* and NEA_Hw2DTextCtxBitmap* before printing.
+/// Multiple contexts can target the same BG.
+///
+/// @param bg 8bpp or 16bpp bitmap BG. The font loaded afterward must match:
+///           BITMAP_16 → A1RGB5 (16bpp), BITMAP_8 → PAL256 (8bpp).
+/// @return Pointer to the context, or NULL on error.
+NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg);
+
+/// Release a text context.
+///
+/// Frees the libdsf renderer, any font handle the ctx owns (loaded via
+/// NEA_Hw2DTextCtxMetadataLoad*), and any bitmap/palette buffers the ctx
+/// owns (loaded via NEA_Hw2DTextCtxBitmapLoadGRF). Does not touch buffers
+/// passed in via NEA_Hw2DTextCtxBitmapSet — the caller still owns those.
+void NEA_Hw2DTextCtxDelete(NEA_Hw2DTextCtx *ctx);
+
+/// Load BMFont metadata (.fnt binary) from RAM into the ctx.
+///
+/// The ctx takes ownership of the resulting dsf font handle and will free
+/// it on Delete. Calling this again on the same ctx replaces (and frees)
+/// the previous font.
+int NEA_Hw2DTextCtxMetadataLoadMemory(NEA_Hw2DTextCtx *ctx,
+                                       const void *data, size_t size);
+
+/// Load BMFont metadata (.fnt binary) from the filesystem (NitroFS / FAT).
+int NEA_Hw2DTextCtxMetadataLoadFAT(NEA_Hw2DTextCtx *ctx, const char *path);
+
+/// Attach a font texture (and optional palette) from RAM to the ctx.
+///
+/// The format is fixed by the BG: BITMAP_16 expects an A1RGB5 texture and
+/// ignores the palette; BITMAP_8 expects a PAL256 texture and copies the
+/// palette into the engine's BG palette (BG_PALETTE / BG_PALETTE_SUB)
+/// starting at slot 0. The caller retains ownership of these buffers.
+///
+/// @param texture        Font bitmap (must outlive the ctx).
+/// @param width,height   Font texture dimensions in pixels.
+/// @param palette        Palette data, or NULL for 16bpp BGs.
+/// @param palette_bytes  Palette byte count (ignored if palette is NULL).
+/// @return 0 on success, -1 on error.
+int NEA_Hw2DTextCtxBitmapSet(NEA_Hw2DTextCtx *ctx,
+                              const void *texture,
+                              size_t width, size_t height,
+                              const void *palette, size_t palette_bytes);
+
+/// Load a font bitmap (and palette) from a GRF file into the ctx.
+///
+/// The GRF's gfxAttr must match the ctx's BG: 16 for BITMAP_16, 8 for
+/// BITMAP_8 (which also requires the GRF to carry a palette). The ctx takes
+/// ownership of the malloc'd texture/palette buffers and frees them on
+/// Delete. The palette is copied into the engine's BG palette automatically
+/// for 8bpp BGs. BlocksDS only.
+int NEA_Hw2DTextCtxBitmapLoadGRF(NEA_Hw2DTextCtx *ctx, const char *path);
+
+/// Set the clipping rectangle in BG-pixel coordinates. Text only writes
+/// inside this box; the cursor wraps and clears within it.
+int NEA_Hw2DTextCtxSetCanvas(NEA_Hw2DTextCtx *ctx, int left, int top,
+                              int right, int bottom);
+
+/// Wipe the canvas region in VRAM (writes 0 = transparent for both
+/// supported formats) and reset the renderer cursor to the canvas top-left.
+int NEA_Hw2DTextCtxClear(NEA_Hw2DTextCtx *ctx);
+
+/// Configure what happens when text would overflow the canvas edges.
+int NEA_Hw2DTextCtxSetOverflow(NEA_Hw2DTextCtx *ctx,
+                                NEA_Hw2DTextRightMode right_mode,
+                                NEA_Hw2DTextBottomMode bottom_mode);
+
+/// Enable or disable word wrapping. Separators is a 0-terminated codepoint
+/// array, or NULL for the libdsf default (space, newline, tab).
+int NEA_Hw2DTextCtxSetWordWrap(NEA_Hw2DTextCtx *ctx, bool enabled,
+                                const uint32_t *separators);
+
+/// Read or write the cursor position (BG-pixel coordinates).
+int NEA_Hw2DTextCtxCursorGet(NEA_Hw2DTextCtx *ctx, int *x, int *y);
+int NEA_Hw2DTextCtxCursorSet(NEA_Hw2DTextCtx *ctx, int x, int y);
+
+/// Read the bounding box that has been actually written to since the last
+/// canvas clear (useful for laying out balloons / underlines / cursors).
+int NEA_Hw2DTextCtxUsedBoxGet(NEA_Hw2DTextCtx *ctx,
+                               int16_t *left, int16_t *top,
+                               int16_t *right, int16_t *bottom);
+
+/// Print a UTF-8 string at the current cursor.
+///
+/// @return 0 on success, -1 on libdsf error, +1 if the canvas filled up
+///         mid-string (further glyphs were dropped). Treat +1 as a normal
+///         "done" condition for typewriter loops.
+int NEA_Hw2DTextCtxPrint(NEA_Hw2DTextCtx *ctx, const char *str);
+
+/// Print up to *characters codepoints. *characters and *str are advanced
+/// past the printed portion — pass the same variables back on the next call
+/// to continue. Suitable for character-per-frame typewriter effects.
+///
+/// @return 0 on success, -1 on libdsf error, +1 if the canvas filled up.
+int NEA_Hw2DTextCtxPrintLength(NEA_Hw2DTextCtx *ctx, size_t *characters,
+                                const char **str);
+
+/// Print a single codepoint at the current cursor.
+int NEA_Hw2DTextCtxPrintCodepoint(NEA_Hw2DTextCtx *ctx, uint32_t codepoint);
+
+/// Print a printf-style formatted string at the current cursor.
+///
+/// The formatted output is built with vasprintf and then rendered with the
+/// same path as NEA_Hw2DTextCtxPrint, so word wrap / canvas / cursor /
+/// overflow settings all apply.
+///
+/// @return 0 on success, -1 on error, +1 if the canvas filled up mid-string.
+int NEA_Hw2DTextCtxPrintf(NEA_Hw2DTextCtx *ctx, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 /// @}
 

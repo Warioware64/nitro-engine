@@ -4,6 +4,8 @@
 //
 // This file is part of Nitro Engine Advanced
 
+#include <stdarg.h>
+
 #include "NEAMain.h"
 #include "dsf.h"
 
@@ -13,7 +15,23 @@
 // Internal state
 // ---------------------------------------------------------------------------
 
-#define NEA_HW2D_MAX_OAM 128
+#define NEA_HW2D_MAX_OAM      128
+#define NEA_HW2D_MAX_ASSETS   32
+#define NEA_HW2D_MAX_TEXT_CTX 8
+
+struct NEA_Hw2DTextCtx {
+    bool used;
+    dsf_renderer renderer;
+    dsf_handle font_handle;          // 0 if no metadata loaded yet
+    bool owns_font_handle;           // true if loaded via MetadataLoad*
+    bool bitmap_set;                 // true once a font texture is attached
+    void *owned_bitmap;              // malloc'd by BitmapLoadGRF, owned by ctx
+    void *owned_palette;             // malloc'd by BitmapLoadGRF, owned by ctx
+    NEA_Hw2DBG *bg;
+    dsf_format fmt;
+    // Canvas in BG-pixel coords, cached so Clear can wipe the right rect.
+    int canvas_left, canvas_top, canvas_right, canvas_bottom;
+};
 
 // BG VRAM block tracking — modeled on nflib (NF_TILEBLOCKS / NF_MAPBLOCKS).
 //
@@ -49,6 +67,18 @@ static struct {
 
     NEA_Hw2DOBJ objs_main[NEA_HW2D_MAX_OAM];
     NEA_Hw2DOBJ objs_sub[NEA_HW2D_MAX_OAM];
+
+    NEA_Hw2DOBJAsset assets_main[NEA_HW2D_MAX_ASSETS];
+    NEA_Hw2DOBJAsset assets_sub[NEA_HW2D_MAX_ASSETS];
+
+    struct NEA_Hw2DTextCtx text_ctx[NEA_HW2D_MAX_TEXT_CTX];
+
+    // 16-color OBJ palette slot bitmap (bit N = slot N in use). 256-color
+    // assets always use slot 0 and are not tracked here — mixing 16- and
+    // 256-color sprites on the same engine shares the OBJ palette region
+    // and is the caller's responsibility, same as the manual API.
+    u16 obj_pal_used_main;
+    u16 obj_pal_used_sub;
 
     u8 tile_blocks_main[NEA_HW2D_TILE_BANKS];
     u8 tile_blocks_sub[NEA_HW2D_TILE_BANKS];
@@ -300,7 +330,9 @@ void NEA_Hw2DSystemEnd(void)
         }
     }
 
-    // Free all OBJ sprites
+    // Free all OBJ sprites. Asset-bound OBJs don't own their gfx — the asset
+    // cleanup pass below releases the shared allocation. Standalone OBJs
+    // free their own gfx here.
     OamState *oam;
     for (int e = 0; e < 2; e++)
     {
@@ -311,12 +343,43 @@ void NEA_Hw2DSystemEnd(void)
                            : ne_hw2d_state.next_oam_sub;
         for (int i = 0; i < max; i++)
         {
-            if (objs[i].used && objs[i].gfx)
-            {
+            if (!objs[i].used)
+                continue;
+            if (objs[i].asset == NULL && objs[i].gfx)
                 oamFreeGfx(oam, objs[i].gfx);
-                objs[i].used = false;
-            }
+            objs[i].used = false;
         }
+    }
+
+    // Free all shared assets (gfx pointers and 16-color palette slots).
+    for (int e = 0; e < 2; e++)
+    {
+        NEA_Hw2DOBJAsset *assets = (e == 0) ? ne_hw2d_state.assets_main
+                                              : ne_hw2d_state.assets_sub;
+        oam = (e == 0) ? &oamMain : &oamSub;
+        for (int i = 0; i < NEA_HW2D_MAX_ASSETS; i++)
+        {
+            if (!assets[i].used)
+                continue;
+            if (assets[i].gfx)
+                oamFreeGfx(oam, assets[i].gfx);
+            assets[i].used = false;
+        }
+    }
+
+    // Free all active text contexts. Renderers hold malloc'd state, and
+    // contexts may own a libdsf font handle + GRF-loaded bitmap/palette.
+    for (int i = 0; i < NEA_HW2D_MAX_TEXT_CTX; i++)
+    {
+        NEA_Hw2DTextCtx *ctx = &ne_hw2d_state.text_ctx[i];
+        if (!ctx->used)
+            continue;
+        DSF_RendererFree(ctx->renderer);
+        if (ctx->owns_font_handle && ctx->font_handle != 0)
+            DSF_FreeFont(&ctx->font_handle);
+        free(ctx->owned_bitmap);
+        free(ctx->owned_palette);
+        ctx->used = false;
     }
 
     // Reset VRAM banks to LCD mode
@@ -1077,7 +1140,11 @@ void NEA_Hw2DOBJDelete(NEA_Hw2DOBJ *obj)
 
     OamState *oam = (obj->engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
 
-    if (obj->gfx)
+    // Shared-asset OBJs don't own their gfx — just release the ref count.
+    // Standalone OBJs free the gfx they allocated in NEA_Hw2DOBJCreate().
+    if (obj->asset)
+        obj->asset->ref_count--;
+    else if (obj->gfx)
         oamFreeGfx(oam, obj->gfx);
 
     // Hide in OAM
@@ -1318,6 +1385,357 @@ void NEA_Hw2DOBJUpdateAll(void)
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4b: Shared OBJ assets (de-duplicated gfx + palette slot)
+// ---------------------------------------------------------------------------
+//
+// An asset is a single (gfx, palette_slot) pair that many OBJs can share.
+// Compared to NEA_Hw2DOBJCreate(), which calls oamAllocateGfx() per sprite
+// and would copy the same tile data N times for N identical enemies, the
+// asset path allocates the gfx block once and hands out OBJs that point at
+// it. This avoids RAM duplication and reduces churn in the OAM gfx
+// allocator (which can fragment under repeated create/delete cycles).
+//
+// Palette slot allocation for 16-color assets uses the obj_pal_used_*
+// bitmaps to find a free slot the first time a palette is loaded.
+
+// First-fit allocation of a 16-color OBJ palette slot for the engine.
+// Returns the slot index (0-15) or -1 if all are in use.
+static int ne_alloc_obj_pal_slot(NEA_Hw2DEngine engine)
+{
+    u16 *used = (engine == NEA_ENGINE_MAIN)
+              ? &ne_hw2d_state.obj_pal_used_main
+              : &ne_hw2d_state.obj_pal_used_sub;
+    for (int i = 0; i < 16; i++)
+    {
+        if (!(*used & (1u << i)))
+        {
+            *used |= (1u << i);
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void ne_free_obj_pal_slot(NEA_Hw2DEngine engine, int slot)
+{
+    if (slot < 0 || slot >= 16)
+        return;
+    u16 *used = (engine == NEA_ENGINE_MAIN)
+              ? &ne_hw2d_state.obj_pal_used_main
+              : &ne_hw2d_state.obj_pal_used_sub;
+    *used &= ~(1u << slot);
+}
+
+// Find a free asset slot in the per-engine pool.
+static NEA_Hw2DOBJAsset *ne_alloc_asset_slot(NEA_Hw2DEngine engine)
+{
+    NEA_Hw2DOBJAsset *pool = (engine == NEA_ENGINE_MAIN)
+                              ? ne_hw2d_state.assets_main
+                              : ne_hw2d_state.assets_sub;
+    for (int i = 0; i < NEA_HW2D_MAX_ASSETS; i++)
+    {
+        if (!pool[i].used)
+            return &pool[i];
+    }
+    return NULL;
+}
+
+NEA_Hw2DOBJAsset *NEA_Hw2DOBJAssetCreate(NEA_Hw2DEngine engine,
+                                          NEA_OBJSize size,
+                                          NEA_OBJColorMode mode)
+{
+    NEA_Assert(ne_hw2d_state.initialized, "Hw2D not init");
+
+    bool obj_inited = (engine == NEA_ENGINE_MAIN)
+                       ? ne_hw2d_state.main_obj_inited
+                       : ne_hw2d_state.sub_obj_inited;
+    if (!obj_inited)
+    {
+        NEA_DebugPrint("NEA_Hw2DOBJAssetCreate: OBJ engine not configured");
+        return NULL;
+    }
+
+    NEA_Hw2DOBJAsset *asset = ne_alloc_asset_slot(engine);
+    if (asset == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DOBJAssetCreate: asset pool full");
+        return NULL;
+    }
+
+    OamState *oam = (engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
+    SpriteSize libnds_size = ne_hw2d_obj_size(size);
+    SpriteColorFormat libnds_color = ne_hw2d_obj_color(mode);
+
+    u16 *gfx = oamAllocateGfx(oam, libnds_size, libnds_color);
+    if (gfx == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DOBJAssetCreate: gfx alloc failed");
+        return NULL;
+    }
+
+    int w = ne_hw2d_obj_width(size);
+    int h = ne_hw2d_obj_height(size);
+    int bpp = (mode == NEA_OBJ_COLOR_256) ? 8 : 4;
+
+    memset(asset, 0, sizeof(*asset));
+    asset->used = true;
+    asset->engine = engine;
+    asset->size = size;
+    asset->color = mode;
+    asset->gfx = gfx;
+    asset->gfx_size = (w * h * bpp) / 8;
+    asset->num_frames = 1;
+    asset->palette_slot = -1;
+    asset->ref_count = 0;
+    return asset;
+}
+
+void NEA_Hw2DOBJAssetDelete(NEA_Hw2DOBJAsset *asset)
+{
+    if (asset == NULL || !asset->used)
+        return;
+
+    if (asset->ref_count > 0)
+    {
+        NEA_DebugPrint("NEA_Hw2DOBJAssetDelete: %d OBJ(s) still bound",
+                       asset->ref_count);
+        return;
+    }
+
+    OamState *oam = (asset->engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
+    if (asset->gfx)
+        oamFreeGfx(oam, asset->gfx);
+
+    if (asset->color == NEA_OBJ_COLOR_16 && asset->palette_slot >= 0)
+        ne_free_obj_pal_slot(asset->engine, asset->palette_slot);
+
+    memset(asset, 0, sizeof(*asset));
+}
+
+int NEA_Hw2DOBJAssetLoadGfx(NEA_Hw2DOBJAsset *asset,
+                             const void *data, size_t size)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(data, "NULL data");
+    NEA_Assert(asset->used, "Asset not active");
+
+    // VRAM only holds one sprite's worth — copy that. Track total frames
+    // present in the source so callers can know how much they had.
+    memcpy(asset->gfx, data, asset->gfx_size);
+    asset->num_frames = (int)(size / asset->gfx_size);
+    if (asset->num_frames < 1)
+        asset->num_frames = 1;
+    return 0;
+}
+
+int NEA_Hw2DOBJAssetLoadGfxFAT(NEA_Hw2DOBJAsset *asset, const char *path)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+    {
+        NEA_DebugPrint("Failed to open: %s", path);
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *buf = malloc(size);
+    if (buf == NULL)
+    {
+        fclose(f);
+        NEA_DebugPrint("Out of memory");
+        return -1;
+    }
+
+    fread(buf, 1, size, f);
+    fclose(f);
+
+    int ret = NEA_Hw2DOBJAssetLoadGfx(asset, buf, size);
+    free(buf);
+    return ret;
+}
+
+int NEA_Hw2DOBJAssetLoadPalette(NEA_Hw2DOBJAsset *asset,
+                                 const void *data, int num_colors)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(data, "NULL data");
+    NEA_Assert(asset->used, "Asset not active");
+
+    int slot;
+    if (asset->color == NEA_OBJ_COLOR_16)
+    {
+        if (asset->palette_slot < 0)
+        {
+            slot = ne_alloc_obj_pal_slot(asset->engine);
+            if (slot < 0)
+            {
+                NEA_DebugPrint("Asset palette: no free 16-color slot");
+                return -1;
+            }
+            asset->palette_slot = slot;
+        }
+        else
+        {
+            slot = asset->palette_slot;
+        }
+    }
+    else
+    {
+        // 256-color sprites use the full OBJ palette region; slot is unused.
+        slot = 0;
+        asset->palette_slot = 0;
+    }
+
+    return NEA_Hw2DOBJLoadPalette(asset->engine, data, num_colors, slot);
+}
+
+int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)asset;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return -1;
+#else
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    int ret = -1;
+    void *gfxDst = NULL;
+    void *palDst = NULL;
+    size_t gfxSize = 0;
+    size_t palSize = 0;
+
+    GRFHeader header = { 0 };
+    GRFError err = grfLoadPath(path, &header, &gfxDst, &gfxSize,
+                               NULL, NULL, &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
+        goto cleanup;
+    }
+
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("No graphics found in GRF file");
+        goto cleanup;
+    }
+
+    int expected_bpp = (asset->color == NEA_OBJ_COLOR_16) ? 4 : 8;
+    if (header.gfxAttr != expected_bpp)
+    {
+        NEA_DebugPrint("GRF color depth mismatch for OBJ asset");
+        goto cleanup;
+    }
+
+    NEA_Hw2DOBJAssetLoadGfx(asset, gfxDst, gfxSize);
+
+    if (palDst != NULL)
+    {
+        if (NEA_Hw2DOBJAssetLoadPalette(asset, palDst, palSize / 2) != 0)
+            goto cleanup;
+    }
+
+    ret = 0;
+
+cleanup:
+    free(gfxDst);
+    free(palDst);
+    return ret;
+#endif
+}
+
+NEA_Hw2DOBJ *NEA_Hw2DOBJCreateFromAsset(NEA_Hw2DOBJAsset *asset)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_Assert(asset->used, "Asset not active");
+
+    int *next;
+    NEA_Hw2DOBJ *objs;
+    if (asset->engine == NEA_ENGINE_MAIN)
+    {
+        next = &ne_hw2d_state.next_oam_main;
+        objs = ne_hw2d_state.objs_main;
+    }
+    else
+    {
+        next = &ne_hw2d_state.next_oam_sub;
+        objs = ne_hw2d_state.objs_sub;
+    }
+
+    if (*next >= NEA_HW2D_MAX_OAM)
+    {
+        NEA_DebugPrint("NEA_Hw2DOBJCreateFromAsset: OAM full");
+        return NULL;
+    }
+
+    int idx = (*next)++;
+    NEA_Hw2DOBJ *obj = &objs[idx];
+    memset(obj, 0, sizeof(*obj));
+    obj->used = true;
+    obj->engine = asset->engine;
+    obj->oam_index = idx;
+    obj->nea_size = asset->size;
+    obj->color = asset->color;
+    obj->gfx = asset->gfx;
+    obj->gfx_size = asset->gfx_size;
+    obj->num_frames = asset->num_frames;
+    obj->palette_slot = (asset->palette_slot >= 0) ? asset->palette_slot : 0;
+    obj->affine_index = -1;
+    obj->visible = false;
+    obj->asset = asset;
+    asset->ref_count++;
+    return obj;
+}
+
+int NEA_Hw2DOBJBindAsset(NEA_Hw2DOBJ *obj, NEA_Hw2DOBJAsset *asset)
+{
+    NEA_AssertPointer(obj, "NULL obj");
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_Assert(obj->used, "OBJ not active");
+    NEA_Assert(asset->used, "Asset not active");
+
+    if (obj->engine != asset->engine)
+    {
+        NEA_DebugPrint("BindAsset: engine mismatch");
+        return -1;
+    }
+    if (obj->nea_size != asset->size || obj->color != asset->color)
+    {
+        NEA_DebugPrint("BindAsset: size/color mismatch");
+        return -1;
+    }
+
+    // Release the OBJ's prior gfx allocation, whatever its source.
+    if (obj->asset)
+    {
+        obj->asset->ref_count--;
+    }
+    else if (obj->gfx)
+    {
+        OamState *oam = (obj->engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
+        oamFreeGfx(oam, obj->gfx);
+    }
+
+    obj->asset = asset;
+    obj->gfx = asset->gfx;
+    obj->gfx_size = asset->gfx_size;
+    obj->num_frames = asset->num_frames;
+    if (asset->palette_slot >= 0)
+        obj->palette_slot = asset->palette_slot;
+    asset->ref_count++;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Phase 5: Text rendering on bitmap backgrounds
 // ---------------------------------------------------------------------------
 
@@ -1327,9 +1745,20 @@ int NEA_Hw2DTextRender(NEA_Hw2DBG *bg, u32 slot, const char *str,
     NEA_AssertPointer(bg, "NULL bg");
     NEA_AssertPointer(str, "NULL str");
     NEA_Assert(bg->used, "BG not active");
-    NEA_Assert(bg->type == NEA_HW2D_BG_BITMAP_16, "Must be 16bpp bitmap BG");
 
-    // Get font bitmap state from rich text slot
+    // Pick the libdsf format from the BG type. Tiled BGs aren't supported —
+    // libdsf writes linear bitmap data, not tile-rearranged glyphs.
+    dsf_format bg_fmt;
+    if (bg->type == NEA_HW2D_BG_BITMAP_16)
+        bg_fmt = DSF_BMP_RGBA;
+    else if (bg->type == NEA_HW2D_BG_BITMAP_8)
+        bg_fmt = DSF_BMP_RGB256;
+    else
+    {
+        NEA_DebugPrint("NEA_Hw2DTextRender: needs a bitmap BG");
+        return -1;
+    }
+
     uintptr_t handle;
     const void *font_texture;
     size_t font_w, font_h;
@@ -1342,48 +1771,459 @@ int NEA_Hw2DTextRender(NEA_Hw2DBG *bg, u32 slot, const char *str,
         return -1;
     }
 
-    // Render text to RAM buffer using libdsf (A1RGB5 format = GL_RGBA)
-    void *out_texture = NULL;
-    size_t out_w, out_h;
-    dsf_error err = DSF_StringRenderToTexture((dsf_handle)handle,
-                            str, GL_RGBA, font_texture, font_w, font_h,
-                            &out_texture, &out_w, &out_h);
-    if (err != DSF_NO_ERROR || out_texture == NULL)
+    // libdsf processes the font texture and the destination buffer with the
+    // same `texture_fmt`, so the font format must match the BG format.
+    // NEA_TextureFormat values are identical to dsf_format values by design.
+    if ((dsf_format)font_fmt != bg_fmt)
     {
-        NEA_DebugPrint("NEA_Hw2DTextRender: render failed (%d)", err);
-        free(out_texture);
+        NEA_DebugPrint("NEA_Hw2DTextRender: font/BG format mismatch "
+                       "(font=%u, bg_fmt=%d)", font_fmt, bg_fmt);
         return -1;
     }
 
-    // Copy rendered pixels to bitmap BG with clipping and transparency
-    u16 *src = (u16 *)out_texture;
-    u16 *dst = bg->gfx_ptr;
-    int bg_w = bg->width;
-    int bg_h = bg->height;
-
-    for (int row = 0; row < (int)out_h; row++)
+    // Render straight into VRAM. libdsf 0.2 skips transparent source pixels
+    // internally (alpha-0 for RGBA, palette-index-0 for RGB256), so this
+    // composites over existing BG content with no engine-side loop.
+    dsf_error err = DSF_StringRenderToExistingBuffer((dsf_handle)handle,
+                            str, bg_fmt, font_texture, font_w, font_h,
+                            bg->gfx_ptr, bg->width, bg->height,
+                            (uint32_t)x, (uint32_t)y);
+    if (err != DSF_NO_ERROR)
     {
-        int dst_y = y + row;
-        if (dst_y < 0)
-            continue;
-        if (dst_y >= bg_h)
-            break;
+        NEA_DebugPrint("NEA_Hw2DTextRender: render failed (%d)", err);
+        return -1;
+    }
+    return 0;
+}
 
-        for (int col = 0; col < (int)out_w; col++)
+// ---------------------------------------------------------------------------
+// Phase 5b: Persistent text context (canvas / cursor / typewriter)
+// ---------------------------------------------------------------------------
+
+// Map a dsf_error from the renderer-driving calls onto the NEA convention:
+// 0 = success, -1 = real error, +1 = canvas filled up (normal "done" for
+// typewriter loops, not a failure).
+static int ne_hw2d_text_map_err(dsf_error err, const char *what)
+{
+    if (err == DSF_NO_ERROR)
+        return 0;
+    if (err == DSF_CANVAS_FULL)
+        return 1;
+    NEA_DebugPrint("NEA_Hw2DTextCtx %s: %d", what, err);
+    return -1;
+}
+
+NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
+{
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_Assert(bg->used, "BG not active");
+
+    dsf_format fmt;
+    if (bg->type == NEA_HW2D_BG_BITMAP_16)
+        fmt = DSF_BMP_RGBA;
+    else if (bg->type == NEA_HW2D_BG_BITMAP_8)
+        fmt = DSF_BMP_RGB256;
+    else
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: needs a bitmap BG");
+        return NULL;
+    }
+
+    NEA_Hw2DTextCtx *ctx = NULL;
+    for (int i = 0; i < NEA_HW2D_MAX_TEXT_CTX; i++)
+    {
+        if (!ne_hw2d_state.text_ctx[i].used)
         {
-            int dst_x = x + col;
-            if (dst_x < 0)
-                continue;
-            if (dst_x >= bg_w)
-                break;
+            ctx = &ne_hw2d_state.text_ctx[i];
+            break;
+        }
+    }
+    if (ctx == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: text ctx pool full");
+        return NULL;
+    }
 
-            u16 pixel = src[row * out_w + col];
-            // Only copy pixels with alpha bit set (bit 15)
-            if (pixel & BIT(15))
-                dst[dst_y * bg_w + dst_x] = pixel;
+    dsf_renderer renderer;
+    dsf_error err = DSF_RendererNew(&renderer);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: RendererNew %d", err);
+        return NULL;
+    }
+
+    err = DSF_RendererModeSetBuffer(renderer, fmt, bg->gfx_ptr,
+                                     bg->width, bg->height);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: ModeSetBuffer %d", err);
+        DSF_RendererFree(renderer);
+        return NULL;
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->used = true;
+    ctx->renderer = renderer;
+    ctx->bg = bg;
+    ctx->fmt = fmt;
+    // Default canvas = full BG. SetCanvas overrides.
+    ctx->canvas_right = bg->width;
+    ctx->canvas_bottom = bg->height;
+    // font_handle / bitmap_set stay zero — caller loads them next.
+    return ctx;
+}
+
+void NEA_Hw2DTextCtxDelete(NEA_Hw2DTextCtx *ctx)
+{
+    if (ctx == NULL || !ctx->used)
+        return;
+
+    DSF_RendererFree(ctx->renderer);
+
+    if (ctx->owns_font_handle && ctx->font_handle != 0)
+        DSF_FreeFont(&ctx->font_handle);
+
+    free(ctx->owned_bitmap);
+    free(ctx->owned_palette);
+
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+// ---- Font metadata loading ----
+
+int NEA_Hw2DTextCtxMetadataLoadMemory(NEA_Hw2DTextCtx *ctx,
+                                       const void *data, size_t size)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(data, "NULL data");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    // Replace any existing font owned by this ctx.
+    if (ctx->owns_font_handle && ctx->font_handle != 0)
+        DSF_FreeFont(&ctx->font_handle);
+
+    dsf_handle handle;
+    dsf_error err = DSF_LoadFontMemory(&handle, data, (int32_t)size);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxMetadataLoadMemory: %d", err);
+        ctx->font_handle = 0;
+        ctx->owns_font_handle = false;
+        return -1;
+    }
+    ctx->font_handle = handle;
+    ctx->owns_font_handle = true;
+    return 0;
+}
+
+int NEA_Hw2DTextCtxMetadataLoadFAT(NEA_Hw2DTextCtx *ctx, const char *path)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    if (ctx->owns_font_handle && ctx->font_handle != 0)
+        DSF_FreeFont(&ctx->font_handle);
+
+    dsf_handle handle;
+    dsf_error err = DSF_LoadFontFilesystem(&handle, path);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxMetadataLoadFAT: %d", err);
+        ctx->font_handle = 0;
+        ctx->owns_font_handle = false;
+        return -1;
+    }
+    ctx->font_handle = handle;
+    ctx->owns_font_handle = true;
+    return 0;
+}
+
+// ---- Font bitmap loading ----
+
+// Copy a font palette into the BG palette region appropriate for the engine.
+// For RGB256 (8bpp) BGs only — 16bpp BGs ignore the palette entirely.
+static void ne_hw2d_text_copy_pal(NEA_Hw2DTextCtx *ctx,
+                                   const void *pal, size_t bytes)
+{
+    if (pal == NULL || bytes == 0 || ctx->fmt != DSF_BMP_RGB256)
+        return;
+    u16 *dst = (ctx->bg->engine == NEA_ENGINE_MAIN)
+             ? BG_PALETTE : BG_PALETTE_SUB;
+    memcpy(dst, pal, bytes);
+}
+
+int NEA_Hw2DTextCtxBitmapSet(NEA_Hw2DTextCtx *ctx,
+                              const void *texture, size_t width, size_t height,
+                              const void *palette, size_t palette_bytes)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(texture, "NULL texture");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    dsf_error err = DSF_FontTextureSet(ctx->font_handle, texture,
+                                        width, height, ctx->fmt);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapSet: FontTextureSet %d", err);
+        return -1;
+    }
+
+    ne_hw2d_text_copy_pal(ctx, palette, palette_bytes);
+    ctx->bitmap_set = true;
+    return 0;
+}
+
+int NEA_Hw2DTextCtxBitmapLoadGRF(NEA_Hw2DTextCtx *ctx, const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)ctx;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return -1;
+#else
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    void *gfxDst = NULL;
+    void *palDst = NULL;
+    size_t palSize = 0;
+    GRFHeader header = { 0 };
+
+    GRFError err = grfLoadPath(path, &header, &gfxDst, NULL, NULL, NULL,
+                               &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: grfLoadPath %d", err);
+        free(gfxDst);
+        free(palDst);
+        return -1;
+    }
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: no gfx in GRF");
+        free(palDst);
+        return -1;
+    }
+
+    // Validate the GRF's color depth against the ctx's BG format.
+    bool ok = (ctx->fmt == DSF_BMP_RGBA   && header.gfxAttr == 16)
+           || (ctx->fmt == DSF_BMP_RGB256 && header.gfxAttr == 8);
+    if (!ok)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: GRF/BG fmt mismatch "
+                       "(gfxAttr=%u)", header.gfxAttr);
+        free(gfxDst);
+        free(palDst);
+        return -1;
+    }
+
+    // 8bpp requires a palette; 16bpp ignores it.
+    if (ctx->fmt == DSF_BMP_RGB256 && palDst == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: 8bpp font needs palette");
+        free(gfxDst);
+        return -1;
+    }
+
+    dsf_error derr = DSF_FontTextureSet(ctx->font_handle, gfxDst,
+                                         header.gfxWidth, header.gfxHeight,
+                                         ctx->fmt);
+    if (derr != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: FontTextureSet %d", derr);
+        free(gfxDst);
+        free(palDst);
+        return -1;
+    }
+
+    ne_hw2d_text_copy_pal(ctx, palDst, palSize);
+
+    // Release any previously-owned buffers, take ownership of the new ones.
+    free(ctx->owned_bitmap);
+    free(ctx->owned_palette);
+    ctx->owned_bitmap = gfxDst;
+    ctx->owned_palette = palDst;
+    ctx->bitmap_set = true;
+    return 0;
+#endif
+}
+
+int NEA_Hw2DTextCtxSetCanvas(NEA_Hw2DTextCtx *ctx, int left, int top,
+                              int right, int bottom)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    dsf_error err = DSF_RendererCanvasSetup(ctx->renderer,
+                                             (int16_t)left, (int16_t)top,
+                                             (int16_t)right, (int16_t)bottom);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxSetCanvas: %d", err);
+        return -1;
+    }
+    ctx->canvas_left = left;
+    ctx->canvas_top = top;
+    ctx->canvas_right = right;
+    ctx->canvas_bottom = bottom;
+    return 0;
+}
+
+int NEA_Hw2DTextCtxClear(NEA_Hw2DTextCtx *ctx)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    // Wipe the canvas region. Both supported formats use 0 as "no glyph":
+    // index 0 is transparent for RGB256, alpha-0 (== full zero) is
+    // transparent for RGBA. So byte-zero is correct for both.
+    int l = ctx->canvas_left;
+    int t = ctx->canvas_top;
+    int r = ctx->canvas_right;
+    int b = ctx->canvas_bottom;
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > ctx->bg->width)  r = ctx->bg->width;
+    if (b > ctx->bg->height) b = ctx->bg->height;
+
+    int bg_w = ctx->bg->width;
+    if (ctx->fmt == DSF_BMP_RGB256)
+    {
+        // 8bpp: one byte per pixel. Use a u8* view, halfword-safe writes.
+        // Per row write is short and aligned-friendly enough for memset.
+        u8 *base = (u8 *)ctx->bg->gfx_ptr;
+        int width = r - l;
+        if (width > 0)
+        {
+            for (int row = t; row < b; row++)
+                memset(base + row * bg_w + l, 0, width);
+        }
+    }
+    else
+    {
+        u16 *base = ctx->bg->gfx_ptr;
+        int width = r - l;
+        if (width > 0)
+        {
+            for (int row = t; row < b; row++)
+                memset(base + row * bg_w + l, 0, (size_t)width * 2);
         }
     }
 
-    free(out_texture);
+    dsf_error err = DSF_RendererCanvasClear(ctx->renderer);
+    if (err != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxClear: %d", err);
+        return -1;
+    }
     return 0;
+}
+
+int NEA_Hw2DTextCtxSetOverflow(NEA_Hw2DTextCtx *ctx,
+                                NEA_Hw2DTextRightMode right_mode,
+                                NEA_Hw2DTextBottomMode bottom_mode)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    dsf_error err = DSF_RendererOverflowModeSet(ctx->renderer,
+                            (dsf_render_right_mode)right_mode,
+                            (dsf_render_bottom_mode)bottom_mode);
+    return ne_hw2d_text_map_err(err, "SetOverflow");
+}
+
+int NEA_Hw2DTextCtxSetWordWrap(NEA_Hw2DTextCtx *ctx, bool enabled,
+                                const uint32_t *separators)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    dsf_error err = DSF_RendererWordWrapModeSet(ctx->renderer, enabled,
+                                                 separators);
+    return ne_hw2d_text_map_err(err, "SetWordWrap");
+}
+
+int NEA_Hw2DTextCtxCursorGet(NEA_Hw2DTextCtx *ctx, int *x, int *y)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_RendererCursorGet(ctx->renderer, x, y);
+    return ne_hw2d_text_map_err(err, "CursorGet");
+}
+
+int NEA_Hw2DTextCtxCursorSet(NEA_Hw2DTextCtx *ctx, int x, int y)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_RendererCursorSet(ctx->renderer,
+                                           (int16_t)x, (int16_t)y);
+    return ne_hw2d_text_map_err(err, "CursorSet");
+}
+
+int NEA_Hw2DTextCtxUsedBoxGet(NEA_Hw2DTextCtx *ctx,
+                               int16_t *left, int16_t *top,
+                               int16_t *right, int16_t *bottom)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_RendererUsedBoxGet(ctx->renderer,
+                                            left, top, right, bottom);
+    return ne_hw2d_text_map_err(err, "UsedBoxGet");
+}
+
+int NEA_Hw2DTextCtxPrint(NEA_Hw2DTextCtx *ctx, const char *str)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(str, "NULL str");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_StringRender(ctx->font_handle, ctx->renderer, str);
+    return ne_hw2d_text_map_err(err, "Print");
+}
+
+int NEA_Hw2DTextCtxPrintLength(NEA_Hw2DTextCtx *ctx, size_t *characters,
+                                const char **str)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(characters, "NULL characters");
+    NEA_AssertPointer(str, "NULL str");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_StringRenderLength(ctx->font_handle, ctx->renderer,
+                                            characters, str);
+    return ne_hw2d_text_map_err(err, "PrintLength");
+}
+
+int NEA_Hw2DTextCtxPrintCodepoint(NEA_Hw2DTextCtx *ctx, uint32_t codepoint)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_Assert(ctx->used, "ctx not active");
+    dsf_error err = DSF_CodepointRender(ctx->font_handle, ctx->renderer,
+                                         codepoint);
+    return ne_hw2d_text_map_err(err, "PrintCodepoint");
+}
+
+int NEA_Hw2DTextCtxPrintf(NEA_Hw2DTextCtx *ctx, const char *fmt, ...)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(fmt, "NULL fmt");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    // Mirror DSF_StringRenderFormat's vasprintf-based approach so the format
+    // semantics match what callers already get from libdsf directly.
+    char *buf = NULL;
+    va_list args;
+    va_start(args, fmt);
+    int rc = vasprintf(&buf, fmt, args);
+    va_end(args);
+
+    if (rc == -1)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxPrintf: vasprintf failed");
+        return -1;
+    }
+
+    dsf_error err = DSF_StringRender(ctx->font_handle, ctx->renderer, buf);
+    free(buf);
+    return ne_hw2d_text_map_err(err, "Printf");
 }

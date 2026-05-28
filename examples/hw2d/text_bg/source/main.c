@@ -6,9 +6,9 @@
 //
 // Hardware 2D text rendering example
 // -----------------------------------
-// Renders text onto a 16bpp bitmap background using the libdsf font system
-// (NEA_Hw2DTextRender). The font is loaded from compiled-in data using
-// NEA_RichTextBitmapSet with GL_RGBA (A1RGB5) format.
+// Renders text onto a 16bpp bitmap background using a persistent
+// NEA_Hw2DTextCtx. The ctx loads BMFont metadata + bitmap directly (no
+// RichText slot needed) and renders straight into VRAM via libdsf 0.2.
 //
 // D-pad moves the text position. B clears.
 // L/R change 3D layer priority. X/Y change 2D BG priority.
@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
     NEA_Init3D();
 
     NEA_Hw2DVRAMConfig cfg = {
-        .main_bg  = NEA_VRAM_E,
+        .main_bg  = NEA_VRAM_A | NEA_VRAM_B,
         .main_obj = 0,
         .sub_bg   = 0,
         .sub_obj  = 0,
@@ -90,20 +90,20 @@ int main(int argc, char *argv[])
     // 3D renders on BG0 — its priority determines front/back vs 2D BG
     int bg0_priority = (REG_BG0CNT >> 0) & 3;
 
-    // --- Set up rich text font (libdsf) ---
-    // Font slot 0: A1RGB5 (GL_RGBA) font for 16bpp bitmap rendering.
-    // The font texture is 128x128 A1RGB5 converted by grit from a BMFont PNG.
-    NEA_RichTextStartSystem(1);
-    NEA_RichTextInit(0);
-    NEA_RichTextMetadataLoadMemory(0, font2_fnt_bin, font2_fnt_bin_size);
-    NEA_RichTextBitmapSet(0, font2_0_16bitBitmap, 128, 128,
-                          NEA_A1RGB5, NULL, 0);
+    // --- Set up text context (standalone — no RichText slot) ---
+    // The ctx wraps a libdsf renderer aimed at the BG's gfx buffer. We
+    // load BMFont metadata + a 128x128 A1RGB5 font bitmap directly into it.
+    NEA_Hw2DTextCtx *txt = NEA_Hw2DTextCtxCreate(bg);
+    NEA_Hw2DTextCtxMetadataLoadMemory(txt, font2_fnt_bin, font2_fnt_bin_size);
+    NEA_Hw2DTextCtxBitmapSet(txt, font2_0_16bitBitmap, 128, 128, NULL, 0);
 
     // Initial text draw
     int text_x = 10, text_y = 10;
-    NEA_Hw2DBGClearBitmap(bg, 0);  // 0 = transparent (no BIT(15))
-    NEA_Hw2DTextRender(bg, 0, "NEA Hw2D Text Demo", text_x, text_y);
-    NEA_Hw2DTextRender(bg, 0, "LibDSF font on\n16bpp bitmap BG", text_x, text_y + 30);
+    //NEA_Hw2DBGClearBitmap(bg, 0);  // 0 = transparent (no BIT(15))
+    NEA_Hw2DTextCtxCursorSet(txt, text_x, text_y);
+    NEA_Hw2DTextCtxPrint(txt, "NEA Hw2D Text Demo");
+    NEA_Hw2DTextCtxCursorSet(txt, text_x, text_y + 30);
+    NEA_Hw2DTextCtxPrint(txt, "LibDSF font on\n16bpp bitmap BG");
 
     // Console on sub screen
     consoleDemoInit();
@@ -131,9 +131,10 @@ int main(int argc, char *argv[])
         if (keys & (KEY_RIGHT | KEY_LEFT | KEY_DOWN | KEY_UP))
         {
             NEA_Hw2DBGClearBitmap(bg, 0);
-            NEA_Hw2DTextRender(bg, 0, "NEA Hw2D Text Demo", text_x, text_y);
-            NEA_Hw2DTextRender(bg, 0, "LibDSF font on\n16bpp bitmap BG",
-                               text_x, text_y + 30);
+            NEA_Hw2DTextCtxCursorSet(txt, text_x, text_y);
+            NEA_Hw2DTextCtxPrint(txt, "NEA Hw2D Text Demo");
+            NEA_Hw2DTextCtxCursorSet(txt, text_x, text_y + 30);
+            NEA_Hw2DTextCtxPrint(txt, "LibDSF font on\n16bpp bitmap BG");
         }
 
         if (down & KEY_B)
