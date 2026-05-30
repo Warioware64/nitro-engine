@@ -122,6 +122,21 @@ static int ne_find_contiguous(const u8 *blocks, int count, int needed,
     return -1;
 }
 
+// Safe copy into VRAM / palette / OAM memory. Those regions only accept
+// 16-bit and 32-bit writes — an 8-bit store corrupts the other half of the
+// 16-bit unit. A plain memcpy makes no width guarantee (it byte-copies an
+// unaligned head/tail or odd length), so use swiCopy, which always transfers
+// in 16- or 32-bit units and stays cache-coherent (unlike DMA, which would
+// need a DC_FlushRange on the source first). Prefer 32-bit transfers when
+// everything is word-aligned, else fall back to the 16-bit minimum.
+static void ne_vram_copy(void *dst, const void *src, size_t bytes)
+{
+    if ((((uintptr_t)dst | (uintptr_t)src | bytes) & 3) == 0)
+        swiCopy(src, dst, (bytes >> 2) | COPY_MODE_WORD);
+    else
+        swiCopy(src, dst, (bytes >> 1) | COPY_MODE_HWORD);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1: System initialization
 // ---------------------------------------------------------------------------
@@ -241,14 +256,19 @@ int NEA_Hw2DInit(const NEA_Hw2DVRAMConfig *config)
     // by bgInitSub()/bgShow() in NEA_Hw2DBGCreate().
     if (sb || so)
     {
-        u32 sub_mode = MODE_0_2D;
+        // Set the base mode FIRST, then let oamInit() configure the OBJ tile
+        // mapping/boundary bits (DISPLAY_SPR_1D_SIZE_128 = DISPCNT bits 20-21).
+        // videoSetModeSub() assigns the whole register, so running it after
+        // oamInit() wipes those bits back to SIZE_32 while libnds still computes
+        // gfx offsets for a 128-byte boundary, making sprites fetch the wrong
+        // gfx. Mirror the main-engine path, which uses |= to preserve the bits.
+        videoSetModeSub(MODE_0_2D);
         if (so)
         {
-            sub_mode |= DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D;
             oamInit(&oamSub, SpriteMapping_1D_128, false);
+            REG_DISPCNT_SUB |= DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D;
             ne_hw2d_state.sub_obj_inited = true;
         }
-        videoSetModeSub(sub_mode);
     }
 
     // BG VRAM block allocation: mark the first
@@ -1163,8 +1183,10 @@ int NEA_Hw2DOBJLoadGfx(NEA_Hw2DOBJ *obj, const void *data, size_t size)
     NEA_Assert(obj->used, "OBJ not active");
     NEA_Assert(obj->gfx != NULL, "No gfx allocated");
 
-    // Copy first frame
-    memcpy(obj->gfx, data, obj->gfx_size);
+    // Copy first frame. Never read more than the source provides, so a
+    // too-small buffer can't over-read past the source allocation.
+    size_t copy = (size < (size_t)obj->gfx_size) ? size : (size_t)obj->gfx_size;
+    ne_vram_copy(obj->gfx, data, copy);
 
     obj->num_frames = size / obj->gfx_size;
     if (obj->num_frames < 1)
@@ -1201,7 +1223,8 @@ int NEA_Hw2DOBJLoadGfxFAT(NEA_Hw2DOBJ *obj, const char *path)
     fread(buf, 1, size, f);
     fclose(f);
 
-    memcpy(obj->gfx, buf, obj->gfx_size);
+    size_t copy = (size < (size_t)obj->gfx_size) ? size : (size_t)obj->gfx_size;
+    ne_vram_copy(obj->gfx, buf, copy);
     obj->num_frames = size / obj->gfx_size;
     if (obj->num_frames < 1)
         obj->num_frames = 1;
@@ -1218,9 +1241,52 @@ int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
     u16 *pal = (engine == NEA_ENGINE_MAIN)
              ? SPRITE_PALETTE : SPRITE_PALETTE_SUB;
 
+    // The OBJ palette region holds 256 colors. Clamp the copy so a palette
+    // loaded at a non-zero slot can't run past the end of the region into
+    // adjacent palette RAM (GRF/ptexconv files often pad 4bpp palettes out
+    // to 256 entries, which would otherwise overflow for any slot > 0).
+    int max_colors = 256 - slot * 16;
+    if (max_colors < 0)
+        max_colors = 0;
+    if (num_colors > max_colors)
+        num_colors = max_colors;
+
     pal += slot * 16;
-    memcpy(pal, data, num_colors * 2);
+    ne_vram_copy(pal, data, num_colors * 2);
     return 0;
+}
+
+int NEA_Hw2DOBJLoadPaletteFAT(NEA_Hw2DEngine engine, const char *path, int slot)
+{
+    NEA_AssertPointer(path, "NULL path");
+
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+    {
+        NEA_DebugPrint("Failed to open: %s", path);
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *buf = malloc(size);
+    if (buf == NULL)
+    {
+        fclose(f);
+        NEA_DebugPrint("Out of memory");
+        return -1;
+    }
+
+    fread(buf, 1, size, f);
+    fclose(f);
+
+    // RGB15 palettes are 2 bytes per color.
+    int ret = NEA_Hw2DOBJLoadPalette(engine, buf, size / 2, slot);
+
+    free(buf);
+    return ret;
 }
 
 int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
@@ -1264,10 +1330,41 @@ int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
         goto cleanup;
     }
 
+    // The OBJ's hardware size is fixed at creation; the GRF must match it.
+    // Without this check a mismatch silently over-reads the GRF buffer (decl
+    // larger) or loads a cropped image (decl smaller), which renders as a
+    // wrong-size / wrong-ratio sprite.
+    if (oamDimensionsToSize(header.gfxWidth, header.gfxHeight)
+        != ne_hw2d_obj_size(obj->nea_size))
+    {
+        NEA_DebugPrint("OBJ GRF size mismatch: file is %dx%d",
+                       (int)header.gfxWidth, (int)header.gfxHeight);
+        goto cleanup;
+    }
+
     NEA_Hw2DOBJLoadGfx(obj, gfxDst, gfxSize);
 
     if (palDst != NULL)
-        NEA_Hw2DOBJLoadPalette(obj->engine, palDst, palSize / 2, palette_slot);
+    {
+        int num_colors = palSize / 2;
+
+        if (obj->color == NEA_OBJ_COLOR_16)
+        {
+            // A 16-color sprite occupies exactly one 16-entry palette bank.
+            // GRF converters (grit, ptexconv) pad a 4bpp palette out to 256
+            // entries; copying all of them would overwrite the banks belonging
+            // to other 16-color sprites. Only the first 16 colors are ours.
+            if (num_colors > 16)
+                num_colors = 16;
+
+            // Point the OAM palette-number field at the bank we just loaded.
+            // Without this the sprite keeps its create-time bank (0) and
+            // renders with the wrong colors.
+            obj->palette_slot = palette_slot;
+        }
+
+        NEA_Hw2DOBJLoadPalette(obj->engine, palDst, num_colors, palette_slot);
+    }
 
     ret = 0;
 
@@ -1302,6 +1399,19 @@ void NEA_Hw2DOBJSetPriority(NEA_Hw2DOBJ *obj, int priority)
 {
     NEA_AssertPointer(obj, "NULL obj");
     obj->priority = priority;
+}
+
+void NEA_Hw2DOBJSetPaletteSlot(NEA_Hw2DOBJ *obj, int slot)
+{
+    NEA_AssertPointer(obj, "NULL obj");
+
+    // Only 16-color sprites have a palette bank; 256-color sprites use the
+    // whole OBJ palette region and the OAM palette-number field is unused.
+    if (obj->color != NEA_OBJ_COLOR_16)
+        return;
+
+    NEA_Assert(slot >= 0 && slot < 16, "OBJ palette slot out of range");
+    obj->palette_slot = slot;
 }
 
 void NEA_Hw2DOBJSetFrame(NEA_Hw2DOBJ *obj, int frame)
@@ -1426,6 +1536,30 @@ static void ne_free_obj_pal_slot(NEA_Hw2DEngine engine, int slot)
     *used &= ~(1u << slot);
 }
 
+// Re-point every OBJ bound to this asset at the asset's current palette slot.
+// Needed because OBJs can be bound before the asset's palette (and thus its
+// auto-allocated 16-color slot) exists; without this their OAM palette-number
+// field keeps the create-time default (0) and the sprite renders with the
+// wrong palette bank.
+static void ne_sync_asset_palette_slot(NEA_Hw2DOBJAsset *asset)
+{
+    if (asset->palette_slot < 0)
+        return;
+
+    NEA_Hw2DOBJ *objs = (asset->engine == NEA_ENGINE_MAIN)
+                         ? ne_hw2d_state.objs_main
+                         : ne_hw2d_state.objs_sub;
+    int count = (asset->engine == NEA_ENGINE_MAIN)
+                 ? ne_hw2d_state.next_oam_main
+                 : ne_hw2d_state.next_oam_sub;
+
+    for (int i = 0; i < count; i++)
+    {
+        if (objs[i].used && objs[i].asset == asset)
+            objs[i].palette_slot = asset->palette_slot;
+    }
+}
+
 // Find a free asset slot in the per-engine pool.
 static NEA_Hw2DOBJAsset *ne_alloc_asset_slot(NEA_Hw2DEngine engine)
 {
@@ -1520,8 +1654,11 @@ int NEA_Hw2DOBJAssetLoadGfx(NEA_Hw2DOBJAsset *asset,
     NEA_Assert(asset->used, "Asset not active");
 
     // VRAM only holds one sprite's worth — copy that. Track total frames
-    // present in the source so callers can know how much they had.
-    memcpy(asset->gfx, data, asset->gfx_size);
+    // present in the source so callers can know how much they had. Clamp the
+    // copy to the source length so a too-small buffer can't over-read.
+    size_t copy = (size < (size_t)asset->gfx_size) ? size
+                                                   : (size_t)asset->gfx_size;
+    ne_vram_copy(asset->gfx, data, copy);
     asset->num_frames = (int)(size / asset->gfx_size);
     if (asset->num_frames < 1)
         asset->num_frames = 1;
@@ -1585,6 +1722,13 @@ int NEA_Hw2DOBJAssetLoadPalette(NEA_Hw2DOBJAsset *asset,
         {
             slot = asset->palette_slot;
         }
+
+        // A 16-color sprite occupies exactly one 16-entry palette slot. GRF
+        // converters (grit, ptexconv) typically pad a 4bpp palette out to 256
+        // entries; copying all of them would overwrite the slots belonging to
+        // other 16-color assets. Only the first 16 colors are this sprite's.
+        if (num_colors > 16)
+            num_colors = 16;
     }
     else
     {
@@ -1593,7 +1737,45 @@ int NEA_Hw2DOBJAssetLoadPalette(NEA_Hw2DOBJAsset *asset,
         asset->palette_slot = 0;
     }
 
+    // Keep any already-bound OBJs pointing at the slot the palette landed in.
+    ne_sync_asset_palette_slot(asset);
+
     return NEA_Hw2DOBJLoadPalette(asset->engine, data, num_colors, slot);
+}
+
+int NEA_Hw2DOBJAssetLoadPaletteFAT(NEA_Hw2DOBJAsset *asset, const char *path)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+    {
+        NEA_DebugPrint("Failed to open: %s", path);
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    void *buf = malloc(size);
+    if (buf == NULL)
+    {
+        fclose(f);
+        NEA_DebugPrint("Out of memory");
+        return -1;
+    }
+
+    fread(buf, 1, size, f);
+    fclose(f);
+
+    // RGB15 palettes are 2 bytes per color.
+    int ret = NEA_Hw2DOBJAssetLoadPalette(asset, buf, size / 2);
+
+    free(buf);
+    return ret;
 }
 
 int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
@@ -1633,6 +1815,18 @@ int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     if (header.gfxAttr != expected_bpp)
     {
         NEA_DebugPrint("GRF color depth mismatch for OBJ asset");
+        goto cleanup;
+    }
+
+    // The asset's hardware size is fixed at creation; the GRF must match it.
+    // Without this check a mismatch silently over-reads the GRF buffer (decl
+    // larger) or loads a cropped image (decl smaller), which renders as a
+    // wrong-size / wrong-ratio sprite.
+    if (oamDimensionsToSize(header.gfxWidth, header.gfxHeight)
+        != ne_hw2d_obj_size(asset->size))
+    {
+        NEA_DebugPrint("OBJ asset GRF size mismatch: file is %dx%d",
+                       (int)header.gfxWidth, (int)header.gfxHeight);
         goto cleanup;
     }
 
@@ -1733,6 +1927,37 @@ int NEA_Hw2DOBJBindAsset(NEA_Hw2DOBJ *obj, NEA_Hw2DOBJAsset *asset)
         obj->palette_slot = asset->palette_slot;
     asset->ref_count++;
     return 0;
+}
+
+void NEA_Hw2DOBJAssetSetPaletteSlot(NEA_Hw2DOBJAsset *asset, int slot)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_Assert(asset->used, "Asset not active");
+
+    // Only 16-color assets have a palette bank; 256-color assets use the whole
+    // OBJ palette region and the OAM palette-number field is unused.
+    if (asset->color != NEA_OBJ_COLOR_16)
+        return;
+
+    NEA_Assert(slot >= 0 && slot < 16, "OBJ palette slot out of range");
+
+    if (asset->palette_slot == slot)
+        return;
+
+    // Hand bitmap ownership from the old bank to the new one so the
+    // auto-allocator won't later reuse the requested bank for another asset.
+    if (asset->palette_slot >= 0)
+        ne_free_obj_pal_slot(asset->engine, asset->palette_slot);
+
+    u16 *used = (asset->engine == NEA_ENGINE_MAIN)
+              ? &ne_hw2d_state.obj_pal_used_main
+              : &ne_hw2d_state.obj_pal_used_sub;
+    *used |= (1u << slot);
+
+    asset->palette_slot = slot;
+
+    // Re-point every bound OBJ at the new bank.
+    ne_sync_asset_palette_slot(asset);
 }
 
 // ---------------------------------------------------------------------------

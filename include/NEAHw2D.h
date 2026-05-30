@@ -358,6 +358,17 @@ int NEA_Hw2DOBJLoadGfxFAT(NEA_Hw2DOBJ *obj, const char *path);
 int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
                             int num_colors, int slot);
 
+/// Load OBJ palette data for an engine from a NitroFS file.
+///
+/// The color count is derived from the file size (RGB15, 2 bytes per color).
+///
+/// @param engine NEA_ENGINE_MAIN or NEA_ENGINE_SUB.
+/// @param path   NitroFS path to the palette file.
+/// @param slot   Palette slot (0-15 for 16-color sprites).
+/// @return 0 on success, -1 on error.
+int NEA_Hw2DOBJLoadPaletteFAT(NEA_Hw2DEngine engine, const char *path,
+                               int slot);
+
 /// Load a sprite from a NitroFS GRF file (BlocksDS only).
 ///
 /// Loads sprite graphics + palette in a single call. The GRF's color depth
@@ -420,6 +431,23 @@ int NEA_Hw2DOBJAssetLoadGfxFAT(NEA_Hw2DOBJAsset *asset, const char *path);
 int NEA_Hw2DOBJAssetLoadPalette(NEA_Hw2DOBJAsset *asset,
                                  const void *data, int num_colors);
 
+/// Load palette data for an asset from a NitroFS file.
+///
+/// Same slot-allocation behavior as NEA_Hw2DOBJAssetLoadPalette. The color
+/// count is derived from the file size (RGB15, 2 bytes per color).
+///
+/// @param asset Asset previously created by NEA_Hw2DOBJAssetCreate().
+/// @param path  NitroFS path to the palette file.
+/// @return 0 on success, -1 on error.
+int NEA_Hw2DOBJAssetLoadPaletteFAT(NEA_Hw2DOBJAsset *asset, const char *path);
+
+/// Pin a 16-color asset to a specific palette bank (0-15).
+///
+/// Overrides the bank that would otherwise be auto-allocated when a palette is
+/// loaded, transfers the allocator's bank ownership accordingly, and re-points
+/// every OBJ already bound to the asset. Ignored for 256-color assets (no-op).
+void NEA_Hw2DOBJAssetSetPaletteSlot(NEA_Hw2DOBJAsset *asset, int slot);
+
 /// Load gfx + palette into an asset from a NitroFS GRF file (BlocksDS only).
 ///
 /// Color depth must match the asset's color mode. Palette slot is allocated
@@ -456,6 +484,12 @@ void NEA_Hw2DOBJSetFlip(NEA_Hw2DOBJ *obj, bool hflip, bool vflip);
 
 /// Set sprite draw priority (0 = highest, 3 = lowest).
 void NEA_Hw2DOBJSetPriority(NEA_Hw2DOBJ *obj, int priority);
+
+/// Select which 16-color palette bank a sprite uses (0-15).
+///
+/// Use this for 16-color sprites whose palette was loaded into a non-zero slot
+/// via NEA_Hw2DOBJLoadPalette(). Ignored for 256-color sprites (no-op).
+void NEA_Hw2DOBJSetPaletteSlot(NEA_Hw2DOBJ *obj, int slot);
 
 /// Set the current animation frame (for multi-frame sprite sheets).
 void NEA_Hw2DOBJSetFrame(NEA_Hw2DOBJ *obj, int frame);
