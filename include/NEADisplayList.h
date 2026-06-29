@@ -16,6 +16,49 @@
 ///
 /// @{
 
+/// GFX FIFO commands
+typedef enum {
+    NEA_FIFO_NOP = 0x00,
+    NEA_FIFO_MTX_MODE = 0x10,
+    NEA_FIFO_MTX_PUSH = 0x11,
+    NEA_FIFO_MTX_POP = 0x12,
+    NEA_FIFO_MTX_STORE = 0x13,
+    NEA_FIFO_MTX_RESTORE = 0x14,
+    NEA_FIFO_MTX_IDENTITY = 0x15,
+    NEA_FIFO_MTX_LOAD_4x4 = 0x16,
+    NEA_FIFO_MTX_LOAD_4x3 = 0x17,
+    NEA_FIFO_MTX_MULT_4x4 = 0x18,
+    NEA_FIFO_MTX_MULT_4x3 = 0x19,
+    NEA_FIFO_MTX_MULT_3x3 = 0x1A,
+    NEA_FIFO_MTX_SCALE = 0x1B,
+    NEA_FIFO_MTX_TRANS = 0x1C,
+    NEA_FIFO_COLOR = 0x20,
+    NEA_FIFO_NORMAL = 0x21,
+    NEA_FIFO_TEXCOORD = 0x22,
+    NEA_FIFO_VTX_16 = 0x23,
+    NEA_FIFO_VTX_10 = 0x24,
+    NEA_FIFO_VTX_XY = 0x25,
+    NEA_FIFO_VTX_XZ = 0x26,
+    NEA_FIFO_VTX_YZ = 0x27,
+    NEA_FIFO_VTX_DIFF = 0x28,
+    NEA_FIFO_POLYGON_ATTR = 0x29,
+    NEA_FIFO_TEXIMAGE_PARAM = 0x2A,
+    NEA_FIFO_PLTT_BASE = 0x2B,
+    NEA_FIFO_DIF_AMB = 0x30,
+    NEA_FIFO_SPE_EMI = 0x31,
+    NEA_FIFO_LIGHT_VECTOR = 0x32,
+    NEA_FIFO_LIGHT_COLOR = 0x33,
+    NEA_FIFO_SHININESS = 0x34,
+    NEA_FIFO_BEGIN_VTXS = 0x40,
+    NEA_FIFO_END_VTXS = 0x41,
+    NEA_FIFO_SWAP_BUFFERS = 0x50,
+    NEA_FIFO_VIEWPORT = 0x60,
+    NEA_FIFO_BOX_TEST = 0x70,
+    NEA_FIFO_POS_TEST = 0x71,
+    NEA_FIFO_VEC_TEST = 0x72
+} NEA_GfxFifoCmd;
+
+
 /// Possible ways to send display lists to the GPU.
 typedef enum {
     NEA_DL_CPU,          ///< Send all data to the GPU with CPU copy loop.
@@ -52,6 +95,15 @@ void NEA_DisplayListSetDefaultFunction(NEA_DisplayListDrawFunction type);
 ///
 /// @param list Pointer to the display list
 void NEA_DisplayListDrawDefault(const void *list);
+
+
+/// Modify a display list in place using a user-provided function
+///
+/// @param list Pointer to the display list
+/// @param modification Function that can be used to modify the display list
+void NEA_DisplayListModify(const void *list, void (*modification)(NEA_GfxFifoCmd cmd, void *params));
+
+
 
 /// @}
 
