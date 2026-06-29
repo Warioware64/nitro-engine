@@ -474,6 +474,14 @@ int NEA_ModelGetSubMeshCount(const NEA_Model *model);
 /// @return Pointer to the name string, or NULL on error.
 const char *NEA_ModelGetSubMeshName(const NEA_Model *model, int submesh_index);
 
+
+/// Modifies a model's display list in memory.
+///
+/// @param model Pointer to the model.
+/// @param modification Function to modify the display list
+void NEA_ModelModify(NEA_Model *model, void (*modification)(NEA_GfxFifoCmd cmd, void *params));
+
+
 /// Deletes all models and frees all memory used by them.
 void NEA_ModelDeleteAll(void);
 

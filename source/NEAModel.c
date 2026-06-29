@@ -1016,6 +1016,13 @@ const char *NEA_ModelGetSubMeshName(const NEA_Model *model, int submesh_index)
     return model->multi->submeshes[submesh_index].name;
 }
 
+void NEA_ModelModify(NEA_Model *model, void (*modification)(NEA_GfxFifoCmd cmd, void *params))
+{
+    ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
+
+    NEA_DisplayListModify(mesh->address, modification);
+}
+
 void NEA_ModelDeleteAll(void)
 {
     if (!ne_model_system_inited)
