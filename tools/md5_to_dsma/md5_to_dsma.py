@@ -61,6 +61,15 @@ DLMM_MAGIC = 0x4D4D4C44  # "DLMM" in little-endian
 DLMM_VERSION = 1
 DLMM_SUBMESH_HEADER_SIZE = 56  # bytes per submesh header
 
+# NSMW (NitroSkin MultiWeight) - two-weight smooth skinning format
+NSMW_MAGIC = 0x574D534E  # "NSMW" in little-endian
+NSMW_VERSION = 1
+NSMW_HEADER_SIZE = 24     # magic, version, num_nodes, num_joints,
+                          # num_submeshes, flags
+NSMW_NODE_SIZE = 12       # num_weights/joint0/joint1/pad + 2 * weight (f32)
+NSMW_INVBIND_SIZE = 48    # 12 int32 (4x3 matrix)
+NSMW_MAX_NODES = 30       # matrix-stack budget (must match NEA_MAX_SKIN_NODES)
+
 def save_dlmm(output_file, submeshes):
     """Write multi-material model to .dlmm binary format.
 
@@ -206,7 +215,55 @@ def joint_info_to_m4x3(q, trans):
             [    xy + wz, 1 - x2 - z2,     yz - wx, trans.y],
             [    xz - wy,     yz + wx, 1 - x2 - y2, trans.z]]
 
-def parse_md5mesh(input_file):
+def invert_affine_m4x3(m):
+    """Inverts an affine 4x3 matrix in row-major 3x4 form (m[row][col], columns
+    0-2 = rotation/scale, column 3 = translation). Returns (inv3x3, trans3)."""
+    r = [[m[0][0], m[0][1], m[0][2]],
+         [m[1][0], m[1][1], m[1][2]],
+         [m[2][0], m[2][1], m[2][2]]]
+    t = [m[0][3], m[1][3], m[2][3]]
+
+    det = (r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+         - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+         + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]))
+
+    if abs(det) < 1e-12:
+        raise MD5FormatError("Singular bind matrix; cannot invert for NSMW")
+
+    inv_det = 1.0 / det
+
+    inv = [
+        [(r[1][1] * r[2][2] - r[1][2] * r[2][1]) * inv_det,
+         (r[0][2] * r[2][1] - r[0][1] * r[2][2]) * inv_det,
+         (r[0][1] * r[1][2] - r[0][2] * r[1][1]) * inv_det],
+        [(r[1][2] * r[2][0] - r[1][0] * r[2][2]) * inv_det,
+         (r[0][0] * r[2][2] - r[0][2] * r[2][0]) * inv_det,
+         (r[0][2] * r[1][0] - r[0][0] * r[1][2]) * inv_det],
+        [(r[1][0] * r[2][1] - r[1][1] * r[2][0]) * inv_det,
+         (r[0][1] * r[2][0] - r[0][0] * r[2][1]) * inv_det,
+         (r[0][0] * r[1][1] - r[0][1] * r[1][0]) * inv_det],
+    ]
+
+    tinv = [-(inv[0][0] * t[0] + inv[0][1] * t[1] + inv[0][2] * t[2]),
+            -(inv[1][0] * t[0] + inv[1][1] * t[1] + inv[1][2] * t[2]),
+            -(inv[2][0] * t[0] + inv[2][1] * t[1] + inv[2][2] * t[2])]
+
+    return inv, tinv
+
+def invbind_to_f32_list(m):
+    """Inverts an affine 4x3 rest matrix and serializes it as 12 f32 values in
+    the column-major-3x3 + translation order expected by MATRIX_MULT4x3."""
+    inv, tinv = invert_affine_m4x3(m)
+    vals = [inv[0][0], inv[1][0], inv[2][0],   # column 0
+            inv[0][1], inv[1][1], inv[2][1],   # column 1
+            inv[0][2], inv[1][2], inv[2][2],   # column 2
+            tinv[0], tinv[1], tinv[2]]         # translation
+    return [float_to_f32(v) for v in vals]
+
+def parse_md5mesh(input_file, nsmw=False):
+    # When nsmw is True, vertices may have up to two weights with arbitrary
+    # biases (the NSMW converter selects/normalizes them later). Otherwise the
+    # DSMA path requires exactly one weight with a bias of 1.0 per vertex.
     Joint = namedtuple("Joint", "name parent pos orient scale")
     Vert = namedtuple("Vert", "st startWeight countWeight")
     Weight = namedtuple("Weight", "joint bias pos")
@@ -361,11 +418,12 @@ def parse_md5mesh(input_file):
                     startWeight = int(tokens[5])
                     countWeight = int(tokens[6])
 
-                    if countWeight != 1:
+                    if not nsmw and countWeight != 1:
                         raise MD5FormatError(
                             f"Vertex with {countWeight} weights detected, but this tool "
                             "only supports vertices with one weight. Ensure that all your "
-                            "vertices are assigned exactly one weight with a bias of 1.0."
+                            "vertices are assigned exactly one weight with a bias of 1.0. "
+                            "Use --format nsmw to allow up to two weights per vertex."
                         )
 
                     verts[index] = Vert(st, startWeight, countWeight)
@@ -400,12 +458,12 @@ def parse_md5mesh(input_file):
                     jointIndex = int(tokens[1])
                     bias = float(tokens[2])
 
-                    if bias != 1.0:
+                    if not nsmw and bias != 1.0:
                         raise MD5FormatError(
                             f"Weight with bias {bias} detected, but this tool only"
                             "supports weights with bias equal to 1.0. Ensure that all"
                             "your vertices are assigned exactly one weight with a"
-                            "bias of 1.0."
+                            "bias of 1.0. Use --format nsmw to allow blended weights."
                         )
 
                     if tokens[3] != '(':
@@ -1108,6 +1166,303 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
 
 
 # ---------------------------------------------------------------------------
+# NSMW (two-weight smooth skinning) support
+# ---------------------------------------------------------------------------
+
+def save_nsmw(output_file, num_joints, node_list, invbind_list, submeshes):
+    """Write an NSMW model to binary.
+
+    Args:
+        output_file: output path
+        num_joints: number of joints in the skeleton (must match the DSA)
+        node_list: list of (num_weights, joint0, joint1, weight0_f32, weight1_f32)
+        invbind_list: list (length num_joints) of 12-int32 inverse-bind matrices
+        submeshes: list of dicts (same fields as save_dlmm submeshes)
+    """
+    num_nodes = len(node_list)
+    num_sub = len(submeshes)
+
+    dl_binaries = [sub['dl'].get_binary() for sub in submeshes]
+
+    dl_start = (NSMW_HEADER_SIZE
+                + num_nodes * NSMW_NODE_SIZE
+                + num_joints * NSMW_INVBIND_SIZE
+                + num_sub * DLMM_SUBMESH_HEADER_SIZE)
+
+    dl_offsets = []
+    offset = dl_start
+    for b in dl_binaries:
+        dl_offsets.append(offset)
+        offset += len(b)
+
+    with open(output_file, 'wb') as f:
+        f.write(struct.pack('<IIIIII', NSMW_MAGIC, NSMW_VERSION, num_nodes,
+                            num_joints, num_sub, 0))
+
+        # Node table
+        for (nw, j0, j1, w0, w1) in node_list:
+            f.write(struct.pack('<BBBBII', nw, j0, j1, 0, w0, w1))
+
+        # Inverse-bind table
+        for inv in invbind_list:
+            for v in inv:
+                f.write(struct.pack('<I', v))
+
+        # Submesh table (same layout as DLMM)
+        for i, sub in enumerate(submeshes):
+            flags = 1 if sub['has_texture'] else 0
+            name_bytes = sub['name'].encode('ascii', errors='replace')[:31]
+            name_bytes = name_bytes + b'\x00' * (32 - len(name_bytes))
+            f.write(struct.pack('<IIIII',
+                dl_offsets[i], len(dl_binaries[i]),
+                sub['diffuse_ambient'], sub['specular_emission'], sub['color']))
+            f.write(struct.pack('<HH', sub['alpha'], flags))
+            f.write(name_bytes)
+
+        # Display lists
+        for b in dl_binaries:
+            f.write(b)
+
+
+def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
+                         extension_mesh, extension_anim, blender_fix,
+                         export_base_pose, no_strip=False):
+
+    print(f"Converting model (NSMW): {model_file}")
+
+    joints, meshes = parse_md5mesh(model_file, nsmw=True)
+
+    print(f"Loaded {len(joints)} joint(s) and {len(meshes)} mesh(es).")
+
+    if export_base_pose:
+        print("Converting base pose...")
+        save_animation([joints],
+                       os.path.join(output_folder, f"{name}{extension_anim}"),
+                       blender_fix)
+
+    print("Converting meshes...")
+
+    model_dir = os.path.dirname(os.path.abspath(model_file))
+
+    # Rest (bind) matrix of every joint in original (un-fixed) model space. The
+    # blender-fix rotation is applied only to the animation (DSA), composed on
+    # the left of the animated joint matrices, so it must NOT be applied here.
+    joint_rest = [joint_info_to_m4x3(j.orient, j.pos) for j in joints]
+
+    # Global node table shared by all submeshes.
+    node_map = {}      # node key -> node index
+    node_list = []     # list of (num_weights, j0, j1, w0_f32, w1_f32)
+    over_weight_warned = [False]
+
+    def resolve_node(mesh, vert):
+        # Returns (node_index, selected) where 'selected' is a list of
+        # (joint, weight_float, weight_pos) for the chosen (1 or 2) weights.
+        ws = [mesh.weights[vert.startWeight + k] for k in range(vert.countWeight)]
+        if len(ws) == 0:
+            raise MD5FormatError("Vertex with no weights")
+
+        if len(ws) > 2 and not over_weight_warned[0]:
+            print("  WARNING: vertices with more than 2 weights found; keeping "
+                  "the two largest and renormalizing")
+            over_weight_warned[0] = True
+
+        ws = sorted(ws, key=lambda w: -w.bias)[:2]
+
+        total = sum(w.bias for w in ws)
+        if total <= 0.0:
+            total = 1.0
+
+        sel = [(w.joint, w.bias / total, w.pos) for w in ws]
+
+        # Merge two weights that target the same joint
+        if len(sel) == 2 and sel[0][0] == sel[1][0]:
+            sel = [(sel[0][0], 1.0, sel[0][2])]
+
+        if len(sel) == 1:
+            j = sel[0][0]
+            sel = [(j, 1.0, sel[0][2])]
+            key = (1, j, j, float_to_f32(1.0), 0)
+        else:
+            (j0, w0, p0), (j1, w1, p1) = sel
+            # Canonicalize so the smaller joint index is first (stable dedup)
+            if j1 < j0:
+                (j0, w0, p0), (j1, w1, p1) = (j1, w1, p1), (j0, w0, p0)
+            sel = [(j0, w0, p0), (j1, w1, p1)]
+            key = (2, j0, j1, float_to_f32(w0), float_to_f32(w1))
+
+        idx = node_map.get(key)
+        if idx is None:
+            idx = len(node_list)
+            node_map[key] = idx
+            node_list.append(key)
+        return idx, sel
+
+    def compute_vbind(sel):
+        vx = vy = vz = 0.0
+        for (j, w, pos) in sel:
+            p = pos.mul_m4x3(joint_rest[j])
+            vx += w * p.x
+            vy += w * p.y
+            vz += w * p.z
+        return Vector(vx, vy, vz)
+
+    mesh_data = []  # per-mesh data needed to emit display lists later
+
+    for mesh_index, mesh in enumerate(meshes):
+        # Texture size (auto-detected from the shader image, like multi-material)
+        mesh_tex_size = list(texture_size) if texture_size else [64, 64]
+        if mesh.shader:
+            shader_path = os.path.join(model_dir, mesh.shader)
+            if os.path.isfile(shader_path):
+                try:
+                    w, h = get_image_dimensions(shader_path)
+                    if is_valid_texture_size(w) and is_valid_texture_size(h):
+                        mesh_tex_size = [w, h]
+                        print(f"  Shader '{mesh.shader}': detected {w}x{h}")
+                    else:
+                        print(f"  WARNING: Shader image {mesh.shader} has non-power-of-2 "
+                              f"size {w}x{h}, using fallback {mesh_tex_size}")
+                except ValueError as e:
+                    print(f"  WARNING: Cannot read shader image: {e}")
+            else:
+                print(f"  WARNING: Shader image not found: {shader_path}")
+
+        print(f"  Mesh {mesh_index}: {mesh.numverts} verts, {mesh.numtris} tris, "
+              f"{mesh.numweights} weights")
+
+        # Per md5 vertex: node index and model-space bind position
+        vert_node = [None] * mesh.numverts
+        vert_vbind = [None] * mesh.numverts
+        for vi, vert in enumerate(mesh.verts):
+            node_idx, sel = resolve_node(mesh, vert)
+            vert_node[vi] = node_idx
+            vert_vbind[vi] = compute_vbind(sel)
+
+        # Per-triangle model-space normals (from the bind positions)
+        tri_normal = []
+        for tri in mesh.tris:
+            p = [vert_vbind[i] for i in tri]
+            n = p[0].sub(p[1]).cross(p[1].sub(p[2]))
+            tri_normal.append(n.normalize() if n.length() > 0 else Vector(0, 0, 0))
+
+        # Per-(triangle, vertex) GPU data
+        all_tri_verts = []
+        for ti, tri in enumerate(mesh.tris):
+            norm = tri_normal[ti]
+            tri_vdata = []
+            for vi in range(3):
+                mv = tri[vi]
+                st = mesh.verts[mv].st
+                vb = vert_vbind[mv]
+                tri_vdata.append({
+                    'u': st[0] * mesh_tex_size[0],
+                    'v': st[1] * mesh_tex_size[1],
+                    'node_index': vert_node[mv],
+                    'nx': norm.x, 'ny': norm.y, 'nz': norm.z,
+                    'px': vb.x, 'py': vb.y, 'pz': vb.z,
+                })
+            all_tri_verts.append(tri_vdata)
+
+        # Build keys for stripification (vertex index + quantized normal) and a
+        # reverse lookup from key to source (triangle, vertex).
+        resolved_tris = []
+        vk_to_src = {}
+        for ti, tri in enumerate(mesh.tris):
+            vdata = all_tri_verts[ti]
+            vkeys = []
+            for vi in range(3):
+                d = vdata[vi]
+                vk = (tri[vi], float_to_n10(d['nx']),
+                      float_to_n10(d['ny']), float_to_n10(d['nz']))
+                vkeys.append(vk)
+                vk_to_src[vk] = (ti, vi)
+            resolved_tris.append(tuple(vkeys))
+
+        if no_strip:
+            tri_strips, tri_singles = [], list(range(len(resolved_tris)))
+        else:
+            tri_strips, tri_singles = stripify_triangles(resolved_tris)
+
+        if mesh.shader:
+            mat_name = os.path.splitext(os.path.basename(mesh.shader))[0]
+        else:
+            mat_name = f"mesh_{mesh_index}"
+
+        mesh_data.append({
+            'tri_strips': tri_strips,
+            'tri_singles': tri_singles,
+            'resolved_tris': resolved_tris,
+            'all_tri_verts': all_tri_verts,
+            'vk_to_src': vk_to_src,
+            'mat_name': mat_name,
+        })
+
+    num_nodes = len(node_list)
+    print(f"  Nodes (matrix-palette slots): {num_nodes}")
+    if num_nodes == 0:
+        raise MD5FormatError("NSMW model has no nodes")
+    if num_nodes > NSMW_MAX_NODES:
+        raise MD5FormatError(
+            f"NSMW model needs {num_nodes} nodes but the matrix stack only has "
+            f"room for {NSMW_MAX_NODES}. Reduce the number of distinct two-bone "
+            "weight combinations (e.g. split the mesh or simplify the rig).")
+
+    base_matrix = 30 - num_nodes + 1
+
+    # Inverse-bind matrices for every joint (serialized in MATRIX_MULT4x3 order)
+    invbind_list = [invbind_to_f32_list(joint_rest[j]) for j in range(len(joints))]
+
+    # Emit one display list per submesh now that the node base index is known
+    submeshes = []
+    for md in mesh_data:
+        dl = DisplayList()
+        all_tri_verts = md['all_tri_verts']
+        vk_to_src = md['vk_to_src']
+        resolved_tris = md['resolved_tris']
+        last_node_index = [None]
+
+        def emit_vertex(vk):
+            ti, vi = vk_to_src[vk]
+            d = all_tri_verts[ti][vi]
+            dl.texcoord(d['u'], d['v'])
+            node_index = d['node_index']
+            if node_index != last_node_index[0]:
+                dl.mtx_restore(base_matrix + node_index)
+                last_node_index[0] = node_index
+            dl.normal(d['nx'], d['ny'], d['nz'])
+            dl.vtx(d['px'], d['py'], d['pz'])
+
+        for strip_verts, strip_faces in md['tri_strips']:
+            dl.begin_vtxs("triangle_strip")
+            for vk in strip_verts:
+                emit_vertex(vk)
+            dl.end_vtxs()
+
+        if md['tri_singles']:
+            dl.begin_vtxs("triangles")
+            for fi in md['tri_singles']:
+                for vk in resolved_tris[fi]:
+                    emit_vertex(vk)
+            dl.end_vtxs()
+
+        dl.finalize()
+        submeshes.append({
+            'name': md['mat_name'],
+            'dl': dl,
+            'diffuse_ambient': 0,
+            'specular_emission': 0,
+            'color': 0x7FFF,
+            'alpha': 31,
+            'has_texture': True,
+        })
+
+    output_path = os.path.join(output_folder, f"{name}{extension_mesh}")
+    save_nsmw(output_path, len(joints), node_list, invbind_list, submeshes)
+    print(f"Saved NSMW with {num_nodes} node(s) and {len(submeshes)} submesh(es) "
+          f"to {output_path}")
+
+
+# ---------------------------------------------------------------------------
 # Bone collision (.md5collimesh / .boncol) support
 # ---------------------------------------------------------------------------
 
@@ -1352,15 +1707,24 @@ if __name__ == "__main__":
     parser.add_argument("--collision", required=False, type=str, default=None,
                         help="path to .md5collimesh file for per-bone collision "
                              "data (generates .boncol binary)")
+    parser.add_argument("--format", required=False, choices=["dsma", "nsmw"],
+                        default="dsma",
+                        help="skinning format: 'dsma' (1 weight, rigid) or "
+                             "'nsmw' (up to 2 weights, smooth)")
+    parser.add_argument("--nsmw", required=False, action='store_true',
+                        help="shortcut for --format nsmw")
 
     args = parser.parse_args()
 
+    fmt = "nsmw" if args.nsmw else args.format
+
     if args.model is not None:
-        if args.multi_material:
-            # In multi-material mode, --texture is optional (auto-detected from shader)
+        if args.multi_material or fmt == "nsmw":
+            # In multi-material/NSMW mode, --texture is optional (auto-detected
+            # from the shader images)
             if len(args.texture) not in (0, 2):
                 print("Please, provide exactly 0 or 2 values to the --texture argument "
-                      "in multi-material mode")
+                      "in multi-material/NSMW mode")
                 sys.exit(1)
         else:
             if len(args.texture) != 2:
@@ -1380,16 +1744,25 @@ if __name__ == "__main__":
     os.makedirs(args.output, exist_ok=True)
 
     # Add '.bin' to the name of the files if requested
-    extension_mesh = "_dsm.bin" if args.bin else ".dsm"
+    if fmt == "nsmw":
+        extension_mesh = "_nsmw.bin" if args.bin else ".nsmw"
+    else:
+        extension_mesh = "_dsm.bin" if args.bin else ".dsm"
     extension_anim = "_dsa.bin" if args.bin else ".dsa"
 
     try:
         if args.model is not None:
-            convert_md5mesh(args.model, args.name, args.output, args.texture,
-                            args.draw_normal_polygons, extension_mesh,
-                            extension_anim, args.blender_fix,
-                            args.export_base_pose, args.no_strip,
-                            args.multi_material)
+            if fmt == "nsmw":
+                convert_md5mesh_nsmw(args.model, args.name, args.output,
+                                     args.texture, extension_mesh,
+                                     extension_anim, args.blender_fix,
+                                     args.export_base_pose, args.no_strip)
+            else:
+                convert_md5mesh(args.model, args.name, args.output, args.texture,
+                                args.draw_normal_polygons, extension_mesh,
+                                extension_anim, args.blender_fix,
+                                args.export_base_pose, args.no_strip,
+                                args.multi_material)
 
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,
@@ -1406,7 +1779,7 @@ if __name__ == "__main__":
             print(f"  Parsed {len(collision_bones)} bone collision entries")
 
             # Re-parse joints from model for name mapping
-            joints, _ = parse_md5mesh(args.model)
+            joints, _ = parse_md5mesh(args.model, nsmw=(fmt == "nsmw"))
 
             extension_boncol = "_boncol.bin" if args.bin else ".boncol"
             boncol_path = os.path.join(args.output,

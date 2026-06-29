@@ -40,6 +40,7 @@ extern "C" {
 #include "NEAFormats.h"
 #include "NEAGeneral.h"
 #include "NEAGUI.h"
+#include "NEANodeSkin.h"
 #include "NEAModel.h"
 #include "NEAPalette.h"
 #include "NEAPhysics.h"

@@ -10,6 +10,8 @@
 /// @file   NEAModel.h
 /// @brief  Functions to draw and handle models.
 
+#include "NEANodeSkin.h"
+
 /// @defgroup model_system Model handling system
 ///
 /// Functions to create and manipulate animated or static models.
@@ -38,8 +40,9 @@ typedef struct {
 
 /// Possible model types.
 typedef enum {
-    NEA_Static,  ///< Not animated.
-    NEA_Animated ///< Animated.
+    NEA_Static,    ///< Not animated.
+    NEA_Animated,  ///< Animated (DSMA, rigid single-weight skinning).
+    NEA_AnimatedMW ///< Animated (NSMW, two-weight smooth skinning).
 } NEA_ModelType;
 
 /// Maximum number of submeshes per multi-material model.
@@ -80,6 +83,7 @@ typedef struct {
     int32_t anim_blend;       ///< Animation blend factor
     NEA_Material *texture;     ///< Material used by this model (single-material)
     NEA_MultiMeshData *multi;  ///< Multi-material data, or NULL for single-material
+    NEA_NodeSkinData *nodeskin; ///< NSMW skinning data, or NULL (NEA_AnimatedMW only)
     int x;                    ///< X position of the model (f32)
     int y;                    ///< Y position of the model (f32)
     int z;                    ///< Z position of the model (f32)
@@ -375,6 +379,37 @@ int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer);
 /// @param path Path to the file.
 /// @return It returns 1 on success, 0 on error.
 int NEA_ModelLoadDSMFAT(NEA_Model *model, const char *path);
+
+/// Loads an NSMW file (two-weight smooth skinning) stored in RAM to a model.
+///
+/// An NSMW file always contains at least one submesh, so after loading you can
+/// use the submesh material functions (NEA_ModelAutoBindMaterials(), etc.). The
+/// model must have been created as NEA_AnimatedMW. Assign an animation with
+/// NEA_ModelSetAnimation() (the DSA format is shared with DSMA).
+///
+/// @param model Pointer to an NEA_AnimatedMW model.
+/// @param pointer Pointer to the NSMW data in RAM.
+/// @return It returns 1 on success, 0 on error.
+int NEA_ModelLoadNSMW(NEA_Model *model, const void *pointer);
+
+/// Loads an NSMW file (two-weight smooth skinning) from a filesystem to a model.
+///
+/// @param model Pointer to an NEA_AnimatedMW model.
+/// @param path Path to the file.
+/// @return It returns 1 on success, 0 on error.
+int NEA_ModelLoadNSMWFAT(NEA_Model *model, const char *path);
+
+/// Asynchronously loads an NSMW file from a filesystem to an NEA_AnimatedMW model.
+///
+/// This works like NEA_ModelLoadNSMWFAT(), but the file is read in the
+/// background. See @ref async for details.
+///
+/// The model must not be deleted until the load reaches NEA_ASYNC_DONE.
+///
+/// @param model Pointer to an NEA_AnimatedMW model.
+/// @param path Path to the file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_ModelLoadNSMWFATAsync(NEA_Model *model, const char *path);
 
 /// Load a multi-material mesh file (DLMM) from RAM.
 ///

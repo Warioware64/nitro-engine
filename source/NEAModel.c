@@ -23,6 +23,14 @@ static NEA_Model **NEA_ModelPointers;
 static int NEA_MAX_MODELS;
 static bool ne_model_system_inited = false;
 
+// Returns true for any animated model type (DSMA or NSMW). Both keep their
+// animation state in animinfo[] and share the DSA animation format.
+static inline bool ne_model_is_animated(const NEA_Model *model)
+{
+    return (model->modeltype == NEA_Animated)
+        || (model->modeltype == NEA_AnimatedMW);
+}
+
 static void ne_mesh_delete(int mesh_index)
 {
     int slot = mesh_index;
@@ -159,7 +167,7 @@ NEA_Model *NEA_ModelCreate(NEA_ModelType type)
     model->modeltype = type;
     model->meshindex = NEA_NO_MESH;
 
-    if (type == NEA_Animated)
+    if (type == NEA_Animated || type == NEA_AnimatedMW)
     {
         for (int i = 0; i < 2; i++)
         {
@@ -195,11 +203,16 @@ void NEA_ModelDelete(NEA_Model *model)
         i++;
     }
 
-    if (model->modeltype == NEA_Animated)
+    if (ne_model_is_animated(model))
     {
         for (int i = 0; i < 2; i++)
             free(model->animinfo[i]);
     }
+
+    // NSMW node-skin data (the inverse-bind table it points to lives inside the
+    // multi-mesh base buffer, freed below via the multi-mesh refcount).
+    if (model->nodeskin != NULL)
+        free(model->nodeskin);
 
     if (model->mat != NULL)
         free(model->mat);
@@ -265,7 +278,7 @@ void NEA_ModelSetAnimation(NEA_Model *model, NEA_Animation *anim)
 {
     NEA_AssertPointer(model, "NULL model pointer");
     NEA_AssertPointer(anim, "NULL animation pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[0]->animation = anim;
     uint32_t frames = DSMA_GetNumFrames(anim->data);
     model->animinfo[0]->numframes = frames;
@@ -275,7 +288,7 @@ void NEA_ModelSetAnimationSecondary(NEA_Model *model, NEA_Animation *anim)
 {
     NEA_AssertPointer(model, "NULL model pointer");
     NEA_AssertPointer(anim, "NULL animation pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[1]->animation = anim;
     uint32_t frames = DSMA_GetNumFrames(anim->data);
     model->animinfo[1]->numframes = frames;
@@ -292,7 +305,7 @@ void NEA_ModelDraw(const NEA_Model *model)
     if (model->multi == NULL && model->meshindex == NEA_NO_MESH)
         return;
 
-    if (model->modeltype == NEA_Animated)
+    if (ne_model_is_animated(model))
     {
         // The base animation must always be present. The secondary animation
         // isn't required to draw the model.
@@ -335,8 +348,31 @@ void NEA_ModelDraw(const NEA_Model *model)
     if (model->multi != NULL)
     {
         // Multi-material draw path
-        // For animated models, set up bone matrices first
-        if (model->modeltype == NEA_Animated)
+        // For animated models, set up bone/node matrices first
+        if (model->modeltype == NEA_AnimatedMW)
+        {
+            int ret;
+            if (model->animinfo[0]->animation && model->animinfo[1]->animation)
+            {
+                ret = NSMW_PrepareNodesBlend(
+                        model->nodeskin,
+                        model->animinfo[0]->animation->data,
+                        model->animinfo[0]->currframe,
+                        model->animinfo[1]->animation->data,
+                        model->animinfo[1]->currframe,
+                        model->anim_blend);
+            }
+            else
+            {
+                ret = NSMW_PrepareNodes(
+                        model->nodeskin,
+                        model->animinfo[0]->animation->data,
+                        model->animinfo[0]->currframe);
+            }
+            NEA_Assert(ret == NSMW_SUCCESS,
+                       "Failed to prepare nodes for NSMW model");
+        }
+        else if (model->modeltype == NEA_Animated)
         {
             int ret;
             if (model->animinfo[0]->animation && model->animinfo[1]->animation)
@@ -378,7 +414,9 @@ void NEA_ModelDraw(const NEA_Model *model)
             NEA_DisplayListDrawDefault(sub->dl_data);
         }
 
-        if (model->modeltype == NEA_Animated)
+        if (model->modeltype == NEA_AnimatedMW)
+            NSMW_FinishDraw();
+        else if (model->modeltype == NEA_Animated)
             DSMA_FinishDraw();
     }
     else
@@ -427,7 +465,7 @@ void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
     NEA_Assert(dest->modeltype == source->modeltype,
               "Different model types");
 
-    if (dest->modeltype == NEA_Animated)
+    if (ne_model_is_animated(dest))
     {
         memcpy(dest->animinfo[0], source->animinfo[0], sizeof(NEA_AnimInfo));
         memcpy(dest->animinfo[1], source->animinfo[1], sizeof(NEA_AnimInfo));
@@ -466,6 +504,20 @@ void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
     else
     {
         dest->multi = NULL;
+    }
+
+    // Clone NSMW node-skin data if present. Its inverse-bind pointer references
+    // the shared multi-mesh base buffer, which is kept alive by the refcount
+    // increment above.
+    if (source->nodeskin != NULL)
+    {
+        dest->nodeskin = calloc(1, sizeof(NEA_NodeSkinData));
+        NEA_AssertPointer(dest->nodeskin, "Not enough memory for nodeskin clone");
+        memcpy(dest->nodeskin, source->nodeskin, sizeof(NEA_NodeSkinData));
+    }
+    else
+    {
+        dest->nodeskin = NULL;
     }
 }
 
@@ -546,7 +598,7 @@ void NEA_ModelAnimateAll(void)
         if (NEA_ModelPointers[i] == NULL)
             continue;
 
-        if (NEA_ModelPointers[i]->modeltype != NEA_Animated)
+        if (!ne_model_is_animated(NEA_ModelPointers[i]))
             continue;
 
         for (int j = 0; j < 2; j++)
@@ -584,7 +636,7 @@ void NEA_ModelAnimateAll(void)
 void NEA_ModelAnimStart(NEA_Model *model, NEA_AnimationType type, int32_t speed)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[0]->type = type;
     model->animinfo[0]->speed = speed;
     model->animinfo[0]->currframe = 0;
@@ -594,7 +646,7 @@ void NEA_ModelAnimSecondaryStart(NEA_Model *model, NEA_AnimationType type,
                                 int32_t speed)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[1]->type = type;
     model->animinfo[1]->speed = speed;
     model->animinfo[1]->currframe = 0;
@@ -604,35 +656,35 @@ void NEA_ModelAnimSecondaryStart(NEA_Model *model, NEA_AnimationType type,
 void NEA_ModelAnimSetSpeed(NEA_Model *model, int32_t speed)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[0]->speed = speed;
 }
 
 void NEA_ModelAnimSecondarySetSpeed(NEA_Model *model, int32_t speed)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     model->animinfo[1]->speed = speed;
 }
 
 int32_t NEA_ModelAnimGetFrame(const NEA_Model *model)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     return model->animinfo[0]->currframe;
 }
 
 int32_t NEA_ModelAnimSecondaryGetFrame(const NEA_Model *model)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     return model->animinfo[1]->currframe;
 }
 
 void NEA_ModelAnimSetFrame(NEA_Model *model, int32_t frame)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     // TODO: Check if it is off bounds
     model->animinfo[0]->currframe = frame;
 }
@@ -640,7 +692,7 @@ void NEA_ModelAnimSetFrame(NEA_Model *model, int32_t frame)
 void NEA_ModelAnimSecondarySetFrame(NEA_Model *model, int32_t frame)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     // TODO: Check if it is off bounds
     model->animinfo[1]->currframe = frame;
 }
@@ -648,7 +700,7 @@ void NEA_ModelAnimSecondarySetFrame(NEA_Model *model, int32_t frame)
 void NEA_ModelAnimSecondarySetFactor(NEA_Model *model, int32_t factor)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
     if (factor < 0)
         factor = 0;
     if (factor > inttof32(1))
@@ -659,7 +711,7 @@ void NEA_ModelAnimSecondarySetFactor(NEA_Model *model, int32_t factor)
 void NEA_ModelAnimSecondaryClear(NEA_Model *model, bool replace_base_anim)
 {
     NEA_AssertPointer(model, "NULL pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(ne_model_is_animated(model), "Not an animated model");
 
     // Return if there is no animation to remove
     if (model->animinfo[1]->animation == NULL)
@@ -676,7 +728,7 @@ int NEA_ModelLoadDSMFAT(NEA_Model *model, const char *path)
     if (!ne_model_system_inited)
         return 0;
 
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not a DSMA animated model");
 
     return ne_model_load_filesystem_common(model, path);
 }
@@ -686,7 +738,7 @@ int NEA_ModelLoadDSM(NEA_Model *model, const void *pointer)
     if (!ne_model_system_inited)
         return 0;
 
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not a DSMA animated model");
 
     return ne_model_load_ram_common(model, pointer);
 }
@@ -823,6 +875,198 @@ int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path)
 }
 
 //--------------------------------------------------------------------------
+// NSMW (two-weight smooth skinning) support
+//--------------------------------------------------------------------------
+
+#define NSMW_HEADER_SIZE  24 // magic, version, num_nodes, num_joints,
+                             // num_submeshes, flags
+#define NSMW_NODE_SIZE    12 // num_weights/joint0/joint1/pad + 2 * weight (f32)
+#define NSMW_INVBIND_SIZE 48 // 12 int32 (4x3 matrix)
+
+// Releases the multi-mesh and node-skin data currently held by a model, if any.
+static void ne_model_free_multi_nodeskin(NEA_Model *model)
+{
+    if (model->multi != NULL)
+    {
+        (*model->multi->base_refcount)--;
+        if (*model->multi->base_refcount == 0)
+        {
+            if (model->multi->base_has_to_free)
+                free(model->multi->base_data);
+            free(model->multi->base_refcount);
+        }
+        free(model->multi);
+        model->multi = NULL;
+    }
+
+    if (model->nodeskin != NULL)
+    {
+        free(model->nodeskin);
+        model->nodeskin = NULL;
+    }
+}
+
+static int ne_nsmw_load(NEA_Model *model, void *data, bool has_to_free)
+{
+    const u8 *ptr = (const u8 *)data;
+
+    // Read file header
+    u32 magic = *(const u32 *)(ptr + 0);
+    u32 version = *(const u32 *)(ptr + 4);
+    u32 num_nodes = *(const u32 *)(ptr + 8);
+    u32 num_joints = *(const u32 *)(ptr + 12);
+    u32 num_submeshes = *(const u32 *)(ptr + 16);
+
+    if (magic != NEA_NSMW_MAGIC)
+    {
+        NEA_DebugPrint("Invalid NSMW magic");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    if (version != 1)
+    {
+        NEA_DebugPrint("Unsupported NSMW version");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    if (num_nodes == 0 || num_nodes > NEA_MAX_SKIN_NODES)
+    {
+        NEA_DebugPrint("Invalid NSMW node count");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    if (num_submeshes == 0 || num_submeshes > NEA_MAX_SUBMESHES)
+    {
+        NEA_DebugPrint("Invalid submesh count");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    // Free existing multi-mesh / node-skin data if present
+    ne_model_free_multi_nodeskin(model);
+
+    // Allocate multi-mesh data (holds the display lists and owns the buffer)
+    NEA_MultiMeshData *multi = calloc(1, sizeof(NEA_MultiMeshData));
+    if (multi == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    multi->base_refcount = malloc(sizeof(int));
+    if (multi->base_refcount == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        free(multi);
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    // Allocate node-skin data (the node table and the inverse-bind pointer)
+    NEA_NodeSkinData *nodeskin = calloc(1, sizeof(NEA_NodeSkinData));
+    if (nodeskin == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        free(multi->base_refcount);
+        free(multi);
+        if (has_to_free)
+            free(data);
+        return 0;
+    }
+
+    *multi->base_refcount = 1;
+    multi->base_data = data;
+    multi->base_has_to_free = has_to_free;
+    multi->num_submeshes = (int)num_submeshes;
+
+    // Parse the node table
+    nodeskin->num_nodes = num_nodes;
+    nodeskin->num_joints = num_joints;
+
+    const u8 *node_ptr = ptr + NSMW_HEADER_SIZE;
+    for (u32 i = 0; i < num_nodes; i++)
+    {
+        NEA_SkinNode *n = &nodeskin->nodes[i];
+        n->num_weights = node_ptr[0];
+        n->joint0 = node_ptr[1];
+        n->joint1 = node_ptr[2];
+        n->pad = 0;
+        n->weight0 = *(const int32_t *)(node_ptr + 4);
+        n->weight1 = *(const int32_t *)(node_ptr + 8);
+        node_ptr += NSMW_NODE_SIZE;
+    }
+
+    // The inverse-bind table follows the node table; it stays in the file buffer
+    nodeskin->invbind = (const int32_t *)(ptr + NSMW_HEADER_SIZE
+                                          + num_nodes * NSMW_NODE_SIZE);
+
+    // Parse submesh headers (same layout as DLMM, after the invbind table)
+    const u8 *hdr = ptr + NSMW_HEADER_SIZE + num_nodes * NSMW_NODE_SIZE
+                    + num_joints * NSMW_INVBIND_SIZE;
+    for (int i = 0; i < (int)num_submeshes; i++)
+    {
+        NEA_SubMesh *sub = &multi->submeshes[i];
+
+        u32 dl_offset = *(const u32 *)(hdr + 0);
+        sub->diffuse_ambient = *(const u32 *)(hdr + 8);
+        sub->specular_emission = *(const u32 *)(hdr + 12);
+        sub->color = *(const u32 *)(hdr + 16);
+        sub->alpha = *(const u16 *)(hdr + 20);
+        sub->flags = *(const u16 *)(hdr + 22);
+
+        memcpy(sub->name, hdr + 24, NEA_MATERIAL_NAME_LEN);
+        sub->name[NEA_MATERIAL_NAME_LEN - 1] = '\0';
+
+        sub->dl_data = (void *)(ptr + dl_offset);
+        sub->material = NULL;
+
+        hdr += DLMM_SUBMESH_HEADER_SIZE;
+    }
+
+    model->multi = multi;
+    model->nodeskin = nodeskin;
+    return 1;
+}
+
+int NEA_ModelLoadNSMW(NEA_Model *model, const void *pointer)
+{
+    if (!ne_model_system_inited)
+        return 0;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(pointer, "NULL data pointer");
+    NEA_Assert(model->modeltype == NEA_AnimatedMW, "Not an NSMW animated model");
+
+    return ne_nsmw_load(model, (void *)pointer, false);
+}
+
+int NEA_ModelLoadNSMWFAT(NEA_Model *model, const char *path)
+{
+    if (!ne_model_system_inited)
+        return 0;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(model->modeltype == NEA_AnimatedMW, "Not an NSMW animated model");
+
+    void *data = NEA_FATLoadData(path);
+    if (data == NULL)
+        return 0;
+
+    return ne_nsmw_load(model, data, true);
+}
+
+//--------------------------------------------------------------------------
 // Asynchronous model loading
 //--------------------------------------------------------------------------
 
@@ -830,7 +1074,8 @@ int NEA_ModelLoadMultiMeshFAT(NEA_Model *model, const char *path)
 typedef enum {
     NE_ASYNC_MESH_STATIC = 0,
     NE_ASYNC_MESH_DSM,
-    NE_ASYNC_MESH_MULTIMESH
+    NE_ASYNC_MESH_MULTIMESH,
+    NE_ASYNC_MESH_NSMW
 } ne_async_mesh_kind;
 
 // Parameters of an asynchronous model load job.
@@ -855,6 +1100,10 @@ static void ne_async_model_finalize(NEA_AsyncFile *job)
         if (p->kind == NE_ASYNC_MESH_MULTIMESH)
         {
             ret = ne_multimesh_load(p->model, buffer, true);
+        }
+        else if (p->kind == NE_ASYNC_MESH_NSMW)
+        {
+            ret = ne_nsmw_load(p->model, buffer, true);
         }
         else
         {
@@ -909,9 +1158,21 @@ NEA_AsyncFile *NEA_ModelLoadDSMFATAsync(NEA_Model *model, const char *path)
 
     NEA_AssertPointer(model, "NULL model pointer");
     NEA_AssertPointer(path, "NULL path pointer");
-    NEA_Assert(model->modeltype == NEA_Animated, "Not an animated model");
+    NEA_Assert(model->modeltype == NEA_Animated, "Not a DSMA animated model");
 
     return ne_model_load_async_common(model, path, NE_ASYNC_MESH_DSM);
+}
+
+NEA_AsyncFile *NEA_ModelLoadNSMWFATAsync(NEA_Model *model, const char *path)
+{
+    if (!ne_model_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(model, "NULL model pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+    NEA_Assert(model->modeltype == NEA_AnimatedMW, "Not an NSMW animated model");
+
+    return ne_model_load_async_common(model, path, NE_ASYNC_MESH_NSMW);
 }
 
 NEA_AsyncFile *NEA_ModelLoadMultiMeshFATAsync(NEA_Model *model,

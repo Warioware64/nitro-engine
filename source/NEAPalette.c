@@ -366,6 +366,7 @@ void NEA_PaletteSystemEnd(void)
 
 static u16 *palette_adress = NULL;
 static int palette_format;
+static u16 palette_num_colors;
 
 void *NEA_PaletteModificationStart(const NEA_Palette *pal)
 {

@@ -1417,6 +1417,18 @@ class NEA_ToolSettings(bpy.types.PropertyGroup):
         name="Export Base Pose", default=False)
     md5_multi_material: BoolProperty(
         name="Multi-Material (DLMM)", default=False)
+    md5_skin_format: EnumProperty(
+        name="Skin Format",
+        description="Skeletal skinning format to export",
+        items=[
+            ('dsma', "DSMA (1 weight, rigid)",
+             "One bone per vertex. Smaller and faster."),
+            ('nsmw', "NSMW (2 weights, smooth)",
+             "Up to two bones per vertex for smooth joints. Capped at 30 "
+             "distinct weight combinations (nodes)."),
+        ],
+        default='dsma',
+    )
 
 
 # =========================================================================
@@ -2075,6 +2087,7 @@ class NEA_OT_RunMd5ToDsma(bpy.types.Operator):
             cmd.append('--export-base-pose')
         if ts.md5_multi_material:
             cmd.append('--multi-material')
+        cmd.extend(['--format', ts.md5_skin_format])
 
         print(f"NEA: Running: {' '.join(cmd)}")
         if not _run_tool(cmd, self.report):
@@ -2217,6 +2230,7 @@ class VIEW3D_PT_nea_tools(bpy.types.Panel):
         box2.label(text="Animated Mesh (md5_to_dsma):", icon='ARMATURE_DATA')
         box2.prop(ts, "md5_mesh_path")
         box2.prop(ts, "md5_model_name")
+        box2.prop(ts, "md5_skin_format")
         box2.prop(ts, "md5_blender_fix")
         box2.prop(ts, "md5_export_base_pose")
         box2.prop(ts, "md5_multi_material")
