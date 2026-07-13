@@ -104,7 +104,7 @@ NEA_Palette *NEA_PaletteCreate(void)
         if (NEA_UserPalette[i] != NULL)
             continue;
 
-        NEA_Palette *ptr = malloc(sizeof(NEA_Palette));
+        NEA_Palette *ptr = calloc(1, sizeof(NEA_Palette));
         if (ptr == NULL)
         {
             NEA_DebugPrint("Not enough memory");
@@ -119,6 +119,46 @@ NEA_Palette *NEA_PaletteCreate(void)
     NEA_DebugPrint("No free slots");
 
     return NULL;
+}
+
+// Frees only the palette VRAM (and its internal slot), leaving the NEA_Palette
+// object alive. This is the palette analog of ne_texture_delete().
+static void ne_palette_vram_free(NEA_Palette *pal)
+{
+    if (pal->index != NEA_NO_PALETTE)
+    {
+        NEA_Free(NEA_PalAllocList, (void *)NEA_PalInfo[pal->index].pointer);
+        NEA_PalInfo[pal->index].pointer = NULL;
+        pal->index = NEA_NO_PALETTE;
+    }
+}
+
+// Keeps a private RAM copy of a palette for a RAM-backed palette instead of
+// uploading it to palette VRAM.
+static int ne_palette_stash(NEA_Palette *pal, const void *pointer,
+                            u16 numcolor, NEA_TextureFormat format)
+{
+    u32 size = (u32)numcolor << 1; // 2 bytes per color
+
+    // Discard any previous RAM copy (this supports reloading with new data)
+    free(pal->ram_data);
+    pal->ram_data = malloc(size);
+    if (pal->ram_data == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return 0;
+    }
+
+    memcpy(pal->ram_data, pointer, size);
+    pal->ram_numcolors = numcolor;
+    pal->ram_format = format;
+
+    // If the palette was already resident in VRAM, drop it so the next
+    // NEA_PaletteVramLoad() re-uploads this new data instead of keeping the
+    // stale VRAM copy.
+    ne_palette_vram_free(pal);
+
+    return 1;
 }
 
 int NEA_PaletteLoadFAT(NEA_Palette *pal, const char *path, NEA_TextureFormat format)
@@ -152,10 +192,18 @@ int NEA_PaletteLoad(NEA_Palette *pal, const void *pointer, u16 numcolor,
 
     NEA_AssertPointer(pal, "NULL pointer");
 
+    // If this palette is RAM-backed, keep it in main RAM instead of uploading it
+    // to palette VRAM. NEA_PaletteVramLoad() re-invokes this with
+    // pointer == pal->ram_data, which falls through to the real upload.
+    if (pal->ram_backed && pointer != pal->ram_data)
+        return ne_palette_stash(pal, pointer, numcolor, format);
+
     if (pal->index != NEA_NO_PALETTE)
     {
         NEA_DebugPrint("Palette already loaded");
-        NEA_PaletteDelete(pal);
+        // Free only the VRAM, not the NEA_Palette object (calling
+        // NEA_PaletteDelete() here would free(pal) and leave a dangling pointer).
+        ne_palette_vram_free(pal);
     }
 
     int slot = NEA_NO_PALETTE;
@@ -208,12 +256,11 @@ void NEA_PaletteDelete(NEA_Palette *pal)
 
     NEA_AssertPointer(pal, "NULL pointer");
 
-    // If there is an asigned palette...
-    if (pal->index != NEA_NO_PALETTE)
-    {
-        NEA_Free(NEA_PalAllocList, (void *)NEA_PalInfo[pal->index].pointer);
-        NEA_PalInfo[pal->index].pointer = NULL;
-    }
+    // Free the palette VRAM if there is one assigned
+    ne_palette_vram_free(pal);
+
+    // Free the RAM copy, if this is a RAM-backed palette
+    free(pal->ram_data);
 
     for (int i = 0; i < NEA_MAX_PALETTES; i++)
     {
@@ -228,10 +275,61 @@ void NEA_PaletteDelete(NEA_Palette *pal)
     NEA_DebugPrint("Material not found");
 }
 
+void NEA_PaletteRamInit(NEA_Palette *palette)
+{
+    NEA_AssertPointer(palette, "NULL palette pointer");
+    NEA_Assert(palette->index == NEA_NO_PALETTE,
+              "RAM-backing must be enabled before loading a palette");
+
+    palette->ram_backed = true;
+}
+
+int NEA_PaletteVramLoad(NEA_Palette *palette)
+{
+    NEA_AssertPointer(palette, "NULL palette pointer");
+
+    // Nothing has been stashed in RAM, so there is nothing to upload
+    if (!palette->ram_backed || palette->ram_data == NULL)
+        return 0;
+
+    // Already resident in VRAM
+    if (palette->index != NEA_NO_PALETTE)
+        return 1;
+
+    // Upload the RAM copy. The ram_backed guard in NEA_PaletteLoad() lets this
+    // call through because the buffer passed is the palette's own ram_data.
+    return NEA_PaletteLoad(palette, palette->ram_data, palette->ram_numcolors,
+                          palette->ram_format);
+}
+
+int NEA_PaletteVramUnload(NEA_Palette *palette)
+{
+    NEA_AssertPointer(palette, "NULL palette pointer");
+
+    // Only RAM-backed palettes can be safely removed from VRAM: the RAM copy is
+    // what allows uploading the palette again later.
+    if (!palette->ram_backed || palette->ram_data == NULL)
+        return 0;
+
+    // Not currently in VRAM
+    if (palette->index == NEA_NO_PALETTE)
+        return 1;
+
+    ne_palette_vram_free(palette);
+
+    return 1;
+}
+
 void NEA_PaletteUse(const NEA_Palette *pal)
 {
     NEA_AssertPointer(pal, "NULL pointer");
-    NEA_Assert(pal->index != NEA_NO_PALETTE, "No asigned palette");
+
+    // A palette with no data resident in VRAM (e.g. a RAM-backed palette that
+    // has been removed from VRAM with NEA_PaletteVramUnload()) leaves the
+    // palette register unchanged instead of reading out of bounds.
+    if (pal->index == NEA_NO_PALETTE)
+        return;
+
     unsigned int shift = 4 - (NEA_PalInfo[pal->index].format == NEA_PAL4);
     GFX_PAL_FORMAT = ((uintptr_t)NEA_PalInfo[pal->index].pointer
                       - ne_pal_lcd_base) >> shift;

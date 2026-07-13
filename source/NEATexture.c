@@ -164,6 +164,54 @@ NEA_Material *NEA_MaterialCreate(void)
     return NULL;
 }
 
+void NEA_MaterialRamInit(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+    NEA_Assert(material->texindex == NEA_NO_TEXTURE,
+              "RAM-backing must be enabled before loading a texture");
+
+    material->ram_backed = true;
+}
+
+int NEA_MaterialTexVramLoad(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    // Nothing has been stashed in RAM, so there is nothing to upload
+    if (!material->ram_backed || material->ram_data == NULL)
+        return 0;
+
+    // Already resident in VRAM
+    if (material->texindex != NEA_NO_TEXTURE)
+        return 1;
+
+    // Upload the RAM copy. The ram_backed guard in NEA_MaterialTexLoad() lets
+    // this call through because the buffer passed is the material's own
+    // ram_data.
+    return NEA_MaterialTexLoad(material, material->ram_format,
+                              material->ram_sizex, material->ram_sizey,
+                              material->ram_flags, material->ram_data);
+}
+
+int NEA_MaterialTexVramUnload(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    // Only RAM-backed materials can be safely removed from VRAM: the RAM copy
+    // is what allows uploading the texture again later.
+    if (!material->ram_backed || material->ram_data == NULL)
+        return 0;
+
+    // Not currently in VRAM
+    if (material->texindex == NEA_NO_TEXTURE)
+        return 1;
+
+    ne_texture_delete(material->texindex);
+    material->texindex = NEA_NO_TEXTURE;
+
+    return 1;
+}
+
 void NEA_MaterialSetName(NEA_Material *mat, const char *name)
 {
     NEA_AssertPointer(mat, "NULL material pointer");
@@ -763,11 +811,96 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
     return -1;
 }
 
+// Keeps a private RAM copy of a texture for a RAM-backed material instead of
+// uploading it to VRAM. For non-compressed textures pass the data in texture02
+// and NULL in texture1. For tex4x4 textures, either pass the two parts
+// separately (texture02 = slot 0/2 data, texture1 = slot 1 data) or pass the
+// concatenated buffer in texture02 with texture1 as NULL. The stored copy is
+// always laid out as [slot 0/2 data][slot 1 data], which is exactly what the
+// upload path (NEA_MaterialTexVramLoad -> NEA_MaterialTexLoad) expects.
+static int ne_material_tex_stash(NEA_Material *tex, NEA_TextureFormat fmt,
+                                 int sizeX, int sizeY, NEA_TextureFlags flags,
+                                 const void *texture02, const void *texture1)
+{
+    // Compute the number of bytes to keep in RAM
+    u32 size02, size1;
+    if (fmt == NEA_TEX4X4)
+    {
+        // Compressed: main data (slot 0/2) plus index data (slot 1)
+        size02 = (sizeX * sizeY) >> 2;
+        size1 = size02 >> 1;
+    }
+    else
+    {
+        static const int size_shift[] = {
+            0, // Nothing
+            1, // NEA_A3PAL32
+            3, // NEA_PAL4
+            2, // NEA_PAL16
+            1, // NEA_PAL256
+            0, // NEA_TEX4X4 (unused here)
+            1, // NEA_A5PAL8
+            0, // NEA_A1RGB5
+            0, // NEA_RGB5
+        };
+        size02 = (sizeX * sizeY << 1) >> size_shift[fmt];
+        size1 = 0;
+    }
+
+    u32 size = size02 + size1;
+
+    // Discard any previous RAM copy (this supports reloading with new data)
+    free(tex->ram_data);
+    tex->ram_data = malloc(size);
+    if (tex->ram_data == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        tex->ram_size = 0;
+        return 0;
+    }
+
+    if (texture1 != NULL)
+    {
+        // Two separate buffers (direct NEA_MaterialTex4x4Load() call)
+        memcpy(tex->ram_data, texture02, size02);
+        memcpy((char *)tex->ram_data + size02, texture1, size1);
+    }
+    else
+    {
+        // Single contiguous buffer (also covers a concatenated tex4x4 buffer)
+        memcpy(tex->ram_data, texture02, size);
+    }
+
+    tex->ram_size = size;
+    tex->ram_sizex = sizeX;
+    tex->ram_sizey = sizeY;
+    tex->ram_format = fmt;
+    tex->ram_flags = flags;
+
+    // If the texture was already resident in VRAM, drop it so the next
+    // NEA_MaterialTexVramLoad() re-uploads this new data instead of keeping the
+    // stale VRAM copy.
+    if (tex->texindex != NEA_NO_TEXTURE)
+    {
+        ne_texture_delete(tex->texindex);
+        tex->texindex = NEA_NO_TEXTURE;
+    }
+
+    return 1;
+}
+
 int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
                           NEA_TextureFlags flags, const void *texture02,
                           const void *texture1)
 {
     NEA_AssertPointer(tex, "NULL material pointer");
+
+    // If this material is RAM-backed, keep the texture in main RAM instead of
+    // uploading it to VRAM. The upload path re-invokes this with
+    // texture02 == tex->ram_data, which falls through to the real upload.
+    if (tex->ram_backed && texture02 != tex->ram_data)
+        return ne_material_tex_stash(tex, NEA_TEX4X4, sizeX, sizeY, flags,
+                                     texture02, texture1);
 
     // For tex4x4 textures, both width and height must be valid
     if ((ne_is_valid_tex_size(sizeX) != sizeX)
@@ -854,6 +987,13 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
 {
     NEA_AssertPointer(tex, "NULL material pointer");
     NEA_Assert(fmt != 0, "No texture format provided");
+
+    // If this material is RAM-backed, keep the texture in main RAM instead of
+    // uploading it to VRAM. NEA_MaterialTexVramLoad() re-invokes this with
+    // texture == tex->ram_data, which falls through to the real upload.
+    if (tex->ram_backed && texture != tex->ram_data)
+        return ne_material_tex_stash(tex, fmt, sizeX, sizeY, flags,
+                                     texture, NULL);
 
     if (fmt == NEA_TEX4X4)
     {
@@ -971,18 +1111,30 @@ void NEA_MaterialClone(NEA_Material *source, NEA_Material *dest)
 {
     NEA_AssertPointer(source, "NULL source pointer");
     NEA_AssertPointer(dest, "NULL dest pointer");
-    NEA_Assert(source->texindex != NEA_NO_TEXTURE,
-              "No texture asigned to source material");
-    // Increase count of materials using this texture
-    NEA_Texture[source->texindex].uses++;
+
+    // Increase count of materials using this texture (if there is one resident
+    // in VRAM). A RAM-backed material may have no texture in VRAM at this point.
+    if (source->texindex != NEA_NO_TEXTURE)
+        NEA_Texture[source->texindex].uses++;
+
     memcpy(dest, source, sizeof(NEA_Material));
+
+    // The clone must not inherit ownership of the source's private RAM copy (it
+    // would be freed twice). The clone shares the VRAM texture by reference
+    // count only and is not RAM-backed.
+    dest->ram_backed = false;
+    dest->ram_data = NULL;
+    dest->ram_size = 0;
 }
 
 void NEA_MaterialSetPalette(NEA_Material *tex, NEA_Palette *pal)
 {
     NEA_AssertPointer(tex, "NULL material pointer");
     NEA_AssertPointer(pal, "NULL palette pointer");
-    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    // A RAM-backed material may not have a texture in VRAM yet (texindex ==
+    // NEA_NO_TEXTURE) while its texture is stashed in RAM. That is valid here.
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE || tex->ram_backed,
+              "No texture asigned to material");
     tex->palette = pal;
 }
 
@@ -1000,7 +1152,15 @@ void NEA_MaterialUse(const NEA_Material *tex)
     GFX_DIFFUSE_AMBIENT = tex->diffuse_ambient;
     GFX_SPECULAR_EMISSION = tex->specular_emission;
 
-    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+    // A material with no texture resident in VRAM (e.g. a RAM-backed material
+    // that has been removed from VRAM with NEA_MaterialTexVramUnload()) is
+    // rendered untextured using its color.
+    if (tex->texindex == NEA_NO_TEXTURE)
+    {
+        GFX_COLOR = tex->color;
+        GFX_TEX_FORMAT = 0;
+        return;
+    }
 
     if (tex->palette)
         NEA_PaletteUse(tex->palette);
@@ -1121,6 +1281,9 @@ void NEA_MaterialDelete(NEA_Material *tex)
     // If there is an asigned texture
     if (tex->texindex != NEA_NO_TEXTURE)
         ne_texture_delete(tex->texindex);
+
+    // Free the RAM copy of the texture, if this is a RAM-backed material
+    free(tex->ram_data);
 
     for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {

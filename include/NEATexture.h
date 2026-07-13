@@ -31,17 +31,6 @@
 /// Maximum length of a material name (including null terminator).
 #define NEA_MATERIAL_NAME_LEN 32
 
-/// Holds information of one material.
-typedef struct {
-    int texindex;            ///< Index to internal texture object
-    NEA_Palette *palette;     ///< Palette used by this material
-    u32 color;               ///< Color of this material when lights aren't used
-    u32 diffuse_ambient;     ///< Diffuse and ambient lighting material color
-    u32 specular_emission;   ///< Specular and emission lighting material color
-    bool palette_autodelete; ///< Set to true for the palette to be deleted with the material.
-    char name[NEA_MATERIAL_NAME_LEN]; ///< Name/alias for material lookup
-} NEA_Material;
-
 /// Supported texture options
 typedef enum {
     NEA_TEXTURE_WRAP_S = (1U << 16), ///< Wrap/repeat texture on S axis
@@ -54,6 +43,24 @@ typedef enum {
     NEA_TEXGEN_NORMAL   = (2U << 30), ///< Texcoords = Normal * texture matrix (spherical reflection)
     NEA_TEXGEN_POSITION = (3U << 30)  ///< Texcoords = Vertex * texture matrix
 } NEA_TextureFlags;
+
+/// Holds information of one material.
+typedef struct {
+    int texindex;            ///< Index to internal texture object
+    NEA_Palette *palette;     ///< Palette used by this material
+    u32 color;               ///< Color of this material when lights aren't used
+    u32 diffuse_ambient;     ///< Diffuse and ambient lighting material color
+    u32 specular_emission;   ///< Specular and emission lighting material color
+    bool palette_autodelete; ///< Set to true for the palette to be deleted with the material.
+    bool ram_backed;         ///< Set by NEA_MaterialRamInit: texture is kept in main RAM
+    char name[NEA_MATERIAL_NAME_LEN]; ///< Name/alias for material lookup
+    void *ram_data;          ///< Owned RAM copy of the texture image, or NULL
+    u32 ram_size;            ///< Byte size of ram_data
+    int ram_sizex;           ///< Width of the stashed texture
+    int ram_sizey;           ///< Height of the stashed texture
+    NEA_TextureFormat ram_format; ///< Format of the stashed texture
+    NEA_TextureFlags ram_flags;   ///< Flags of the stashed texture
+} NEA_Material;
 
 /// Creates a new material object.
 ///
@@ -252,6 +259,42 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
 int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
                           NEA_TextureFlags flags, const void *texture02,
                           const void *texture1);
+
+/// Makes a material keep its texture in main RAM instead of VRAM.
+///
+/// Call this right after NEA_MaterialCreate() and before loading any texture.
+/// Once a material is RAM-backed, NEA_MaterialTexLoad() (and the FAT/GRF/4x4
+/// variants) will store a private copy of the texture image in main RAM instead
+/// of uploading it to VRAM. Use NEA_MaterialTexVramLoad() to upload the texture
+/// to VRAM when it is needed, and NEA_MaterialTexVramUnload() to free the VRAM
+/// while keeping the RAM copy. This lets you stream textures in and out of the
+/// scarce texture VRAM on demand.
+///
+/// The palette (if any) is not affected; it stays resident in palette VRAM.
+///
+/// @param material Material (must have no texture assigned yet).
+void NEA_MaterialRamInit(NEA_Material *material);
+
+/// Uploads the RAM copy of a RAM-backed material's texture into VRAM.
+///
+/// The material must have been set up with NEA_MaterialRamInit() and have a
+/// texture loaded (which was stashed in RAM). If the texture is already in VRAM
+/// this does nothing and succeeds.
+///
+/// @param material RAM-backed material.
+/// @return It returns 1 on success, 0 on error.
+int NEA_MaterialTexVramLoad(NEA_Material *material);
+
+/// Frees a RAM-backed material's texture from VRAM, keeping the RAM copy.
+///
+/// The texture can be uploaded again later with NEA_MaterialTexVramLoad(). If
+/// the texture is not currently in VRAM this does nothing and succeeds. The
+/// palette (if any) is left untouched. While the texture is not in VRAM, drawing
+/// the material renders it untextured.
+///
+/// @param material RAM-backed material.
+/// @return It returns 1 on success, 0 on error.
+int NEA_MaterialTexVramUnload(NEA_Material *material);
 
 /// Tell a material that it has to delete its palette on deletion.
 ///

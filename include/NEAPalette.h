@@ -24,7 +24,11 @@
 
 /// Holds information of a palette.
 typedef struct {
-    int index; ///< Index to internal palette object
+    int index;                    ///< Index to internal palette object
+    bool ram_backed;              ///< Set by NEA_PaletteRamInit: palette is kept in main RAM
+    void *ram_data;               ///< Owned RAM copy of the palette, or NULL
+    u16 ram_numcolors;            ///< Number of colors in the RAM copy
+    NEA_TextureFormat ram_format; ///< Format of the RAM copy
 } NEA_Palette;
 
 /// Creates a new palette object.
@@ -62,6 +66,40 @@ int NEA_PaletteLoad(NEA_Palette *pal, const void *pointer, u16 numcolor,
 /// @return It returns 1 on success, 0 on error.
 int NEA_PaletteLoadSize(NEA_Palette *pal, const void *pointer, size_t size,
                        NEA_TextureFormat format);
+
+/// Makes a palette keep its data in main RAM instead of palette VRAM.
+///
+/// Call this right after NEA_PaletteCreate() and before loading any palette.
+/// Once a palette is RAM-backed, NEA_PaletteLoad() (and the FAT/size variants)
+/// will store a private copy of the palette in main RAM instead of uploading it
+/// to palette VRAM. Use NEA_PaletteVramLoad() to upload the palette to VRAM when
+/// it is needed, and NEA_PaletteVramUnload() to free the VRAM while keeping the
+/// RAM copy. This lets you stream palettes in and out of the small palette VRAM
+/// on demand.
+///
+/// @param palette Palette (must have no palette loaded in VRAM yet).
+void NEA_PaletteRamInit(NEA_Palette *palette);
+
+/// Uploads the RAM copy of a RAM-backed palette into palette VRAM.
+///
+/// The palette must have been set up with NEA_PaletteRamInit() and have a palette
+/// loaded (which was stashed in RAM). If the palette is already in VRAM this does
+/// nothing and succeeds.
+///
+/// @param palette RAM-backed palette.
+/// @return It returns 1 on success, 0 on error.
+int NEA_PaletteVramLoad(NEA_Palette *palette);
+
+/// Frees a RAM-backed palette from palette VRAM, keeping the RAM copy.
+///
+/// The palette can be uploaded again later with NEA_PaletteVramLoad(). If the
+/// palette is not currently in VRAM this does nothing and succeeds. While the
+/// palette is not in VRAM, any material using it must not be drawn as textured
+/// (see NEA_PaletteUse()).
+///
+/// @param palette RAM-backed palette.
+/// @return It returns 1 on success, 0 on error.
+int NEA_PaletteVramUnload(NEA_Palette *palette);
 
 /// Deletes a palette object.
 ///
