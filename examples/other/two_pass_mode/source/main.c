@@ -106,7 +106,9 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        NEA_WaitForVBL(NEA_TwoPassGetPass() == 1 ? NEA_UPDATE_ANIMATIONS : 0);
+        // Update scene state only at a complete-frame boundary (pass 0), so the
+        // left and right halves are drawn from the same state and stay coherent.
+        NEA_WaitForVBL(NEA_TwoPassGetPass() == 0 ? NEA_UPDATE_ANIMATIONS : 0);
 
         NEA_ProcessTwoPassArg(Draw3DScene, &Scene);
 
@@ -154,8 +156,9 @@ int main(int argc, char *argv[])
             init_all(&Scene);
         }
 
-        // Update rotations only after both passes are done
-        if (NEA_TwoPassGetPass() == 1)
+        // Update rotations only after both passes are done (a complete frame
+        // boundary is pass 0), so both halves rotate by the same amount.
+        if (NEA_TwoPassGetPass() == 0)
         {
             if (keys & KEY_UP)
                 for (int i = 0; i < NUM_MODELS; i++)

@@ -245,6 +245,17 @@ void NEA_ProcessTwoPassArg(NEA_VoidArgfunc drawscene, void *arg);
 /// @return Current pass index (0 or 1).
 int NEA_TwoPassGetPass(void);
 
+/// Sets the horizontal column where the two-pass split happens.
+///
+/// Works with all three two-pass modes (FIFO, FB, DMA). The left half is drawn
+/// in viewport [0, x-1] and the right half in [x, 255]. Defaults to 128 (screen
+/// center). Moving the split lets you balance the pixels-per-scanline load
+/// between the two passes (e.g. give more width to the half with fewer pixels
+/// per line). The value is clamped to the range [1, 254].
+///
+/// @param x Column where the left half ends and the right half begins.
+void NEA_TwoPassSetSplit(int x);
+
 /// Draws 3D scenes in both screens.
 ///
 /// By default, the main screen is the top screen and the sub screen is the

@@ -52,7 +52,12 @@ static volatile bool ne_two_pass_next_ready;// Next framebuffer ready to swap
 static u8 ne_two_pass_frame;                // Current pass: 0 = left, 1 = right
 static bool ne_two_pass_enabled;            // True when in two-pass mode
 
-#define NEA_TWO_PASS_SPLIT 128 // Horizontal split at screen center
+#define NEA_TWO_PASS_SPLIT_DEFAULT 128 // Default horizontal split at screen center
+
+// Runtime horizontal split: pixel column where the left half ends and the right
+// half begins. Defaults to the screen center; NEA_TwoPassSetSplit() can move it
+// to balance the pixels-per-scanline load between the two passes.
+static int ne_two_pass_split = NEA_TWO_PASS_SPLIT_DEFAULT;
 
 // Scanline row offset in the VRAM_F bitmap used for HBL DMA display.
 // Same technique as NEA_DUAL_DMA_3D_LINES_OFFSET: the bitmap BG has PD=0 so it
@@ -961,11 +966,23 @@ int NEA_TwoPassGetPass(void)
     return ne_two_pass_frame;
 }
 
+void NEA_TwoPassSetSplit(int x)
+{
+    // The left half is viewport [0, x-1] and the right half is [x, 255], so the
+    // split must leave at least one column on each side.
+    if (x < 1)
+        x = 1;
+    else if (x > 254)
+        x = 254;
+
+    ne_two_pass_split = x;
+}
+
 // Shared helper: compute asymmetric frustum and set viewport for the current
 // two-pass half. Used by all three two-pass modes.
 static void ne_two_pass_setup_frustum(void)
 {
-    const int split = NEA_TWO_PASS_SPLIT;
+    const int split = ne_two_pass_split;
 
     if (ne_two_pass_frame == 0)
         GFX_VIEWPORT = 0 | (0 << 8) | ((split - 1) << 16) | (191 << 24);
@@ -974,26 +991,34 @@ static void ne_two_pass_setup_frustum(void)
 
     // Compute asymmetric frustum from the user's FOV/znear/zfar settings.
     // This gives the same perspective as a full-screen render, but only
-    // draws the left or right half.
+    // draws the left or right half. Reuse NEA_screenratio (same aspect as the
+    // normal gluPerspectivef32 projection path) so both stay in sync.
     int32_t fovy = fov * DEGREES_IN_CIRCLE / 360;
     int32_t top = mulf32(ne_znear, tanLerp(fovy >> 1));
-    int32_t full_aspect = divf32(256 << 12, 192 << 12);
-    int32_t right_full = mulf32(top, full_aspect);
+    int32_t right_full = mulf32(top, NEA_screenratio);
+
+    // Frustum division point matching the pixel split: linearly interpolate the
+    // full frustum [-right_full, right_full] at fraction split/256. Equals 0
+    // when split == 128, preserving the centered-split output.
+    int32_t split_x = (int32_t)(((int64_t)right_full * (2 * split - 256)) / 256);
 
     MATRIX_CONTROL = GL_PROJECTION;
     MATRIX_IDENTITY = 0;
 
     if (ne_two_pass_frame == 0)
-        glFrustumf32(-right_full, 0, -top, top, ne_znear, ne_zfar);
+        glFrustumf32(-right_full, split_x, -top, top, ne_znear, ne_zfar);
     else
-        glFrustumf32(0, right_full, -top, top, ne_znear, ne_zfar);
+        glFrustumf32(split_x, right_full, -top, top, ne_znear, ne_zfar);
 }
 
 // Processing for FIFO and DMA modes: copy capture from VRAM_D to main RAM
 // framebuffer, set viewport, frustum, and enable display capture.
 static void ne_process_two_pass_fifo_dma(void)
 {
-    NEA_UpdateInput();
+    // Poll input once per displayed (30 FPS) frame, on the left pass only, so
+    // both halves see the same input edges (keysDown) and don't diverge.
+    if (ne_two_pass_frame == 0)
+        NEA_UpdateInput();
 
     if (ne_main_screen == 1)
         lcdMainOnTop();
@@ -1007,7 +1032,7 @@ static void ne_process_two_pass_fifo_dma(void)
                    | DCAP_SRC_A(DCAP_SRC_A_3DONLY)
                    | DCAP_ENABLE;
 
-    const int split = NEA_TWO_PASS_SPLIT;
+    const int split = ne_two_pass_split;
 
     if (ne_two_pass_frame == 0)
     {
@@ -1072,7 +1097,10 @@ static void ne_process_two_pass_fifo_dma(void)
 // leaves bit15=0. BG2 treats bit15=0 pixels as transparent.
 static void ne_process_two_pass_fb(void)
 {
-    NEA_UpdateInput();
+    // Poll input once per displayed (30 FPS) frame, on the left pass only, so
+    // both halves see the same input edges (keysDown) and don't diverge.
+    if (ne_two_pass_frame == 0)
+        NEA_UpdateInput();
 
     if (ne_main_screen == 1)
         lcdMainOnTop();
@@ -1156,6 +1184,8 @@ static void ne_process_two_pass_end(void)
 void NEA_ProcessTwoPass(NEA_Voidfunc drawscene)
 {
     NEA_AssertPointer(drawscene, "NULL function pointer");
+    NEA_Assert(ne_two_pass_enabled,
+               "NEA_ProcessTwoPass() called outside a two-pass mode");
 
     if (ne_execution_mode == NEA_ModeSingle3D_TwoPass_FB)
         ne_process_two_pass_fb();
@@ -1170,6 +1200,8 @@ void NEA_ProcessTwoPass(NEA_Voidfunc drawscene)
 void NEA_ProcessTwoPassArg(NEA_VoidArgfunc drawscene, void *arg)
 {
     NEA_AssertPointer(drawscene, "NULL function pointer");
+    NEA_Assert(ne_two_pass_enabled,
+               "NEA_ProcessTwoPassArg() called outside a two-pass mode");
 
     if (ne_execution_mode == NEA_ModeSingle3D_TwoPass_FB)
         ne_process_two_pass_fb();
