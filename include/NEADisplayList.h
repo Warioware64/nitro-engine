@@ -63,6 +63,7 @@ typedef enum {
 typedef enum {
     NEA_DL_CPU,          ///< Send all data to the GPU with CPU copy loop.
     NEA_DL_DMA_GFX_FIFO, ///< Default. DMA in GFX FIFO mode (incompatible with safe dual 3D)
+    NEA_DL_NDMA_GFX_FIFO,///< DSi-only NDMA in GFX FIFO mode (safe with dual 3D DMA and two-pass).
     // TODO: Support DMA without GFX FIFO DMA mode, using GFX FIFO IRQ instead.
 } NEA_DisplayListDrawFunction;
 
@@ -73,6 +74,18 @@ typedef enum {
 ///
 /// @param list Pointer to the display list
 void NEA_DisplayListDrawDMA_GFX_FIFO(const void *list);
+
+/// Sends a display list to the GPU by using the DSi NDMA in GFX FIFO mode.
+///
+/// NDMA is a DSi-exclusive DMA engine that is independent from the legacy DS
+/// DMA channels. Because of that, this function is safe to use in the modes
+/// that keep a legacy DMA channel running continuously (safe dual 3D and the
+/// two-pass modes), unlike NEA_DisplayListDrawDMA_GFX_FIFO().
+///
+/// On a DS (not DSi) this function automatically falls back to a CPU copy loop.
+///
+/// @param list Pointer to the display list
+void NEA_DisplayListDrawNDMA_GFX_FIFO(const void *list);
 
 /// Sends a display list to the GPU by using a CPU copy loop.
 ///

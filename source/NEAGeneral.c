@@ -427,6 +427,14 @@ NEA_VRAMBankFlags NEA_GetTexPaletteBank(void)
     return ne_tex_palette_banks;
 }
 
+// Fastest GXFIFO display-list path for the current hardware: NDMA on DSi (a
+// separate, faster engine), legacy DMA GFX FIFO on DS. Used by the modes that
+// don't keep a legacy DMA channel running continuously.
+static NEA_DisplayListDrawFunction ne_gxfifo_dl_default(void)
+{
+    return isDSiMode() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_DMA_GFX_FIFO;
+}
+
 int NEA_Init3D(void)
 {
     NEA_End();
@@ -434,7 +442,7 @@ int NEA_Init3D(void)
     if (ne_systems_reset_all(NEA_VRAM_ABCD) != 0)
         return -1;
 
-    NEA_DisplayListSetDefaultFunction(NEA_DL_DMA_GFX_FIFO);
+    NEA_DisplayListSetDefaultFunction(ne_gxfifo_dl_default());
 
     NEA_UpdateInput();
 
@@ -492,7 +500,7 @@ int NEA_InitDual3D(void)
     if (ne_setup_sprites() != 0)
         return -2;
 
-    NEA_DisplayListSetDefaultFunction(NEA_DL_DMA_GFX_FIFO);
+    NEA_DisplayListSetDefaultFunction(ne_gxfifo_dl_default());
 
     NEA_UpdateInput();
 
@@ -533,7 +541,7 @@ int NEA_InitDual3D_FB(void)
     if (ne_setup_sprites() != 0)
         return -2;
 
-    NEA_DisplayListSetDefaultFunction(NEA_DL_DMA_GFX_FIFO);
+    NEA_DisplayListSetDefaultFunction(ne_gxfifo_dl_default());
 
     NEA_UpdateInput();
 
@@ -579,7 +587,11 @@ int NEA_InitDual3D_DMA(void)
     if (ne_systems_reset_all(NEA_VRAM_AB) != 0)
         return -1;
 
-    NEA_DisplayListSetDefaultFunction(NEA_DL_CPU);
+    // Safe dual 3D keeps legacy DMA 2 running in HBL mode, which would deadlock
+    // the legacy DMA GFX FIFO path. On DSi, use NDMA GFX FIFO (a separate engine
+    // unaffected by that) for fast display lists; on DS, fall back to CPU.
+    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
+                                                  : NEA_DL_CPU);
 
     NEA_UpdateInput();
 
@@ -638,11 +650,13 @@ int NEA_Init3D_TwoPass(void)
         return -1;
     }
 
-    // Use CPU-based display list drawing. DMA channel 0 display lists
-    // (NEA_DL_DMA_GFX_FIFO) wait for ALL DMA channels to be idle before
-    // starting. In FIFO mode, DMA 2 runs continuously (DMA_DISP_FIFO |
-    // DMA_REPEAT), so dmaBusy(2) is always true and the wait deadlocks.
-    NEA_DisplayListSetDefaultFunction(NEA_DL_CPU);
+    // Legacy DMA channel 0 display lists (NEA_DL_DMA_GFX_FIFO) wait for ALL
+    // legacy DMA channels to be idle before starting. In FIFO mode, DMA 2 runs
+    // continuously (DMA_DISP_FIFO | DMA_REPEAT), so dmaBusy(2) is always true
+    // and that wait deadlocks. On DSi, NDMA is a separate engine that isn't
+    // affected, so use NDMA GFX FIFO for fast display lists; on DS, use CPU.
+    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
+                                                  : NEA_DL_CPU);
 
     NEA_UpdateInput();
 
@@ -692,7 +706,7 @@ int NEA_Init3D_TwoPass_FB(void)
 
     // DMA 2 is not used in FB mode, so DMA-based display list drawing is safe
     // and provides better performance than CPU-based drawing.
-    NEA_DisplayListSetDefaultFunction(NEA_DL_DMA_GFX_FIFO);
+    NEA_DisplayListSetDefaultFunction(ne_gxfifo_dl_default());
 
     NEA_UpdateInput();
 
@@ -745,10 +759,12 @@ int NEA_Init3D_TwoPass_DMA(void)
         return -1;
     }
 
-    // Use CPU-based display list drawing. DMA channel 0 display lists
-    // (NEA_DL_DMA_GFX_FIFO) wait for ALL DMA channels to be idle. DMA 2 is
-    // active during HBL periods, which could cause occasional stalls.
-    NEA_DisplayListSetDefaultFunction(NEA_DL_CPU);
+    // Legacy DMA channel 0 display lists (NEA_DL_DMA_GFX_FIFO) wait for ALL
+    // legacy DMA channels to be idle. DMA 2 is active during HBL periods, which
+    // would cause stalls/deadlocks. On DSi, NDMA is a separate engine that isn't
+    // affected, so use NDMA GFX FIFO for fast display lists; on DS, use CPU.
+    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
+                                                  : NEA_DL_CPU);
 
     NEA_UpdateInput();
 
@@ -1844,6 +1860,18 @@ static int NEA_CPUPercent;
 
 void NEA_WaitForVBL(NEA_UpdateFlags flags)
 {
+    // In two-pass mode this runs twice per displayed frame (once per half).
+    // Scene state must only advance at the complete-frame boundary (the left
+    // pass, frame 0); advancing it on the right pass makes the two halves
+    // render from different states and shear. Strip those flags automatically
+    // so callers pass them unconditionally instead of writing
+    // `pass == 0 ? flags : 0`. Sound, async asset finalize, GUI and HW2D are
+    // intentionally left running every hardware frame (60 Hz).
+    if (ne_two_pass_enabled && ne_two_pass_frame != 0)
+        flags &= ~(NEA_UPDATE_ANIMATIONS | NEA_UPDATE_PHYSICS
+                   | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_RIGIDBODY
+                   | NEA_UPDATE_PARTICLES);
+
     if (flags & NEA_UPDATE_GUI)
     {
         NEA_GUIUpdate();

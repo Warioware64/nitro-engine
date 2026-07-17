@@ -106,9 +106,11 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        // Update scene state only at a complete-frame boundary (pass 0), so the
-        // left and right halves are drawn from the same state and stay coherent.
-        NEA_WaitForVBL(NEA_TwoPassGetPass() == 0 ? NEA_UPDATE_ANIMATIONS : 0);
+        // In two-pass mode the scene-state update flags are gated to the
+        // complete-frame boundary automatically, so they can be passed
+        // unconditionally (both halves stay coherent). Only custom per-frame
+        // logic (the rotations below) still needs an explicit pass check.
+        NEA_WaitForVBL(NEA_UPDATE_ANIMATIONS);
 
         NEA_ProcessTwoPassArg(Draw3DScene, &Scene);
 

@@ -123,6 +123,48 @@ void NEA_DisplayListDrawDMA_GFX_FIFO(const void *list)
     while (dmaBusy(0));
 }
 
+// Number of 32-bit words pushed to the GXFIFO on each NDMA "FIFO half-empty"
+// trigger. The GXFIFO requests data when it is less than half full (room for
+// ~128 entries), so this must stay <= 128. 112 is the well-known GXFIFO-DMA
+// block size; tune here if polygons are lost on hardware.
+#define NEA_NDMA_GFX_FIFO_BLOCK 112
+
+void NEA_DisplayListDrawNDMA_GFX_FIFO(const void *list)
+{
+    const uint32_t *p = list;
+
+    NEA_AssertPointer(p, "NULL display list pointer");
+
+    uint32_t words = *p++;
+
+    NEA_Assert(words > 0, "Empty display list");
+
+    // NDMA is a DSi-only engine. On DS, fall back to the CPU copy loop: it is
+    // the universally-safe path (legacy DMA GFX FIFO is unsafe in the
+    // continuous-DMA modes that select this function).
+    if (!isDSiMode())
+    {
+        while (words--)
+            GFX_FIFO = *p++;
+        return;
+    }
+
+    DC_FlushRange(p, words * 4);
+
+    // Unlike the legacy DMA path, NDMA is a separate engine and is not affected
+    // by the legacy multi-channel hardware bug, so there is no need to wait for
+    // the legacy DMA channels to be idle. Only drain our own NDMA channel.
+    while (ndmaBusy(0));
+
+    REG_NDMA_SRC(0) = (uint32_t)p;
+    REG_NDMA_DEST(0) = (uint32_t)&GFX_FIFO;
+    REG_NDMA_LENGTH(0) = words;
+    REG_NDMA_BLENGTH(0) = NEA_NDMA_GFX_FIFO_BLOCK;
+    REG_NDMA_CR(0) = NDMA_ENABLE | NDMA_START_FIFO | NDMA_SRC_INC | NDMA_DST_FIX;
+
+    while (ndmaBusy(0));
+}
+
 void NEA_DisplayListDrawCPU(const void *list)
 {
     const uint32_t *p = list;
@@ -150,6 +192,10 @@ void NEA_DisplayListSetDefaultFunction(NEA_DisplayListDrawFunction type)
     else if (type == NEA_DL_DMA_GFX_FIFO)
     {
         ne_display_list_draw = NEA_DisplayListDrawDMA_GFX_FIFO;
+    }
+    else if (type == NEA_DL_NDMA_GFX_FIFO)
+    {
+        ne_display_list_draw = NEA_DisplayListDrawNDMA_GFX_FIFO;
     }
     else
     {

@@ -236,10 +236,16 @@ void NEA_ProcessTwoPassArg(NEA_VoidArgfunc drawscene, void *arg);
 ///
 /// Returns 0 when the next pass will render the left half (meaning a complete
 /// frame has just finished). Returns 1 when the next pass will render the right
-/// half. Use this to only update scene state every other frame:
+/// half.
+///
+/// The NEA_UPDATE_* flags passed to NEA_WaitForVBL() are gated automatically in
+/// two-pass modes, so you don't need this for them. Use it to gate your own
+/// per-frame logic (e.g. input-driven movement), which must also only run once
+/// per displayed frame to keep both halves consistent:
 ///
 /// @code
-/// NEA_WaitForVBL(NEA_TwoPassGetPass() == 0 ? NEA_UPDATE_ANIMATIONS : 0);
+/// if (NEA_TwoPassGetPass() == 0)
+///     MoveObjects(); // custom logic: only at the complete-frame boundary
 /// @endcode
 ///
 /// @return Current pass index (0 or 1).
@@ -468,6 +474,13 @@ typedef enum {
 ///
 /// You should OR all the flags that you need. For example, you can call this
 /// function like NEA_WaitForVBL(NEA_UPDATE_GUI | NEA_UPDATE_ANIMATIONS);
+///
+/// In two-pass modes this runs twice per displayed frame (once per half). The
+/// scene-state flags (NEA_UPDATE_ANIMATIONS, NEA_UPDATE_PHYSICS,
+/// NEA_UPDATE_ANIM_MAT, NEA_UPDATE_RIGIDBODY, NEA_UPDATE_PARTICLES) are applied
+/// automatically only at the complete-frame boundary, so you can pass them
+/// unconditionally without shearing the two halves. Sound, async asset finalize,
+/// GUI and HW2D keep running every hardware frame.
 ///
 /// @param flags Look at NEA_UpdateFlags.
 void NEA_WaitForVBL(NEA_UpdateFlags flags);
