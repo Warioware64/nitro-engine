@@ -63,7 +63,7 @@ typedef enum {
 typedef enum {
     NEA_DL_CPU,          ///< Send all data to the GPU with CPU copy loop.
     NEA_DL_DMA_GFX_FIFO, ///< Default. DMA in GFX FIFO mode (incompatible with safe dual 3D)
-    NEA_DL_NDMA_GFX_FIFO,///< DSi-only NDMA in GFX FIFO mode (safe with dual 3D DMA and two-pass).
+    NEA_DL_NDMA_GFX_FIFO,///< DSi-only NDMA in GFX FIFO mode (safe with dual 3D DMA and two-pass). Opt-in via NEA_DisplayListEnableNDMA(); never selected automatically.
     // TODO: Support DMA without GFX FIFO DMA mode, using GFX FIFO IRQ instead.
 } NEA_DisplayListDrawFunction;
 
@@ -86,6 +86,21 @@ void NEA_DisplayListDrawDMA_GFX_FIFO(const void *list);
 ///
 /// @param list Pointer to the display list
 void NEA_DisplayListDrawNDMA_GFX_FIFO(const void *list);
+
+/// Enables or disables NDMA display lists (DSi only, off by default).
+///
+/// When enabled on a DSi, the init functions automatically select the NDMA GFX
+/// FIFO path (NEA_DL_NDMA_GFX_FIFO) for their display lists, which is faster and
+/// works even in the modes that keep a legacy DMA channel running continuously
+/// (safe dual 3D, two-pass). On a DS this has no effect (NDMA doesn't exist).
+///
+/// NDMA is not selected automatically, so you must call this to use it. The
+/// change takes effect immediately if a mode is already initialized, and it
+/// persists across re-initialization. A manual NEA_DisplayListSetDefaultFunction()
+/// call afterwards overrides this choice.
+///
+/// @param enable true to use NDMA on DSi, false to use the legacy DMA / CPU path.
+void NEA_DisplayListEnableNDMA(bool enable);
 
 /// Sends a display list to the GPU by using a CPU copy loop.
 ///

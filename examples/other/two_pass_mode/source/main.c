@@ -99,6 +99,10 @@ int main(int argc, char *argv[])
     irqSet(IRQ_VBLANK, NEA_VBLFunc);
     irqSet(IRQ_HBLANK, NEA_HBLFunc);
 
+    // Opt in to NDMA display lists (DSi only; no-op on DS). The flag persists
+    // across the mode-switch re-inits below.
+    NEA_DisplayListEnableNDMA(true);
+
     // Start in DMA mode (no line artifacts, 75% texture VRAM)
     NEA_Init3D_TwoPass_DMA();
     NEA_InitConsole();

@@ -427,12 +427,58 @@ NEA_VRAMBankFlags NEA_GetTexPaletteBank(void)
     return ne_tex_palette_banks;
 }
 
-// Fastest GXFIFO display-list path for the current hardware: NDMA on DSi (a
-// separate, faster engine), legacy DMA GFX FIFO on DS. Used by the modes that
-// don't keep a legacy DMA channel running continuously.
+// NDMA display lists are opt-in (NEA_DisplayListEnableNDMA()) and only usable on
+// DSi. Off by default, so behavior on all hardware matches the legacy path
+// unless the app explicitly enables it.
+static bool ne_ndma_enabled = false;
+
+static bool ne_use_ndma(void)
+{
+    return ne_ndma_enabled && isDSiMode();
+}
+
+// Fastest GXFIFO display-list path for modes that don't keep a legacy DMA
+// channel running continuously: NDMA when enabled on DSi, else legacy DMA GFX
+// FIFO (safe here, no continuous DMA to deadlock against).
 static NEA_DisplayListDrawFunction ne_gxfifo_dl_default(void)
 {
-    return isDSiMode() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_DMA_GFX_FIFO;
+    return ne_use_ndma() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_DMA_GFX_FIFO;
+}
+
+// Display-list path for modes that keep a legacy DMA channel running
+// continuously (safe dual 3D, two-pass): NDMA when enabled on DSi (a separate
+// engine, no deadlock), else the CPU copy loop.
+static NEA_DisplayListDrawFunction ne_continuous_dl_default(void)
+{
+    return ne_use_ndma() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_CPU;
+}
+
+// Re-select the default display-list draw function for the current mode. Lets
+// NEA_DisplayListEnableNDMA() take effect immediately, even after init.
+static void ne_apply_default_dl_for_mode(void)
+{
+    switch (ne_execution_mode)
+    {
+        case NEA_ModeSingle3D:
+        case NEA_ModeDual3D:
+        case NEA_ModeDual3D_FB:
+        case NEA_ModeSingle3D_TwoPass_FB:
+            NEA_DisplayListSetDefaultFunction(ne_gxfifo_dl_default());
+            break;
+        case NEA_ModeDual3D_DMA:
+        case NEA_ModeSingle3D_TwoPass:
+        case NEA_ModeSingle3D_TwoPass_DMA:
+            NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
+            break;
+        default:
+            break; // Uninitialized: the next init will apply it.
+    }
+}
+
+void NEA_DisplayListEnableNDMA(bool enable)
+{
+    ne_ndma_enabled = enable;
+    ne_apply_default_dl_for_mode();
 }
 
 int NEA_Init3D(void)
@@ -588,10 +634,10 @@ int NEA_InitDual3D_DMA(void)
         return -1;
 
     // Safe dual 3D keeps legacy DMA 2 running in HBL mode, which would deadlock
-    // the legacy DMA GFX FIFO path. On DSi, use NDMA GFX FIFO (a separate engine
-    // unaffected by that) for fast display lists; on DS, fall back to CPU.
-    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
-                                                  : NEA_DL_CPU);
+    // the legacy DMA GFX FIFO path. NDMA on DSi (when enabled via
+    // NEA_DisplayListEnableNDMA()) is a separate engine unaffected by that;
+    // otherwise fall back to CPU.
+    NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
 
@@ -653,10 +699,10 @@ int NEA_Init3D_TwoPass(void)
     // Legacy DMA channel 0 display lists (NEA_DL_DMA_GFX_FIFO) wait for ALL
     // legacy DMA channels to be idle before starting. In FIFO mode, DMA 2 runs
     // continuously (DMA_DISP_FIFO | DMA_REPEAT), so dmaBusy(2) is always true
-    // and that wait deadlocks. On DSi, NDMA is a separate engine that isn't
-    // affected, so use NDMA GFX FIFO for fast display lists; on DS, use CPU.
-    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
-                                                  : NEA_DL_CPU);
+    // and that wait deadlocks. NDMA on DSi (when enabled via
+    // NEA_DisplayListEnableNDMA()) is a separate engine that isn't affected;
+    // otherwise use CPU.
+    NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
 
@@ -761,10 +807,10 @@ int NEA_Init3D_TwoPass_DMA(void)
 
     // Legacy DMA channel 0 display lists (NEA_DL_DMA_GFX_FIFO) wait for ALL
     // legacy DMA channels to be idle. DMA 2 is active during HBL periods, which
-    // would cause stalls/deadlocks. On DSi, NDMA is a separate engine that isn't
-    // affected, so use NDMA GFX FIFO for fast display lists; on DS, use CPU.
-    NEA_DisplayListSetDefaultFunction(isDSiMode() ? NEA_DL_NDMA_GFX_FIFO
-                                                  : NEA_DL_CPU);
+    // would cause stalls/deadlocks. NDMA on DSi (when enabled via
+    // NEA_DisplayListEnableNDMA()) is a separate engine that isn't affected;
+    // otherwise use CPU.
+    NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
 
