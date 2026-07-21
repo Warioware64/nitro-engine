@@ -60,6 +60,7 @@ typedef struct {
     int ram_sizey;           ///< Height of the stashed texture
     NEA_TextureFormat ram_format; ///< Format of the stashed texture
     NEA_TextureFlags ram_flags;   ///< Flags of the stashed texture
+    bool dirty;              ///< RAM buffer changed; next VramUpdate re-uploads it
 } NEA_Material;
 
 /// Creates a new material object.
@@ -295,6 +296,60 @@ int NEA_MaterialTexVramLoad(NEA_Material *material);
 /// @param material RAM-backed material.
 /// @return It returns 1 on success, 0 on error.
 int NEA_MaterialTexVramUnload(NEA_Material *material);
+
+/// Returns a writable pointer to a material's RAM-side texture buffer.
+///
+/// Only valid for RAM-backed materials (see NEA_MaterialRamInit() and
+/// NEA_MaterialTexBlank()). Modify the pixels in this buffer in place, mark the
+/// material dirty with NEA_MaterialTexSetDirty(), then push the changes to VRAM
+/// with NEA_MaterialTexVramUpdate(). This is the basis of the "dirty texture"
+/// workflow: manipulate texels freely on the CPU and upload on demand.
+///
+/// @param material RAM-backed material.
+/// @return Pointer to the RAM buffer, or NULL if the material has none.
+void *NEA_MaterialTexGetData(NEA_Material *material);
+
+/// Allocates a blank (zero-filled) RAM-backed texture and uploads it to VRAM.
+///
+/// Use this to build a texture in code from scratch, with no source image. The
+/// material becomes RAM-backed (as if NEA_MaterialRamInit() had been called) and
+/// gains a VRAM copy so it is immediately renderable. Get the buffer with
+/// NEA_MaterialTexGetData(), draw into it, and push changes with
+/// NEA_MaterialTexVramUpdate().
+///
+/// @param material Material (must have no texture assigned yet).
+/// @param fmt Texture format.
+/// @param sizeX (sizeX, sizeY) Texture size.
+/// @param sizeY (sizeX, sizeY) Texture size.
+/// @param flags Parameters of the texture.
+/// @return It returns 1 on success, 0 on error.
+int NEA_MaterialTexBlank(NEA_Material *material, NEA_TextureFormat fmt,
+                        int sizeX, int sizeY, NEA_TextureFlags flags);
+
+/// Marks a RAM-backed material's texture as modified.
+///
+/// The next NEA_MaterialTexVramUpdate() will re-upload the RAM buffer to VRAM.
+///
+/// @param material RAM-backed material.
+void NEA_MaterialTexSetDirty(NEA_Material *material);
+
+/// Pushes a RAM-backed material's texture buffer to VRAM if it is dirty.
+///
+/// For a texture that is currently resident in VRAM the pixels are copied in
+/// place into the existing VRAM slot, with no reallocation. If the texture is
+/// not currently resident it is uploaded like NEA_MaterialTexVramLoad(). If the
+/// material has not been marked dirty this does nothing and succeeds.
+///
+/// Like the other VRAM upload functions, this remaps texture VRAM to LCD mode
+/// while copying, so it must be called when that is safe: immediately after
+/// NEA_WaitForVBL(), during the vertical blank. Do any heavy edits to the RAM
+/// buffer (from NEA_MaterialTexGetData()) *before* NEA_WaitForVBL() so this
+/// upload stays inside the short vblank window; otherwise the bank remap races
+/// the GPU while it samples textures and the texture renders black.
+///
+/// @param material RAM-backed material.
+/// @return It returns 1 on success, 0 on error.
+int NEA_MaterialTexVramUpdate(NEA_Material *material);
 
 /// Tell a material that it has to delete its palette on deletion.
 ///

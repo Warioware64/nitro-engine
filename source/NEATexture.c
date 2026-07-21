@@ -32,6 +32,37 @@ static int NEA_MAX_TEXTURES;
 static u32 ne_default_diffuse_ambient;
 static u32 ne_default_specular_emission;
 
+// Defined below, before NEA_MaterialTexLoad()
+static void ne_copy_tex_to_vram(void *addr, NEA_TextureFormat fmt,
+                                uint32_t size, const void *texture);
+
+// Computes the number of bytes a texture of this format and size occupies in
+// RAM/VRAM, matching the layout used by ne_material_tex_stash() and
+// NEA_MaterialTexLoad().
+static uint32_t ne_tex_data_size(NEA_TextureFormat fmt, int sizeX, int sizeY)
+{
+    if (fmt == NEA_TEX4X4)
+    {
+        // Compressed: main data (slot 0/2) plus index data (slot 1)
+        uint32_t size02 = (sizeX * sizeY) >> 2;
+        uint32_t size1 = size02 >> 1;
+        return size02 + size1;
+    }
+
+    static const int size_shift[] = {
+        0, // Nothing
+        1, // NEA_A3PAL32
+        3, // NEA_PAL4
+        2, // NEA_PAL16
+        1, // NEA_PAL256
+        0, // NEA_TEX4X4 (unused here)
+        1, // NEA_A5PAL8
+        0, // NEA_A1RGB5
+        0, // NEA_RGB5
+    };
+    return (sizeX * sizeY << 1) >> size_shift[fmt];
+}
+
 static int ne_is_valid_tex_size(int size)
 {
     for (int i = 0; i < 8; i++)
@@ -208,6 +239,101 @@ int NEA_MaterialTexVramUnload(NEA_Material *material)
 
     ne_texture_delete(material->texindex);
     material->texindex = NEA_NO_TEXTURE;
+
+    return 1;
+}
+
+void *NEA_MaterialTexGetData(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    if (!material->ram_backed)
+        return NULL;
+
+    return material->ram_data;
+}
+
+int NEA_MaterialTexBlank(NEA_Material *material, NEA_TextureFormat fmt,
+                        int sizeX, int sizeY, NEA_TextureFlags flags)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+    NEA_Assert(fmt != 0, "No texture format provided");
+    NEA_Assert(material->texindex == NEA_NO_TEXTURE,
+              "Blank texture must be created before loading a texture");
+
+    material->ram_backed = true;
+
+    uint32_t size = ne_tex_data_size(fmt, sizeX, sizeY);
+
+    // Discard any previous RAM copy and allocate a fresh, zeroed buffer
+    free(material->ram_data);
+    material->ram_data = malloc(size);
+    if (material->ram_data == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        material->ram_size = 0;
+        return 0;
+    }
+
+    memset(material->ram_data, 0, size);
+
+    material->ram_size = size;
+    material->ram_sizex = sizeX;
+    material->ram_sizey = sizeY;
+    material->ram_format = fmt;
+    material->ram_flags = flags;
+    material->dirty = false;
+
+    // Create the (blank) VRAM copy so the material is immediately renderable
+    return NEA_MaterialTexVramLoad(material);
+}
+
+void NEA_MaterialTexSetDirty(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+    material->dirty = true;
+}
+
+int NEA_MaterialTexVramUpdate(NEA_Material *material)
+{
+    NEA_AssertPointer(material, "NULL material pointer");
+
+    if (!material->ram_backed || material->ram_data == NULL)
+        return 0;
+
+    // Nothing has changed since the last upload
+    if (!material->dirty)
+        return 1;
+
+    // Not currently in VRAM: do a full upload, which allocates a slot
+    if (material->texindex == NEA_NO_TEXTURE)
+    {
+        int ret = NEA_MaterialTexVramLoad(material);
+        if (ret)
+            material->dirty = false;
+        return ret;
+    }
+
+    // Compressed textures live in two coupled VRAM slots, which makes an
+    // in-place copy awkward. Re-upload them the simple way instead.
+    if (material->ram_format == NEA_TEX4X4)
+    {
+        if (!NEA_MaterialTexVramUnload(material))
+            return 0;
+        int ret = NEA_MaterialTexVramLoad(material);
+        if (ret)
+            material->dirty = false;
+        return ret;
+    }
+
+    // Resident and uncompressed: copy the RAM buffer straight into the existing
+    // VRAM slot. The size, format and GPU parameters are unchanged, so there is
+    // no need to reallocate or touch the material parameters.
+    ne_copy_tex_to_vram(NEA_Texture[material->texindex].address,
+                        material->ram_format, material->ram_size,
+                        material->ram_data);
+
+    material->dirty = false;
 
     return 1;
 }
@@ -981,6 +1107,35 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
     return 1;
 }
 
+// Copies raw texture data from RAM into an already-allocated VRAM address. It
+// remaps the primary VRAM banks to LCD mode for the duration of the copy, so it
+// must be called when that is safe (e.g. during the vertical blank). Handles the
+// NEA_RGB5 special case, where each alpha bit is forced to 1 so the data becomes
+// NEA_A1RGB5 in VRAM.
+static void ne_copy_tex_to_vram(void *addr, NEA_TextureFormat fmt,
+                                uint32_t size, const void *texture)
+{
+    // Unlock texture memory for writing
+    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
+    u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
+                                       VRAM_D_LCD);
+
+    if (fmt == NEA_RGB5)
+    {
+        uint32_t *src = (uint32_t *)texture;
+        uint32_t *dest = addr;
+        uint32_t words = size >> 2; // Four bytes each iteration
+        while (words--)
+            *dest++ = *src++ | ((1 << 15) | (1 << 31));
+    }
+    else
+    {
+        swiCopy((u32 *)texture, addr, (size >> 2) | COPY_MODE_WORD);
+    }
+
+    vramRestorePrimaryBanks(vramTemp);
+}
+
 int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
                        int sizeX, int sizeY, NEA_TextureFlags flags,
                        const void *texture)
@@ -1070,32 +1225,12 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
     NEA_Texture[slot].address = addr;
     NEA_Texture[slot].uses = 1; // Initially only this material uses the texture
 
-    // Unlock texture memory for writing
-    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
-    u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
-                                       VRAM_D_LCD);
+    ne_copy_tex_to_vram(addr, fmt, size, texture);
 
-    if (fmt == NEA_RGB5)
-    {
-        // NEA_RGB5 is NEA_A1RGB5 with each alpha bit manually set to 1 during the
-        // copy to VRAM.
-        uint32_t *src = (uint32_t *)texture;
-        uint32_t *dest = addr;
-        size >>= 2; // We are going to process four bytes each iteration
-        while (size--)
-            *dest++ = *src++ | ((1 << 15) | (1 << 31));
-
-        fmt = NEA_A1RGB5;
-    }
-    else
-    {
-        swiCopy((u32 *)texture, addr, (size >> 2) | COPY_MODE_WORD);
-    }
-
+    // NEA_RGB5 is stored in VRAM as NEA_A1RGB5 (see ne_copy_tex_to_vram())
+    NEA_TextureFormat hw_fmt = (fmt == NEA_RGB5) ? NEA_A1RGB5 : fmt;
     int hardware_size_y = ne_is_valid_tex_size(sizeY);
-    ne_set_material_tex_param(tex, sizeX, hardware_size_y, addr, fmt, flags);
-
-    vramRestorePrimaryBanks(vramTemp);
+    ne_set_material_tex_param(tex, sizeX, hardware_size_y, addr, hw_fmt, flags);
 
     return 1;
 }
@@ -1125,6 +1260,7 @@ void NEA_MaterialClone(NEA_Material *source, NEA_Material *dest)
     dest->ram_backed = false;
     dest->ram_data = NULL;
     dest->ram_size = 0;
+    dest->dirty = false;
 }
 
 void NEA_MaterialSetPalette(NEA_Material *tex, NEA_Palette *pal)
