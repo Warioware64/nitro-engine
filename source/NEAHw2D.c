@@ -27,9 +27,15 @@ struct NEA_Hw2DTextCtx {
     bool bitmap_set;                 // true once a font texture is attached
     void *owned_bitmap;              // malloc'd by BitmapLoadGRF, owned by ctx
     void *owned_palette;             // malloc'd by BitmapLoadGRF, owned by ctx
+    // Destination. Exactly one of these is set: `bg` for a ctx created with
+    // NEA_Hw2DTextCtxCreate (libdsf writes into VRAM), `buffer` for one created
+    // with NEA_Hw2DTextCtxCreateBuffer (libdsf writes into caller RAM, and
+    // NEA_Hw2DTextCtxBlitToBG moves the result into a BG).
     NEA_Hw2DBG *bg;
+    void *buffer;
+    int buf_width, buf_height;       // dimensions of `buffer`, 0 when bg-backed
     dsf_format fmt;
-    // Canvas in BG-pixel coords, cached so Clear can wipe the right rect.
+    // Canvas in destination-pixel coords, cached so Clear can wipe the right rect.
     int canvas_left, canvas_top, canvas_right, canvas_bottom;
 };
 
@@ -921,8 +927,14 @@ void NEA_Hw2DBGPutPixel16(NEA_Hw2DBG *bg, int x, int y, u16 color)
 void NEA_Hw2DBGPutPixel8(NEA_Hw2DBG *bg, int x, int y, u8 index)
 {
     NEA_AssertPointer(bg, "NULL bg");
-    u8 *ptr = (u8 *)bg->gfx_ptr;
-    ptr[y * bg->width + x] = index;
+    // VRAM ignores 8-bit stores, so touch the halfword that holds this pixel
+    // and keep its neighbour intact.
+    const int offset = y * bg->width + x;
+    u16 *pair = &bg->gfx_ptr[offset >> 1];
+    if (offset & 1)
+        *pair = (u16)((*pair & 0x00FF) | (index << 8));
+    else
+        *pair = (u16)((*pair & 0xFF00) | index);
 }
 
 void NEA_Hw2DBGClearBitmap(NEA_Hw2DBG *bg, u32 value)
@@ -2038,22 +2050,26 @@ static int ne_hw2d_text_map_err(dsf_error err, const char *what)
     return -1;
 }
 
-NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
+// Map a bitmap BG type onto the libdsf format that writes it. Returns -1 for
+// tiled types, which libdsf can't target (it lays down linear pixels).
+static int ne_hw2d_text_fmt(NEA_Hw2DBGType type, dsf_format *out)
 {
-    NEA_AssertPointer(bg, "NULL bg");
-    NEA_Assert(bg->used, "BG not active");
-
-    dsf_format fmt;
-    if (bg->type == NEA_HW2D_BG_BITMAP_16)
-        fmt = DSF_BMP_RGBA;
-    else if (bg->type == NEA_HW2D_BG_BITMAP_8)
-        fmt = DSF_BMP_RGB256;
+    if (type == NEA_HW2D_BG_BITMAP_16)
+        *out = DSF_BMP_RGBA;
+    else if (type == NEA_HW2D_BG_BITMAP_8)
+        *out = DSF_BMP_RGB256;
     else
-    {
-        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: needs a bitmap BG");
-        return NULL;
-    }
+        return -1;
+    return 0;
+}
 
+// Claim a free ctx slot and point a fresh libdsf renderer at `dst`. Shared by
+// the BG-backed and buffer-backed constructors; the caller fills in whichever
+// destination field applies.
+static NEA_Hw2DTextCtx *ne_hw2d_text_ctx_new(dsf_format fmt, void *dst,
+                                              int width, int height,
+                                              const char *what)
+{
     NEA_Hw2DTextCtx *ctx = NULL;
     for (int i = 0; i < NEA_HW2D_MAX_TEXT_CTX; i++)
     {
@@ -2065,7 +2081,7 @@ NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
     }
     if (ctx == NULL)
     {
-        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: text ctx pool full");
+        NEA_DebugPrint("%s: text ctx pool full", what);
         return NULL;
     }
 
@@ -2073,15 +2089,14 @@ NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
     dsf_error err = DSF_RendererNew(&renderer);
     if (err != DSF_NO_ERROR)
     {
-        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: RendererNew %d", err);
+        NEA_DebugPrint("%s: RendererNew %d", what, err);
         return NULL;
     }
 
-    err = DSF_RendererModeSetBuffer(renderer, fmt, bg->gfx_ptr,
-                                     bg->width, bg->height);
+    err = DSF_RendererModeSetBuffer(renderer, fmt, dst, width, height);
     if (err != DSF_NO_ERROR)
     {
-        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: ModeSetBuffer %d", err);
+        NEA_DebugPrint("%s: ModeSetBuffer %d", what, err);
         DSF_RendererFree(renderer);
         return NULL;
     }
@@ -2089,12 +2104,62 @@ NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
     memset(ctx, 0, sizeof(*ctx));
     ctx->used = true;
     ctx->renderer = renderer;
-    ctx->bg = bg;
     ctx->fmt = fmt;
-    // Default canvas = full BG. SetCanvas overrides.
-    ctx->canvas_right = bg->width;
-    ctx->canvas_bottom = bg->height;
+    // Default canvas = the whole destination. SetCanvas overrides.
+    ctx->canvas_right = width;
+    ctx->canvas_bottom = height;
     // font_handle / bitmap_set stay zero — caller loads them next.
+    return ctx;
+}
+
+NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg)
+{
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_Assert(bg->used, "BG not active");
+
+    dsf_format fmt;
+    if (ne_hw2d_text_fmt(bg->type, &fmt) != 0)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreate: needs a bitmap BG");
+        return NULL;
+    }
+
+    NEA_Hw2DTextCtx *ctx = ne_hw2d_text_ctx_new(fmt, bg->gfx_ptr, bg->width,
+                                                 bg->height,
+                                                 "NEA_Hw2DTextCtxCreate");
+    if (ctx == NULL)
+        return NULL;
+
+    ctx->bg = bg;
+    return ctx;
+}
+
+NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreateBuffer(NEA_Hw2DBGType type, void *buffer,
+                                              int width, int height)
+{
+    NEA_AssertPointer(buffer, "NULL buffer");
+
+    dsf_format fmt;
+    if (ne_hw2d_text_fmt(type, &fmt) != 0)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreateBuffer: needs a bitmap type");
+        return NULL;
+    }
+    if (width <= 0 || height <= 0)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxCreateBuffer: bad size %dx%d",
+                       width, height);
+        return NULL;
+    }
+
+    NEA_Hw2DTextCtx *ctx = ne_hw2d_text_ctx_new(fmt, buffer, width, height,
+                                                 "NEA_Hw2DTextCtxCreateBuffer");
+    if (ctx == NULL)
+        return NULL;
+
+    ctx->buffer = buffer;
+    ctx->buf_width = width;
+    ctx->buf_height = height;
     return ctx;
 }
 
@@ -2296,10 +2361,57 @@ int NEA_Hw2DTextCtxSetCanvas(NEA_Hw2DTextCtx *ctx, int left, int top,
     return 0;
 }
 
+// The pixel buffer a ctx renders into, plus its dimensions: either the BG's
+// VRAM or the caller's RAM buffer, depending on which constructor was used.
+static u16 *ne_hw2d_text_dst(const NEA_Hw2DTextCtx *ctx, int *width,
+                              int *height)
+{
+    if (ctx->bg != NULL)
+    {
+        *width = ctx->bg->width;
+        *height = ctx->bg->height;
+        return ctx->bg->gfx_ptr;
+    }
+    *width = ctx->buf_width;
+    *height = ctx->buf_height;
+    return (u16 *)ctx->buffer;
+}
+
+// memset for a byte-indexed run that may live in VRAM. VRAM drops 8-bit
+// stores, so the unaligned head/tail bytes are written as a read-modify-write
+// of the halfword that contains them, and the body goes out 16 bits at a time.
+static void ne_vram_set8(void *dst, u8 value, size_t bytes)
+{
+    u8 *p = (u8 *)dst;
+    const u16 pair = (u16)(value | (value << 8));
+
+    if (bytes > 0 && (((uintptr_t)p) & 1))
+    {
+        u16 *h = (u16 *)(p - 1);
+        *h = (u16)((*h & 0x00FF) | (value << 8));
+        p++;
+        bytes--;
+    }
+    while (bytes >= 2)
+    {
+        *(u16 *)p = pair;
+        p += 2;
+        bytes -= 2;
+    }
+    if (bytes > 0)
+    {
+        u16 *h = (u16 *)p;
+        *h = (u16)((*h & 0xFF00) | value);
+    }
+}
+
 int NEA_Hw2DTextCtxClear(NEA_Hw2DTextCtx *ctx)
 {
     NEA_AssertPointer(ctx, "NULL ctx");
     NEA_Assert(ctx->used, "ctx not active");
+
+    int dst_w, dst_h;
+    u16 *dst = ne_hw2d_text_dst(ctx, &dst_w, &dst_h);
 
     // Wipe the canvas region. Both supported formats use 0 as "no glyph":
     // index 0 is transparent for RGB256, alpha-0 (== full zero) is
@@ -2310,30 +2422,29 @@ int NEA_Hw2DTextCtxClear(NEA_Hw2DTextCtx *ctx)
     int b = ctx->canvas_bottom;
     if (l < 0) l = 0;
     if (t < 0) t = 0;
-    if (r > ctx->bg->width)  r = ctx->bg->width;
-    if (b > ctx->bg->height) b = ctx->bg->height;
+    if (r > dst_w) r = dst_w;
+    if (b > dst_h) b = dst_h;
 
-    int bg_w = ctx->bg->width;
-    if (ctx->fmt == DSF_BMP_RGB256)
+    const int width = r - l;
+    if (width > 0)
     {
-        // 8bpp: one byte per pixel. Use a u8* view, halfword-safe writes.
-        // Per row write is short and aligned-friendly enough for memset.
-        u8 *base = (u8 *)ctx->bg->gfx_ptr;
-        int width = r - l;
-        if (width > 0)
+        if (ctx->fmt == DSF_BMP_RGB256)
         {
+            // 8bpp: one byte per pixel, so a row can start or end mid-halfword.
+            // ne_vram_set8 keeps that legal when the destination is VRAM.
+            u8 *base = (u8 *)dst;
             for (int row = t; row < b; row++)
-                memset(base + row * bg_w + l, 0, width);
+                ne_vram_set8(base + row * dst_w + l, 0, (size_t)width);
         }
-    }
-    else
-    {
-        u16 *base = ctx->bg->gfx_ptr;
-        int width = r - l;
-        if (width > 0)
+        else
         {
+            // 16bpp: every pixel is its own halfword, always VRAM-legal.
             for (int row = t; row < b; row++)
-                memset(base + row * bg_w + l, 0, (size_t)width * 2);
+            {
+                u16 *p = dst + row * dst_w + l;
+                for (int i = 0; i < width; i++)
+                    p[i] = 0;
+            }
         }
     }
 
@@ -2342,6 +2453,54 @@ int NEA_Hw2DTextCtxClear(NEA_Hw2DTextCtx *ctx)
     {
         NEA_DebugPrint("NEA_Hw2DTextCtxClear: %d", err);
         return -1;
+    }
+    return 0;
+}
+
+int NEA_Hw2DTextCtxBlitToBG(NEA_Hw2DTextCtx *ctx, NEA_Hw2DBG *bg, int x, int y)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_Assert(ctx->used, "ctx not active");
+    NEA_Assert(bg->used, "BG not active");
+
+    if (ctx->buffer == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBlitToBG: ctx is not buffer-backed");
+        return -1;
+    }
+
+    dsf_format bg_fmt;
+    if (ne_hw2d_text_fmt(bg->type, &bg_fmt) != 0 || bg_fmt != ctx->fmt)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBlitToBG: ctx/BG format mismatch");
+        return -1;
+    }
+
+    // Clip the source rectangle against the destination BG.
+    int src_x = 0, src_y = 0;
+    int w = ctx->buf_width;
+    int h = ctx->buf_height;
+    if (x < 0) { src_x = -x; w += x; x = 0; }
+    if (y < 0) { src_y = -y; h += y; y = 0; }
+    if (x + w > bg->width)  w = bg->width - x;
+    if (y + h > bg->height) h = bg->height - y;
+    if (w <= 0 || h <= 0)
+        return 0;
+
+    const int pixel_bytes = (ctx->fmt == DSF_BMP_RGB256) ? 1 : 2;
+    const size_t row_bytes = (size_t)w * pixel_bytes;
+
+    u8 *src = (u8 *)ctx->buffer
+            + ((size_t)src_y * ctx->buf_width + src_x) * pixel_bytes;
+    u8 *dst = (u8 *)bg->gfx_ptr
+            + ((size_t)y * bg->width + x) * pixel_bytes;
+
+    for (int row = 0; row < h; row++)
+    {
+        ne_vram_copy(dst, src, row_bytes);
+        src += (size_t)ctx->buf_width * pixel_bytes;
+        dst += (size_t)bg->width * pixel_bytes;
     }
     return 0;
 }

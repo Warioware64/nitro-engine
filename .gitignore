@@ -5,8 +5,9 @@ build_release/
 lib/
 *.nds
 *.elf
-
 # Other
 __pycache__/
 *.zip
 *.swp
+.codegraph/
+helpSrc/

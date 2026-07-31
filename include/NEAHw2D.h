@@ -571,10 +571,47 @@ typedef enum {
 /// NEA_Hw2DTextCtxMetadataLoad* and NEA_Hw2DTextCtxBitmap* before printing.
 /// Multiple contexts can target the same BG.
 ///
+/// @note For BITMAP_8 backgrounds libdsf lays glyphs down one *byte* at a
+///       time, and VRAM ignores 8-bit stores. Rendering an 8bpp ctx straight
+///       into VRAM therefore drops pixels on hardware — use
+///       NEA_Hw2DTextCtxCreateBuffer() + NEA_Hw2DTextCtxBlitToBG() instead.
+///       BITMAP_16 backgrounds are unaffected (one halfword per pixel).
+///
 /// @param bg 8bpp or 16bpp bitmap BG. The font loaded afterward must match:
 ///           BITMAP_16 → A1RGB5 (16bpp), BITMAP_8 → PAL256 (8bpp).
 /// @return Pointer to the context, or NULL on error.
 NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreate(NEA_Hw2DBG *bg);
+
+/// Create a persistent text context that renders into a caller-owned buffer.
+///
+/// Same as NEA_Hw2DTextCtxCreate(), except the destination is plain memory
+/// rather than a background, so the byte-sized stores libdsf performs for
+/// 8bpp text are legal. Compose the text, then call NEA_Hw2DTextCtxBlitToBG()
+/// to move the result onto a background with VRAM-safe transfers.
+///
+/// The buffer must outlive the context; NEA never frees it.
+///
+/// @param type   NEA_HW2D_BG_BITMAP_8 or NEA_HW2D_BG_BITMAP_16. Fixes the
+///               pixel size and the font format the ctx expects, exactly like
+///               the BG type does for NEA_Hw2DTextCtxCreate().
+/// @param buffer Destination, at least width * height * (1 or 2) bytes.
+/// @param width,height Buffer dimensions in pixels.
+/// @return Pointer to the context, or NULL on error.
+NEA_Hw2DTextCtx *NEA_Hw2DTextCtxCreateBuffer(NEA_Hw2DBGType type, void *buffer,
+                                              int width, int height);
+
+/// Copy a buffer-backed context's pixels onto a bitmap background.
+///
+/// The blit is clipped against the background and uses 16/32-bit transfers,
+/// so it is safe against VRAM. The whole buffer is copied, transparent pixels
+/// included: it replaces the destination rectangle instead of compositing
+/// over it.
+///
+/// @param ctx  Context created with NEA_Hw2DTextCtxCreateBuffer().
+/// @param bg   Destination background. Its type must match the ctx's.
+/// @param x,y  Top-left destination position, in BG pixels.
+/// @return 0 on success, -1 on error (BG-backed ctx, or format mismatch).
+int NEA_Hw2DTextCtxBlitToBG(NEA_Hw2DTextCtx *ctx, NEA_Hw2DBG *bg, int x, int y);
 
 /// Release a text context.
 ///
