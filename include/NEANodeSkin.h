@@ -88,8 +88,8 @@ uint32_t NSMW_GetNumNodes(const void *nsmw_file);
 /// @param dsa_file Pointer to the DSA animation file.
 /// @param frame_interp Frame (20.12 fixed point).
 /// @return An NSMW_* code (0 for success).
-ITCM_CODE ARM_CODE
-int NSMW_PrepareNodes(const NEA_NodeSkinData *skin, const void *dsa_file,
+ARM_CODE
+int ITCM_FUNC(NSMW_PrepareNodes)(const NEA_NodeSkinData *skin, const void *dsa_file,
                       uint32_t frame_interp);
 
 /// Same as NSMW_PrepareNodes() but blends between two animations.
@@ -104,8 +104,8 @@ int NSMW_PrepareNodes(const NEA_NodeSkinData *skin, const void *dsa_file,
 /// @param frame_interp_2 Frame for the second animation (20.12).
 /// @param blend Blend factor (20.12, 0.0 - 1.0).
 /// @return An NSMW_* code (0 for success).
-ITCM_CODE ARM_CODE
-int NSMW_PrepareNodesBlend(const NEA_NodeSkinData *skin,
+ARM_CODE
+int ITCM_FUNC(NSMW_PrepareNodesBlend)(const NEA_NodeSkinData *skin,
                            const void *dsa_file_1, uint32_t frame_interp_1,
                            const void *dsa_file_2, uint32_t frame_interp_2,
                            uint32_t blend);

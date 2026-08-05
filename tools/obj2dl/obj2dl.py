@@ -11,6 +11,8 @@ from display_list import DisplayList
 from mtl_parser import parse_mtl, float_to_rgb15, pack_diffuse_ambient, pack_specular_emission
 from collections import defaultdict
 
+import b3mesh
+
 import math
 
 class OBJFormatError(Exception):
@@ -464,14 +466,19 @@ def float_to_f32(val):
         res = 0x100000000 + res
     return res
 
-def generate_colmesh(output_file, vertices, material_faces,
-                     model_scale, model_translation, use_vertex_color):
-    """Generate a .colmesh binary file from parsed OBJ geometry.
+def collect_collision_triangles(vertices, material_faces,
+                                model_scale, model_translation,
+                                use_vertex_color):
+    """Collect every face as a transformed triangle, splitting quads.
 
-    Collects all faces as triangles (splitting quads), applies scale and
-    translation, computes face normals, and writes the binary format.
+    Shared by the .colmesh and .b3mesh writers so that both describe the same
+    geometry by construction. Materials are dropped -- collision does not care
+    which submesh a triangle came from -- and polygons with more than four
+    vertices are ignored, as they always have been here.
+
+    :return: ``(triangles, min_xyz, max_xyz)``, where a triangle is a list of
+        three [x, y, z] positions with the translation and scale applied.
     """
-    # Collect all faces as triangles
     all_tris = []
     for face_list in material_faces.values():
         for face in face_list:
@@ -484,17 +491,12 @@ def generate_colmesh(output_file, vertices, material_faces,
                 all_tris.append([vkeys[0][0], vkeys[2][0], vkeys[3][0]])
             # Ignore other polygon types for collision
 
-    if not all_tris:
-        print("Warning: No triangles for collision mesh")
-        return
-
-    # Transform vertices to world-space f32
     triangles = []
     min_xyz = [float('inf')] * 3
     max_xyz = [float('-inf')] * 3
 
     for tri_indices in all_tris:
-        verts_f32 = []
+        verts = []
         for vi in tri_indices:
             pos = []
             for i in range(3):
@@ -506,8 +508,29 @@ def generate_colmesh(output_file, vertices, material_faces,
                     min_xyz[i] = val
                 if val > max_xyz[i]:
                     max_xyz[i] = val
-            verts_f32.append(pos)
+            verts.append(pos)
+        triangles.append(verts)
 
+    return triangles, min_xyz, max_xyz
+
+def generate_colmesh(output_file, vertices, material_faces,
+                     model_scale, model_translation, use_vertex_color):
+    """Generate a .colmesh binary file from parsed OBJ geometry.
+
+    This is the format the *older* NEACollision module reads (NEA_ColMesh). The
+    Box3D physics engine wants a .b3mesh instead -- see generate_b3mesh.
+    """
+    all_verts, min_xyz, max_xyz = collect_collision_triangles(
+        vertices, material_faces, model_scale, model_translation,
+        use_vertex_color)
+
+    if not all_verts:
+        print("Warning: No triangles for collision mesh")
+        return
+
+    triangles = []
+
+    for verts_f32 in all_verts:
         # Compute face normal via cross product
         e1 = [verts_f32[1][i] - verts_f32[0][i] for i in range(3)]
         e2 = [verts_f32[2][i] - verts_f32[0][i] for i in range(3)]
@@ -549,6 +572,76 @@ def generate_colmesh(output_file, vertices, material_faces,
                 f.write(struct.pack('<I', float_to_f32(normal[i])))
 
     print(f"Collision mesh: {len(triangles)} triangles -> {colmesh_path}")
+
+# ---------------------------------------------------------------------------
+# .b3mesh collision mesh generation (Box3D / NEAPhysics3D)
+# ---------------------------------------------------------------------------
+
+def generate_b3mesh(output_file, vertices, material_faces,
+                    model_scale, model_translation, use_vertex_color,
+                    collision_scale, c_name):
+    """Bake a .b3mesh for NEA_Phys3DBodyAddMesh().
+
+    The bounding volume hierarchy, the weld and the shared-edge classification
+    all happen here, in b3mesh.py, because there is no run-time mesh builder --
+    building a BVH on a 67 MHz ARM9 is work for the asset pipeline.
+
+    Two things are worth knowing about the numbers that go in.
+
+    **The coordinates are quantized first.** Every vertex goes through
+    float_to_f32 and back before the bake sees it, which makes this path
+    bit-identical to writing a .colmesh and baking that. It is not a rounding
+    nicety: tests/box3d_host/test_bake_diff.py checks b3mesh.py against the C
+    baker through a .colmesh, and if the direct path fed unquantized doubles
+    instead, the path an author actually uses would be the one nothing checked.
+
+    **collision_scale is not model_scale.** model_scale sizes the *display
+    list*, which stores positions as v16 and therefore tops out at 8 units, so a
+    level is usually authored small for rendering. The solver's tolerances are
+    absolute and want 1 unit to be about 1 metre, so the two scales genuinely
+    differ and the collision one divides on the way into the bake.
+    """
+    all_verts, _min_xyz, _max_xyz = collect_collision_triangles(
+        vertices, material_faces, model_scale, model_translation,
+        use_vertex_color)
+
+    if not all_verts:
+        print("Warning: No triangles for collision mesh")
+        return
+
+    bake_vertices = []
+    bake_indices = []
+
+    for verts in all_verts:
+        for v in verts:
+            # Round-trip through f32, exactly as a .colmesh would. int32 is
+            # stored unsigned-wrapped by float_to_f32, so undo that first.
+            pos = []
+            for i in range(3):
+                raw = float_to_f32(v[i])
+                if raw >= 0x80000000:
+                    raw -= 0x100000000
+                pos.append(raw / 4096.0)
+
+            bake_indices.append(len(bake_vertices))
+            bake_vertices.append(tuple(pos))
+
+    b3mesh_path = os.path.splitext(output_file)[0] + '.b3mesh'
+
+    try:
+        blob, info = b3mesh.bake(bake_vertices, bake_indices, collision_scale)
+    except b3mesh.B3MeshError as e:
+        raise OBJFormatError(f"could not bake {b3mesh_path}: {e}")
+
+    with open(b3mesh_path, 'wb') as f:
+        f.write(blob)
+
+    print(f"Box3D collision mesh -> {b3mesh_path}")
+    b3mesh.report(info)
+
+    if c_name is not None:
+        for path in b3mesh.emit_c(c_name, blob):
+            print(f"  wrote          {path}")
 
 # ---------------------------------------------------------------------------
 # OBJ parsing
@@ -621,7 +714,9 @@ def parse_obj(input_file, use_vertex_color):
 
 def convert_obj(input_file, output_file, texture_size,
                 model_scale, model_translation, use_vertex_color,
-                no_strip=False, multi_material=False, collision=False):
+                no_strip=False, multi_material=False, collision=False,
+                collision_b3=False, collision_b3_scale=1.0,
+                collision_b3_c=None):
 
     vertices, texcoords, normals, material_faces, mtl_file = \
         parse_obj(input_file, use_vertex_color)
@@ -752,10 +847,17 @@ def convert_obj(input_file, output_file, texture_size,
         print(f"Output:      {output_file} (DLMM format)")
         save_dlmm(output_file, submeshes)
 
-    # Generate collision mesh if requested
+    # Generate collision meshes if requested. The two are independent: a
+    # .colmesh feeds the older NEACollision module, a .b3mesh feeds Box3D, and
+    # a project can want either or both.
     if collision:
         generate_colmesh(output_file, vertices, material_faces,
                          model_scale, model_translation, use_vertex_color)
+
+    if collision_b3:
+        generate_b3mesh(output_file, vertices, material_faces,
+                        model_scale, model_translation, use_vertex_color,
+                        collision_b3_scale, collision_b3_c)
 
 if __name__ == "__main__":
 
@@ -797,7 +899,23 @@ if __name__ == "__main__":
                         help="enable multi-material output (DLMM format)")
     parser.add_argument("--collision", required=False,
                         action='store_true',
-                        help="generate .colmesh collision mesh alongside display list")
+                        help="generate .colmesh collision mesh alongside display "
+                             "list (for the NEACollision module)")
+    parser.add_argument("--collision-b3", required=False,
+                        action='store_true',
+                        help="bake a .b3mesh collision mesh alongside the display "
+                             "list (for Box3D / NEA_Phys3DBodyAddMesh)")
+    parser.add_argument("--collision-b3-scale", required=False,
+                        type=float, default=1.0,
+                        help="divide every .b3mesh coordinate by this (default 1). "
+                             "The solver's tolerances are absolute, so 1 unit "
+                             "should be about 1 metre -- which is usually not the "
+                             "scale the display list is authored at")
+    parser.add_argument("--collision-b3-c", required=False,
+                        type=str, default=None, metavar="NAME",
+                        help="also write NAME_b3mesh.c / .h, an 8-byte-aligned C "
+                             "array to compile into the ROM. Use it: bin2c emits "
+                             "aligned(4) and b3MeshData needs 8")
 
     args = parser.parse_args()
 
@@ -825,7 +943,9 @@ if __name__ == "__main__":
     try:
         convert_obj(args.input, args.output, texture_size,
                     args.scale, args.translation, args.use_vertex_color,
-                    args.no_strip, args.multi_material, args.collision)
+                    args.no_strip, args.multi_material, args.collision,
+                    args.collision_b3, args.collision_b3_scale,
+                    args.collision_b3_c)
     except BaseException as e:
         print("ERROR: " + str(e))
         traceback.print_exc()

@@ -12,7 +12,7 @@ ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
 # -----------------
 
 SOURCEDIRS	:= source
-INCLUDEDIRS	:= include source/libdsf
+INCLUDEDIRS	:= include source/libdsf source/box3d
 GFXDIRS		:=
 BINDIRS		:=
 
@@ -24,6 +24,11 @@ DEFINES		:= -DNEA_DEBUG -DNEA_BLOCKSDS
 else
 DEFINES		:= -DNEA_BLOCKSDS
 endif
+
+# The Box3D port reads its compile-time configuration from this header, which
+# shrinks the desktop defaults to something a 4 MB console can host. Box3D's
+# own base.h includes it through BOX3D_USER_CONFIG before anything else.
+DEFINES		+= -DBOX3D_USER_CONFIG='"box3d/nea_config.h"'
 
 # Libraries
 # ---------
@@ -41,13 +46,27 @@ endif
 
 ifeq ($(NEA_DEBUG),1)
 	NAME		:= NEA_debug
+	BOX3DNAME	:= NEA_box3d_debug
 	BUILDDIR	:= build_debug
 else
 	NAME		:= NEA
+	BOX3DNAME	:= NEA_box3d
 	BUILDDIR	:= build_release
 endif
 INSTALLNAME	:= nitro-engine-advanced
 ARCHIVE		:= lib/lib$(NAME).a
+
+# Box3D ships as its own archive.
+#
+# It is roughly three times the .text of the rest of the engine (250 KB against
+# 74 KB), so libNEA.a stays Nitro Engine Advanced *without* it and a project
+# opts in by naming -lNEA_box3d. Archive-member linking already meant an unused
+# Box3D cost a ROM nothing; the split makes that structural rather than
+# incidental -- no core translation unit can pick up a b3* reference by
+# accident, and the `nm --undefined-only` check in the readme proves it.
+#
+# NEA_NO_BOX3D=1 skips it entirely, for fast core-only iteration.
+ARCHIVE_BOX3D	:= lib/lib$(BOX3DNAME).a
 
 # Tools
 # -----
@@ -83,8 +102,19 @@ ifneq ($(GFXDIRS),)
 endif
 
 SOURCES_S	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
-SOURCES_C	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
 SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
+
+# Partition the C sources between the two archives. Everything under
+# source/box3d/ is the port itself; source/NEAPhysics3D.c is the NEA-facing
+# wrapper, which belongs with it rather than in the core archive -- putting it
+# in libNEA.a would give the core an undefined b3* reference, which is exactly
+# what the split exists to prevent. It calls back into libNEA.a for
+# NEA_ModelSetMatrix, and that cycle is harmless: Makefile.example already links
+# inside -Wl,--start-group ... -Wl,--end-group.
+SOURCES_C_ALL	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
+SOURCES_C_BOX3D	:= $(filter source/box3d/%,$(SOURCES_C_ALL)) \
+		   $(filter source/NEAPhysics3D.c,$(SOURCES_C_ALL))
+SOURCES_C	:= $(filter-out $(SOURCES_C_BOX3D),$(SOURCES_C_ALL))
 
 # Compiler and linker flags
 # -------------------------
@@ -128,22 +158,81 @@ OBJS_SOURCES	:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_S))) \
 
 OBJS		:= $(OBJS_ASSETS) $(OBJS_SOURCES)
 
-DEPS		:= $(OBJS:.o=.d)
+OBJS_BOX3D	:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_C_BOX3D)))
+
+DEPS		:= $(OBJS:.o=.d) $(OBJS_BOX3D:.o=.d)
 
 # Targets
 # -------
 
-.PHONY: all clean install arm7
+.PHONY: all clean install arm7 itcm-report
 
+ifeq ($(NEA_NO_BOX3D),1)
 all: $(ARCHIVE)
+else
+all: $(ARCHIVE) $(ARCHIVE_BOX3D)
+endif
 
 arm7:
 	$(V)+$(MAKE) -C arm7 -f Makefile.blocksds --no-print-directory
+
+# Print what each ITCM group costs and what the current selection adds up to.
+#
+# Sizes come from the built archive rather than a table in the docs, so they
+# cannot go stale as the solver changes. Needs $(ARCHIVE_BOX3D) to exist.
+#
+# The 13,100 baseline is libnds interrupt/cothread code plus NEA's skinning
+# (10,112 measured in the physics examples) and b3hot.c's always-on shared math
+# (2,988). A game with its own ITCM code should subtract that too.
+#
+# The group table is expanded by make into "NAME:sym+sym:sel" words before the
+# shell runs -- B3_ITCM_SYMS_* and NEA_BOX3D_ITCM_* are make variables, so a
+# shell-side $$NAME lookup would find nothing.
+b3_empty	:=
+b3_space	:= $(b3_empty) $(b3_empty)
+b3_report_rows	= $(foreach g,$(B3_ITCM_GROUPS),\
+		    $(g):$(subst $(b3_space),+,$(B3_ITCM_SYMS_$(g))):$(strip \
+		      $(if $(NEA_BOX3D_ITCM_$(g)),$(NEA_BOX3D_ITCM_$(g))!,\
+		        $(if $(filter $(g),$(B3_ITCM_DEFAULT_ON)),1,0))))
+
+itcm-report: $(ARCHIVE_BOX3D)
+	@$(PREFIX)nm -S --size-sort -t d $(ARCHIVE_BOX3D) 2>/dev/null \
+	   | awk '($$3=="T"||$$3=="t"){print $$4" "$$2+0}' | sort -u > $(BUILDDIR)/.itcm-sizes
+	@echo "Box3D ITCM groups            bytes  selected"
+	@echo "-------------------------------------------"
+	@total=0; \
+	for row in $(b3_report_rows); do \
+	    g=$${row%%:*}; rest=$${row#*:}; syms=$${rest%%:*}; sel=$${rest##*:}; \
+	    case "$$sel" in *!) sel=$${sel%!}; mark=" (explicit)" ;; *) mark="" ;; esac; \
+	    bytes=0; \
+	    for s in $$(echo "$$syms" | tr '+' ' '); do \
+	        n=$$(awk -v s="$$s" '$$1==s {print $$2; exit}' $(BUILDDIR)/.itcm-sizes); \
+	        bytes=$$((bytes + $${n:-0})); \
+	    done; \
+	    if [ "$$sel" = "1" ]; then total=$$((total + bytes)); on="yes$$mark"; \
+	    else on="no$$mark"; fi; \
+	    printf "  %-24s %7d  %s\n" "$$g" "$$bytes" "$$on"; \
+	done; \
+	echo "-------------------------------------------"; \
+	printf "  %-24s %7d\n" "selected total" "$$total"; \
+	printf "  %-24s %7d\n" "baseline + shared math" 13100; \
+	printf "  %-24s %7d / 32768\n" "ITCM occupancy" "$$((total + 13100))"; \
+	printf "  %-24s %7d\n" "headroom" "$$((32768 - total - 13100))"; \
+	if [ $$((total + 13100)) -gt 32768 ]; then \
+	    echo; echo "  OVER BUDGET -- the ROM link will fail with"; \
+	    echo "  'section .itcm will not fit in region itcm'"; \
+	fi
+	@$(RM) $(BUILDDIR)/.itcm-sizes
 
 $(ARCHIVE): $(OBJS)
 	@echo "  AR      $@"
 	@$(MKDIR) -p $(@D)
 	$(V)$(AR) rcs $@ $(OBJS)
+
+$(ARCHIVE_BOX3D): $(OBJS_BOX3D)
+	@echo "  AR      $@"
+	@$(MKDIR) -p $(@D)
+	$(V)$(AR) rcs $@ $(OBJS_BOX3D)
 
 install: all arm7
 	@echo "  INSTALL $(BLOCKSDSEXT)/$(INSTALLNAME)/"
@@ -164,7 +253,7 @@ install: all arm7
 
 clean:
 	@echo "  CLEAN"
-	$(V)$(RM) $(ARCHIVE) build_debug build_release
+	$(V)$(RM) $(ARCHIVE) $(ARCHIVE_BOX3D) build_debug build_release
 	$(V)+$(MAKE) -C arm7 -f Makefile.blocksds clean --no-print-directory
 
 # Rules
@@ -179,6 +268,95 @@ $(BUILDDIR)/%.c.o : %.c
 	@echo "  CC      $<"
 	@$(MKDIR) -p $(@D)
 	$(V)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# The Box3D archive builds in ARM mode rather than Thumb.
+#
+# Fixed-point arithmetic rests on 32x32->64 multiplies. In ARM mode each one
+# is a single SMULL/SMLAL; Thumb-1 on ARMv5TE has no such instruction, so GCC
+# emits a call to __aeabi_lmul instead -- 16 instructions and a branch in
+# place of 7 inline ones, on the most frequent operation in the engine.
+#
+# This inverts the usual size argument too: the ARM build of b3fixed.c is
+# smaller than the Thumb one (312 vs 360 bytes), because the call setup costs
+# more than the wider encoding saves.
+#
+# Stated against OBJS_BOX3D rather than a source/box3d/%.c pattern rule, which
+# is what it used to be. That pattern silently excluded source/NEAPhysics3D.c,
+# even though SOURCES_C_BOX3D above deliberately groups it with the port and it
+# ships in the same archive -- so the NEA-facing wrapper was built Thumb and
+# paid __aeabi_lmul 18 times in NEA_Phys3DSyncModels, which runs once per moving
+# body per frame, and 16 times in NEA_Phys3DBodyAddBoneShapeI. Deriving the flag
+# from the same variable that defines the archive means the two cannot drift
+# apart again.
+#
+# -marm lands after the -mthumb inside CFLAGS and GCC takes the last of the
+# pair. -mthumb-interwork is on, so the calls back into libNEA.a still work.
+#
+# -Os rides along for the same reason, and by the same last-flag-wins rule
+# against the -O2 in CFLAGS. The archive is instruction-cache bound, not
+# instruction-count bound: the ARM9 has 8 KiB of icache, and at -O2 the inlining
+# of the fixed-point layer grows b3SolveWheelJoint to 29 KiB -- 3.6x a cache
+# that has to hold the contact solver and every other joint type at the same
+# time. The sub-step loop calls it eight times per joint per frame, so each of
+# those calls streams its whole body back from main RAM.
+#
+# -Os takes b3SolveWheelJoint to 11 KiB and b3WarmStartWheelJoint from 8.9 to
+# 2.8, and it does not undo the reason -marm is here: SMULL is still emitted.
+# The trade is a few more executed instructions against far fewer fetch stalls,
+# which is the right side of the trade on this CPU. Emulators that do not model
+# the icache will disagree; hardware is the arbiter.
+$(OBJS_BOX3D): CFLAGS += -marm -Os
+
+# source/box3d/b3hot.c places its handful of shared leaf helpers in ITCM, the
+# ARM9's 32 KB zero-wait-state instruction memory. About 2.9 KB, against the
+# ~22 KB that libnds and NEA's skinning code leave free -- see the file's own
+# comment for what qualifies and why.
+#
+# NEA_BOX3D_NO_ITCM=1 keeps them in main RAM, for a game that has already
+# committed its ITCM elsewhere. The deduplication is unaffected either way;
+# only the section changes. Overcommitting ITCM is a link error, not a silent
+# failure, so a game that needs this flag finds out at build time.
+ifeq ($(NEA_BOX3D_NO_ITCM),1)
+$(OBJS_BOX3D): CFLAGS += -DB3_NO_ITCM
+endif
+
+# Per-group ITCM selection for the solver itself, which is far too large to
+# place unconditionally. Each group is a slice of per-sub-step code with a
+# published byte cost; the defaults and the reasoning live in
+# include/box3d/nea_config.h, and `make -f Makefile.blocksds itcm-report`
+# prints the live costs from the built archive.
+#
+#   make -f Makefile.blocksds install NEA_BOX3D_ITCM_CONTACTS=0 NEA_BOX3D_ITCM_WHEEL=1
+#
+# The value is passed through rather than tested against 1, so that both
+# directions work: turning a default-off group on, and turning the default-on
+# CONTACTS group off to afford a large joint group. A group the caller does not
+# mention gets no -D at all and keeps nea_config.h's default.
+B3_ITCM_GROUPS	:= WHEEL PRISMATIC REVOLUTE SPHERICAL DISTANCE MOTOR WELD \
+		   PARALLEL CONTACTS CORE MESH
+
+B3_ITCM_DEFINES	:= $(foreach g,$(B3_ITCM_GROUPS),\
+		     $(if $(NEA_BOX3D_ITCM_$(g)),-DB3_ITCM_$(g)=$(NEA_BOX3D_ITCM_$(g))))
+
+$(OBJS_BOX3D): CFLAGS += $(B3_ITCM_DEFINES)
+
+# What each group contains, for `make itcm-report`. Kept next to the group list
+# so that adding a group means editing one place.
+B3_ITCM_SYMS_WHEEL	:= b3SolveWheelJoint b3WarmStartWheelJoint
+B3_ITCM_SYMS_PRISMATIC	:= b3SolvePrismaticJoint b3WarmStartPrismaticJoint
+B3_ITCM_SYMS_REVOLUTE	:= b3SolveRevoluteJoint b3WarmStartRevoluteJoint
+B3_ITCM_SYMS_SPHERICAL	:= b3SolveSphericalJoint b3WarmStartSphericalJoint
+B3_ITCM_SYMS_DISTANCE	:= b3SolveDistanceJoint b3WarmStartDistanceJoint
+B3_ITCM_SYMS_MOTOR	:= b3SolveMotorJoint b3WarmStartMotorJoint
+B3_ITCM_SYMS_WELD	:= b3SolveWeldJoint b3WarmStartWeldJoint
+B3_ITCM_SYMS_PARALLEL	:= b3SolveParallelJoint b3WarmStartParallelJoint
+B3_ITCM_SYMS_CONTACTS	:= b3SolveContacts b3WarmStartContacts
+B3_ITCM_SYMS_CORE	:= b3Solve
+B3_ITCM_SYMS_MESH	:= b3ComputeMeshManifolds
+
+# Groups on by default, mirroring the #ifndef defaults in nea_config.h. Only
+# used to render the report; the compiler still takes its truth from the header.
+B3_ITCM_DEFAULT_ON	:= CONTACTS
 
 $(BUILDDIR)/%.arm.c.o : %.arm.c
 	@echo "  CC      $<"

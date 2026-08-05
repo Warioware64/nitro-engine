@@ -175,18 +175,109 @@ add ``-DNEA_DEBUG`` to the ``CFLAGS`` and ``CPPFLAGS`` in your Makefile. Make
 sure to clean and rebuild your project after doing the changes mentioned in this
 step. Check the **error_handling** example to see how to use the debug mode.
 
+3D rigid body physics (Box3D)
+-----------------------------
+
+The Box3D-based 3D physics engine — convex hulls, triangle mesh levels,
+persistent contacts, islands and sleeping — ships in a **separate archive**,
+because it is roughly three times the code size of the rest of the engine
+(250 KB of ARM9 ``.text`` against 90 KB). ``libNEA.a`` is Nitro Engine Advanced
+*without* it, so a project that does not want physics pays nothing for it.
+
+To use it, name it in your Makefile **before** including ``Makefile.example``
+(the template sets ``LIBS`` with ``?=`` and yields to a value already set)::
+
+    LIBS := -lNEA_box3d -lNEA -lnds9 -lc
+
+and include ``<NEAPhysics3D.h>``. The debug build is ``-lNEA_box3d_debug``.
+See the **physics/box3d_basic** and **physics/box3d_level** examples.
+``NEAPhysics3D.h`` wraps the common path; the full Box3D API is in
+``<box3d/box3d.h>`` and the two can be mixed.
+
+A level is a triangle mesh baked offline: run ``obj2dl --collision-b3`` to get
+the ``.b3mesh`` that ``NEA_Phys3DBodyAddMesh()`` takes. There is no run-time
+mesh builder — building a bounding volume hierarchy on a 67 MHz ARM9 is work
+for the asset pipeline. An animated model can carry per-bone hitbox shapes the
+same way, with ``md5_to_dsma --collision-b3``.
+
+Choosing what goes in ITCM
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ARM9's instruction cache is 8 KB and the solver does not fit in it. The
+sub-step loop calls each joint's solve routine twice per sub-step per joint —
+32 times a frame for four joints at the default four sub-steps — so a solve
+function larger than the cache re-streams its entire body from main RAM on
+every call. ITCM, the ARM9's 32 KB of zero-wait-state instruction memory,
+removes that fetch. On a DSi, moving just the shared math helpers there took
+**examples/physics/box3d_car from ~240% CPU to ~150–160%**.
+
+Two things are always in ITCM: about 3 KB of shared math (``b3RotateVector``,
+``b3MulQuat`` and the rest of ``source/box3d/b3hot.c``) and, by default, the
+contact solver. Everything else is opt-in, because ITCM is one budget shared
+with your whole game and only you know which joints your scenes use — the
+library cannot guess, and ``b3SolveJoint``'s type switch means every joint
+implementation is linked into any ROM that uses joints at all.
+
+============================== ========= ==========
+Group                              Bytes    Default
+============================== ========= ==========
+``NEA_BOX3D_ITCM_CONTACTS``        7,252   **on**
+``NEA_BOX3D_ITCM_WHEEL``          14,104   off
+``NEA_BOX3D_ITCM_PRISMATIC``      10,180   off
+``NEA_BOX3D_ITCM_MESH``            8,496   off
+``NEA_BOX3D_ITCM_SPHERICAL``       7,456   off
+``NEA_BOX3D_ITCM_REVOLUTE``        7,376   off
+``NEA_BOX3D_ITCM_CORE``            7,200   off
+``NEA_BOX3D_ITCM_DISTANCE``        6,516   off
+``NEA_BOX3D_ITCM_MOTOR``           5,976   off
+``NEA_BOX3D_ITCM_WELD``            4,600   off
+``NEA_BOX3D_ITCM_PARALLEL``        2,640   off
+============================== ========= ==========
+
+Each joint group is that joint's solve plus warm-start routine. Roughly
+12,400 bytes are free on top of the defaults, so you will not fit everything —
+that is the point of choosing. Print the live figures with::
+
+    make -f Makefile.blocksds itcm-report
+
+Set a group to ``1`` to add it, or to ``0`` to drop one that is on by default::
+
+    make -f Makefile.blocksds install -j`nproc` \
+        NEA_BOX3D_ITCM_CONTACTS=0 NEA_BOX3D_ITCM_WHEEL=1
+
+That is exactly what a vehicle game wants, and it has to turn contacts off:
+wheel is 14,104 bytes against the 12,416 that remain with contacts on. A
+ragdoll instead wants ``NEA_BOX3D_ITCM_SPHERICAL=1``, which fits alongside the
+default. Mixed-joint scenes benefit most — a spherical solver (6,244 B) and a
+revolute solver (6,108 B) interleaved in one pass have a 12 KB working set
+against an 8 KB cache and evict each other on every joint.
+
+Overshooting the budget is a link error when you build your ROM, not a silent
+failure::
+
+    section .itcm will not fit in region itcm
+
+``NEA_BOX3D_NO_ITCM=1`` is the master switch and keeps the whole library out of
+ITCM, including the shared math.
+
+This is independent of the three older physics modules (``NEAPhysics.h``,
+``NEARigidBody.h``, ``NEACollision.h``), which are unchanged and still in
+``libNEA.a``.
+
 Tools
 =====
 
 Nitro Engine Advanced includes the following conversion tools under ``tools/``:
 
 - **obj2dl**: Converts Wavefront OBJ files into NDS display lists (``.bin``).
-  Supports ``--texture``, ``--scale``, and ``--collision`` (generates a
-  ``.col.bin`` triangle mesh for the physics engine).
+  Supports ``--texture``, ``--scale``, ``--collision`` (a ``.colmesh`` for the
+  ``NEACollision`` module) and ``--collision-b3`` (a baked ``.b3mesh`` for the
+  Box3D physics engine).
 - **md5_to_dsma**: Converts MD5 mesh and animation files into NDS-compatible
   formats. Supports ``--multi-material`` for DLMM output with per-submesh
   materials, and ``--collision <md5collimesh>`` to generate per-bone collision
   data (``.boncol``) from a collision mesh exported by the Blender addon.
+  ``--collision-b3`` writes the same bones as Box3D shapes (``.b3col``).
 - **img2ds**: Converts images to NDS textures and palettes (deprecated, except
   for DEPTHBMP conversion).
 - **neascene_export**: Converts JSON scene descriptions to binary ``.neascene``

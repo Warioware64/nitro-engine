@@ -44,6 +44,9 @@ DEFINES		:=
 # Libraries
 # ---------
 
+# Add -lNEA_box3d before -lNEA to use the Box3D 3D physics engine
+# (NEAPhysics3D.h). It is a separate archive because it is about three
+# times the size of the rest of the engine; leaving it out costs nothing.
 LIBS		:= -lNEA -lnds9 -lc
 LIBDIRS		:= $(BLOCKSDSEXT)/nitro-engine-advanced \
 		   $(BLOCKSDS)/libs/libnds

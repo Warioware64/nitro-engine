@@ -230,8 +230,8 @@ uint32_t NSMW_GetNumNodes(const void *nsmw_file)
     return p[2]; // magic, version, num_nodes
 }
 
-ITCM_CODE ARM_CODE
-int NSMW_PrepareNodes(const NEA_NodeSkinData *skin, const void *dsa_file,
+ARM_CODE
+int ITCM_FUNC(NSMW_PrepareNodes)(const NEA_NodeSkinData *skin, const void *dsa_file,
                       uint32_t frame_interp)
 {
     const dsa_header_t *hdr = dsa_file;
@@ -285,8 +285,8 @@ int NSMW_PrepareNodes(const NEA_NodeSkinData *skin, const void *dsa_file,
     return NSMW_SUCCESS;
 }
 
-ITCM_CODE ARM_CODE
-int NSMW_PrepareNodesBlend(const NEA_NodeSkinData *skin,
+ARM_CODE
+int ITCM_FUNC(NSMW_PrepareNodesBlend)(const NEA_NodeSkinData *skin,
                            const void *dsa_file_1, uint32_t frame_interp_1,
                            const void *dsa_file_2, uint32_t frame_interp_2,
                            uint32_t blend)

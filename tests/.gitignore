@@ -1,0 +1,20 @@
+*.o
+*.d
+
+# Host test binaries and the mode stamp that guards them.
+test_fixed
+test_math
+test_support
+test_collision
+test_world
+run_pair
+bake_ref
+.mode-*
+
+# The pristine upstream reference: built once, expensive to rebuild, and
+# derived from helpSrc/ which is itself gitignored.
+refobj/
+libbox3d_ref.a
+redefine.txt
+
+__pycache__/

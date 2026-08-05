@@ -29,8 +29,8 @@ uint32_t DSMA_GetNumFrames(const void *dsa_file);
 // when going over the max frame, it interpolates with frame 0.
 //
 // It returns a DSMA_* code (0 for success).
-ITCM_CODE ARM_CODE
-int DSMA_DrawModel(const void *dsm_file, const void *dsa_file, uint32_t frame_interp);
+ARM_CODE
+int ITCM_FUNC(DSMA_DrawModel)(const void *dsm_file, const void *dsa_file, uint32_t frame_interp);
 
 
 // Draws the model in the DSM file animated with the data in the specified DSA
@@ -44,8 +44,8 @@ int DSMA_DrawModel(const void *dsm_file, const void *dsa_file, uint32_t frame_in
 // 0.0 to display DSA file 1 to 1.0 to display DSA file 2.
 //
 // It returns a DSMA_* code (0 for success).
-ITCM_CODE ARM_CODE
-int DSMA_DrawModelBlendAnimation(const void *dsm_file,
+ARM_CODE
+int ITCM_FUNC(DSMA_DrawModelBlendAnimation)(const void *dsm_file,
         const void *dsa_file_1, uint32_t frame_interp_1,
         const void *dsa_file_2, uint32_t frame_interp_2,
         uint32_t blend);
@@ -57,12 +57,12 @@ int DSMA_DrawModelBlendAnimation(const void *dsm_file,
 // This is useful for multi-material animated models where you need to draw
 // multiple display lists (one per submesh) with different materials, all
 // sharing the same bone matrices.
-ITCM_CODE ARM_CODE
-int DSMA_PrepareBones(const void *dsa_file, uint32_t frame_interp);
+ARM_CODE
+int ITCM_FUNC(DSMA_PrepareBones)(const void *dsa_file, uint32_t frame_interp);
 
 // Same as DSMA_PrepareBones but blends between two animations.
-ITCM_CODE ARM_CODE
-int DSMA_PrepareBonesBlend(const void *dsa_file_1, uint32_t frame_interp_1,
+ARM_CODE
+int ITCM_FUNC(DSMA_PrepareBonesBlend)(const void *dsa_file_1, uint32_t frame_interp_1,
         const void *dsa_file_2, uint32_t frame_interp_2,
         uint32_t blend);
 

@@ -467,7 +467,12 @@ typedef enum {
     /// Advances asynchronous asset loads (calls NEA_AsyncProcess()).
     NEA_UPDATE_ASSETS = BIT(8),
     /// Advances every particle emitter (calls NEA_ParticleUpdateAll()).
-    NEA_UPDATE_PARTICLES = BIT(9)
+    NEA_UPDATE_PARTICLES = BIT(9),
+    /// Steps the Box3D world and syncs bound models (calls NEA_Phys3DUpdate()).
+    ///
+    /// Does nothing unless the project links `-lNEA_box3d` and has created a
+    /// world with NEA_Phys3DWorldInit(); see NEAPhysics3D.h.
+    NEA_UPDATE_PHYS3D = BIT(10)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

@@ -1,0 +1,320 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# SPDX-FileContributor: Warioware64, 2026
+
+# Host build of the Box3D fixed-point port.
+#
+# Building the ported sources natively is what makes a conversion this large
+# tractable: a scale bug found here names the operation and the line, whereas
+# the same bug found on hardware is a body drifting through a floor three
+# hundred frames later.
+#
+# Targets
+#   test_fixed   verification of the fixed-point scalar layer (b3fixed.h)
+#   run_pair     lockstep comparison of the port against upstream float Box3D
+#
+# Build modes, selected with MODE=
+#   debug    (default) shadow values active -- every operation is checked
+#            against exact double arithmetic. Slow, and the mode to use while
+#            converting a file.
+#   strict   distinct struct types per scale, no shadow values. Confirms the
+#            conversion type-checks without the runtime cost.
+#   device   bare int32_t, exactly what the ARM9 build compiles. Confirms the
+#            wrappers really do vanish.
+
+MODE ?= debug
+
+ROOT      := ../..
+PORT_SRC  := $(ROOT)/source/box3d
+PORT_INC  := $(ROOT)/include
+
+# Pristine upstream Box3D, used as the float reference. Note that helpSrc/ is
+# gitignored, so run_pair only builds where the reference tree is present.
+UPSTREAM  := $(ROOT)/helpSrc/box3d-main
+
+CC        := gcc
+CFLAGS    := -std=gnu11 -g -O1 -Wall -Wextra -Wno-unused-parameter
+CFLAGS    += -I$(PORT_SRC) -I$(PORT_INC)
+# The port reads its compile-time configuration from this header, exactly as
+# the device build does through Makefile.blocksds.
+CFLAGS    += -DBOX3D_USER_CONFIG='"box3d/nea_config.h"'
+
+# B3_ASSERT and B3_ENABLE_VALIDATION both key off NEA_DEBUG or this flag
+# (base.h:118, base.h:147). Neither was set here until Phase 3B, which meant
+# every B3_ASSERT in the port and all four structural validators --
+# b3ValidateConnectivity, b3ValidateSolverSets, b3ValidateContacts,
+# b3ValidateIsland -- compiled to empty stubs in the host suite. test_world.c
+# was calling them after every mutation and they were doing nothing.
+#
+# B3_ENABLE_ASSERT rather than NEA_DEBUG: this is box3d's own switch, and it
+# does not drag in NEA's debug machinery, which the host build has no use for.
+CFLAGS    += -DB3_ENABLE_ASSERT
+
+LDFLAGS   := -lm
+
+ifeq ($(MODE),debug)
+CFLAGS    += -DB3_FIXED_DEBUG
+endif
+ifeq ($(MODE),strict)
+CFLAGS    += -DB3_FIXED_STRICT
+endif
+
+# Sources of the port that have been converted so far. Files are added here as
+# each phase lands, so this list doubles as a record of conversion progress.
+PORT_OBJS := b3fixed.o b3hot.o core.o bitset.o id_pool.o table.o arena_allocator.o block_allocator.o aabb.o math_fixed.o sphere.o capsule.o distance.o manifold.o convex_manifold.o dynamic_tree.o broad_phase.o hull.o types.o shape.o body.o joint.o distance_joint.o revolute_joint.o spherical_joint.o weld_joint.o motor_joint.o prismatic_joint.o parallel_joint.o wheel_joint.o contact.o mesh.o mesh_contact.o triangle_manifold.o solver_set.o island.o constraint_graph.o physics_world.o solver.o contact_solver.o
+
+TESTS     := test_fixed test_math test_support test_collision test_world
+
+.PHONY: all clean distclean test check-modes
+
+all: $(TESTS)
+
+test_fixed: test_fixed.o $(PORT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+test_math: test_math.o $(PORT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+test_support: test_support.o $(PORT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+test_collision: test_collision.o $(PORT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+test_world: test_world.o modemesh_bake.o $(PORT_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+# The mesh baker again, built in the *current* MODE rather than device mode.
+#
+# run_pair links mesh_bake.o, which is hand-built device-mode below because
+# everything in run_pair must be. test_world needs a baked mesh too -- there is
+# no device mesh builder, so baking is the only way to hand a world a level --
+# and its objects follow MODE. Two objects from one source, deliberately: the
+# alternative is a hand-written BVH in the test, which is the baker's median
+# split reimplemented where nothing would check it.
+#
+# It also means the baker is exercised in all three modes, which run_pair alone
+# never does.
+modemesh_bake.o: mesh_bake.c mesh_bake.h pair_iface.h $(MODE_STAMP)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Objects are NOT interchangeable between modes, and mixing them does not fail
+# to link -- it silently produces wrong data. b3f is a bare int32_t on device
+# and a struct carrying a shadow double under B3_FIXED_DEBUG, so a b3AABB is
+# 24 bytes in one and 96 in the other; an object built in the wrong mode reads
+# every field at the wrong offset. That looks like a physics bug, not a build
+# mistake, and it costs an hour to find.
+#
+# So the mode is stamped, and changing it forces a clean.
+MODE_STAMP := .mode-$(MODE)
+
+$(MODE_STAMP):
+	@$(MAKE) -s -f Makefile.host clean
+	@touch $@
+
+# -MMD -MP generates a .d file per object listing the headers it included, and
+# the -include below feeds those back as rules.
+#
+# Without this an incremental build is silently wrong whenever a *header*
+# changes: Phase 3C-ii retyped b3BodyState::deltaPosition and b3Manifold's
+# impulse fields, and `make test_world` then relinked a test object built
+# against the new layout with library objects built against the old one. The
+# result was not a compile error -- it was a segfault in the first test in the
+# file, three functions away from anything that had been edited.
+#
+# -MP adds a phony target per header so that deleting or renaming one does not
+# leave a stale rule that halts the build.
+%.o: %.c $(MODE_STAMP)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+%.o: $(PORT_SRC)/%.c $(MODE_STAMP)
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+-include $(wildcard *.d)
+
+test: $(TESTS)
+	@for t in $(TESTS); do ./$$t || exit 1; echo ""; done
+
+# =========================================================================
+# run_pair -- lockstep against pristine float Box3D
+# =========================================================================
+#
+# The two libraries export the same b3* names with incompatible definitions,
+# so the reference is renamed out of the way: every b3* symbol in the upstream
+# archive becomes up_b3*, and the same rename is applied to pair_ref.o so its
+# calls follow. Only b3* is touched, which is why this uses --redefine-syms
+# rather than --prefix-symbols; the latter would rename memcpy and malloc too
+# and nothing would link.
+#
+# Renaming *undefined* symbols as well as defined ones is the part that makes
+# it work -- that is what re-points the reference's internal calls at the
+# renamed definitions.
+#
+# Not part of check-modes: helpSrc/ is gitignored, so this only builds where
+# the reference tree is present. run_pair always builds in device mode, since
+# it compares numbers rather than exercising the shadow checker.
+
+REF_SRC   := $(wildcard $(UPSTREAM)/src/*.c)
+REF_OBJ   := $(patsubst $(UPSTREAM)/src/%.c,refobj/%.o,$(REF_SRC))
+
+# REF_SIMD=none builds the reference with -DB3_SIMD_NONE, which switches its
+# separating axis test onto the same scalar edge phase the port mirrors.
+#
+# It exists to attribute a disagreement rather than to fix one. By default the
+# reference runs its SSE edge phase while the port runs the scalar one;
+# upstream's comment at convex_manifold.c:1550 claims the two match bit for
+# bit "for cross platform determinism", but if run_pair ever reports
+# systematic edge-axis divergence, rebuilding with this says whether the
+# disagreement is ours or upstream's between its own two paths.
+#
+#   make -f Makefile.host distclean
+#   make -f Makefile.host REF_SIMD=none run_pair && ./run_pair hull
+ifeq ($(REF_SIMD),none)
+REF_SIMD_FLAGS := -DB3_SIMD_NONE
+else
+REF_SIMD_FLAGS :=
+endif
+
+# B3_GYROSCOPIC_ITERATIONS is #ifndef-guarded upstream, so the reference can be
+# built to match nea_config.h's 0. Without this the two libraries would disagree
+# for every body spinning about a non-principal axis and run_pair would be
+# measuring a configuration difference rather than the port. Same precedent as
+# REF_SIMD=none.
+REF_GYRO ?= 0
+REF_CFLAGS := -std=gnu17 -O1 -w -DNDEBUG $(REF_SIMD_FLAGS) -DB3_GYROSCOPIC_ITERATIONS=$(REF_GYRO) \
+	-I$(UPSTREAM)/include -I$(UPSTREAM)/src
+
+refobj/%.o: $(UPSTREAM)/src/%.c
+	@mkdir -p refobj
+	$(CC) $(REF_CFLAGS) -c -o $@ $<
+
+libbox3d_ref.a: $(REF_OBJ)
+	@rm -f $@
+	ar rcs $@ $(REF_OBJ)
+	@nm $@ | awk '$$NF ~ /^b3/ {print $$NF, "up_" $$NF}' | sort -u > redefine.txt
+	objcopy --redefine-syms=redefine.txt $@
+
+# Sees only upstream headers, then gets renamed to match the archive.
+pair_ref.o: pair_ref.c pair_iface.h libbox3d_ref.a
+	$(CC) $(REF_CFLAGS) -c -o $@ $<
+	objcopy --redefine-syms=redefine.txt $@
+
+# Sees only the port's headers. Device mode: bare int32_t, no shadow values.
+pair_port.o: pair_port.c pair_iface.h hull_bake.h mesh_bake.h
+	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -Wno-unused-parameter -I$(PORT_SRC) -I$(PORT_INC) \
+		-DBOX3D_USER_CONFIG='"box3d/nea_config.h"' -c -o $@ $<
+
+# The hull baker: the port's side too, since it emits the port's blob layout.
+# Computes in double and quantizes once, which is exactly what the eventual
+# tools/hull2b3 will do -- so every run_pair hull case exercises the baker.
+hull_bake.o: hull_bake.c hull_bake.h pair_iface.h
+	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -Wno-unused-parameter -I$(PORT_SRC) -I$(PORT_INC) \
+		-DBOX3D_USER_CONFIG='"box3d/nea_config.h"' -c -o $@ $<
+
+# The mesh baker, on the same terms as the hull baker and for the same reason.
+# Hand-written rather than left to the generic %.o rule because that one carries
+# the MODE-dependent -DB3_FIXED_*, and everything linked into run_pair has to be
+# device mode.
+mesh_bake.o: mesh_bake.c mesh_bake.h pair_iface.h
+	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -Wno-unused-parameter -I$(PORT_SRC) -I$(PORT_INC) \
+		-DBOX3D_USER_CONFIG='"box3d/nea_config.h"' -c -o $@ $<
+
+# Sees neither.
+run_pair.o: run_pair.c pair_iface.h
+	$(CC) -std=gnu11 -g -O1 -Wall -Wextra -c -o $@ $<
+
+PAIR_PORT_OBJS := $(addprefix pairport_,$(PORT_OBJS))
+
+# Note the absence of -DB3_ENABLE_ASSERT here, unlike $(CFLAGS): deliberate.
+# libbox3d_ref.a is built -DNDEBUG, so its assertions and validators are off,
+# and run_pair compares the two libraries' *answers*. Enabling them on one side
+# only would make the port pay for structural walks the reference skips and
+# would add asserts to a binary whose job is to report divergences, not to
+# stop at the first one. The assertion and validator coverage lives in
+# check-modes, which builds the same sources with them on.
+pairport_%.o: $(PORT_SRC)/%.c
+	$(CC) -std=gnu11 -g -O1 -w -I$(PORT_SRC) -I$(PORT_INC) \
+		-DBOX3D_USER_CONFIG='"box3d/nea_config.h"' -c -o $@ $<
+
+run_pair: run_pair.o pair_port.o pair_ref.o hull_bake.o mesh_bake.o $(PAIR_PORT_OBJS) libbox3d_ref.a
+	$(CC) -o $@ run_pair.o pair_port.o pair_ref.o hull_bake.o mesh_bake.o $(PAIR_PORT_OBJS) libbox3d_ref.a $(LDFLAGS)
+
+.PHONY: pair
+pair: run_pair
+	./run_pair --all
+
+# =========================================================================
+# bake_ref -- the reference bake, for checking b3mesh.py against
+# =========================================================================
+#
+# tools/obj2dl/b3mesh.py bakes a .b3mesh in Python, which makes it a second
+# implementation of a binary contract. bake_ref is how that stays safe: it is
+# mesh_bake.c behind a command line, so test_bake_diff.py can bake a corpus
+# both ways and compare the bytes.
+#
+# Device mode, like everything that touches the blob layout -- b3f is a struct
+# carrying a double under B3_FIXED_DEBUG, so b3Vec3 and every offset computed
+# from sizeof() would differ from what the ARM9 reads.
+#
+# Two differences from the pairport_%.o recipe it otherwise copies:
+#
+#   - **-DB3_ENABLE_ASSERT is on.** run_pair leaves it off because its job is to
+#     report divergences rather than stop at the first one. This binary's job is
+#     the opposite: a malformed blob should trap here, on a host with a
+#     debugger, rather than be written out and compared.
+#   - **The caps are a level's worth.** pair_iface.h defaults to 512 because
+#     run_pair holds pdMesh by value; bake_ref holds one on the heap.
+#
+# The bakeref_ prefix is not decoration. mesh_bake.o, modemesh_bake.o and
+# pairport_*.o are all already in this directory at different flag sets, and an
+# object built in the wrong mode does not fail to link -- it reads every field
+# at the wrong offset.
+
+BAKEREF_TRIANGLES ?= 8192
+BAKEREF_VERTICES  ?= $(shell expr 3 \* $(BAKEREF_TRIANGLES))
+
+BAKEREF_CFLAGS := -std=gnu11 -g -O2 -Wall -Wextra -Wno-unused-parameter \
+	-I$(PORT_SRC) -I$(PORT_INC) -DBOX3D_USER_CONFIG='"box3d/nea_config.h"' \
+	-DB3_ENABLE_ASSERT \
+	-DPD_MAX_MESH_TRIANGLES=$(BAKEREF_TRIANGLES) -DPD_MAX_MESH_VERTICES=$(BAKEREF_VERTICES)
+
+# b3IsValidMesh pulls in the rest of mesh.c, which is why mesh.o is here and
+# dynamic_tree.o is not.
+BAKEREF_PORT_OBJS := b3fixed.o b3hot.o core.o aabb.o math_fixed.o mesh.o
+BAKEREF_OBJS := bakeref_bake_ref.o bakeref_mesh_bake.o $(addprefix bakeref_,$(BAKEREF_PORT_OBJS))
+
+bakeref_%.o: %.c
+	$(CC) $(BAKEREF_CFLAGS) -MMD -MP -c -o $@ $<
+
+bakeref_%.o: $(PORT_SRC)/%.c
+	$(CC) $(BAKEREF_CFLAGS) -MMD -MP -c -o $@ $<
+
+bake_ref: $(BAKEREF_OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+# Bake a corpus with both bakers and compare the bytes. Not part of check-modes,
+# which builds the port; this checks a tool against the port.
+.PHONY: bake-diff
+bake-diff: bake_ref
+	python3 test_bake_diff.py
+
+# The layer has to behave identically in all three modes. A difference means
+# the wrappers are not transparent -- which would make every host result
+# unreliable as evidence about the device build.
+check-modes:
+	@for m in debug strict device; do \
+		echo "=== MODE=$$m ==="; \
+		$(MAKE) -s -f Makefile.host clean >/dev/null; \
+		$(MAKE) -s -f Makefile.host MODE=$$m $(TESTS) >/dev/null || exit 1; \
+		for t in $(TESTS); do ./$$t || exit 1; done; \
+		echo ""; \
+	done
+	@$(MAKE) -s -f Makefile.host clean >/dev/null
+
+clean:
+	rm -f *.o *.d $(TESTS) run_pair bake_ref .mode-*
+
+# The reference archive is expensive to rebuild and never changes, so a normal
+# clean leaves it alone.
+distclean: clean
+	rm -rf refobj libbox3d_ref.a redefine.txt

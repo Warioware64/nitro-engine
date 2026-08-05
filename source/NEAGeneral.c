@@ -1916,7 +1916,7 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if (ne_two_pass_enabled && ne_two_pass_frame != 0)
         flags &= ~(NEA_UPDATE_ANIMATIONS | NEA_UPDATE_PHYSICS
                    | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_RIGIDBODY
-                   | NEA_UPDATE_PARTICLES);
+                   | NEA_UPDATE_PARTICLES | NEA_UPDATE_PHYS3D);
 
     if (flags & NEA_UPDATE_GUI)
     {
@@ -1951,6 +1951,16 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     extern void NEA_Hw2DOBJUpdateAll(void) __attribute__((weak));
     if ((flags & NEA_UPDATE_HW2D) && NEA_Hw2DOBJUpdateAll)
         NEA_Hw2DOBJUpdateAll();
+
+    // Weak reference: Box3D lives in a separate archive (libNEA_box3d.a), so
+    // this resolves to NULL unless the project links it *and* pulls
+    // NEAPhysics3D.o in by calling NEA_Phys3DWorldInit(). That is the whole
+    // mechanism keeping libNEA.a free of Box3D: a weak undefined reference
+    // never extracts an archive member, so nothing here can drag the physics
+    // engine into a ROM that did not ask for it.
+    extern void NEA_Phys3DUpdate(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_PHYS3D) && NEA_Phys3DUpdate)
+        NEA_Phys3DUpdate();
 
     NEA_CPUPercent = div32(ne_cpucount * 100, 263);
     if (flags & NEA_CAN_SKIP_VBL)

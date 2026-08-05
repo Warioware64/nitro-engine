@@ -1,0 +1,968 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2026 Erin Catto        (original Box3D)
+// Copyright (c) 2026 Warioware64       (Nitro Engine Advanced fixed-point port)
+//
+// This file is part of Nitro Engine Advanced
+
+/// @file   solver.c
+/// @brief  The step: integrate, solve, integrate, finalize.
+///
+/// @section shape What this file is, once the threading is gone
+///
+/// Upstream's solver.c is 2331 lines, and roughly 900 of them are a
+/// work-stealing scheduler: block descriptors, per-block atomic sync indices,
+/// stage tables, worker start offsets, and a `b3SolverTask` that orchestrates
+/// all of it. On one core every one of those becomes a `for` loop.
+///
+/// A second collapse is larger and less obvious. Upstream's per-colour loops
+/// are written `for ( i < B3_GRAPH_COLOR_COUNT - 1 )`, and B3_GRAPH_COLOR_COUNT
+/// is 1 here -- so they iterate **zero** times, `activeColorCount` is always
+/// zero, and every constraint lives in the overflow colour. About 500 of
+/// b3Solve's 550 setup lines exist only to describe per-colour blocks that
+/// cannot exist. 3A found the same thing in constraint_graph.c.
+///
+/// @section scope Phase 3C-i solves nothing
+///
+/// The constraint stages are present and empty. Contacts are created, updated
+/// and validated by 3B, and have no effect -- two bodies that meet will pass
+/// through each other. That is deliberate: sub-stepping, damping, the speed
+/// caps, the sleep trigger and the move-event bookkeeping are each checkable
+/// against a closed form, and checking them before any impulse exists is the
+/// point of the split. Phase 3C-ii fills the stages in.
+///
+/// Absent, with CCD's phase named at the call site: `b3SolveContinuous`,
+/// `b3ContinuousQueryCallback` and `b3BulletBodyTask`.
+
+#include "solver.h"
+
+#include "body.h"
+#include "broad_phase.h"
+#include "constraint_graph.h"
+#include "contact.h"
+#include "contact_solver.h"
+#include "core.h"
+#include "ctz.h"
+#include "island.h"
+#include "joint.h"
+#include "physics_world.h"
+#include "shape.h"
+#include "solver_set.h"
+
+#include "box3d/constants.h"
+
+#include <string.h>
+
+// =========================================================================
+// Integration
+// =========================================================================
+
+static void b3IntegrateVelocitiesTask( int startIndex, int endIndex, b3StepContext* context )
+{
+	b3BodyState* states = context->states;
+	b3BodySim* sims = context->sims;
+
+	b3Vec3 gravity = context->world->gravity;
+	b3t h = context->h;
+
+	for ( int i = startIndex; i < endIndex; ++i )
+	{
+		b3BodySim* sim = sims + i;
+		b3BodyState* state = states + i;
+
+		b3Vec3 v = state->linearVelocity;
+		b3Vec3 w = state->angularVelocity;
+
+		// Damping is a Pade approximant to exp(-c*h), not the exponential
+		// itself:
+		//   dv/dt + c*v = 0  =>  v(t+h) = v(t) * exp(-c*h) ~= v(t) / (1 + c*h)
+		// Both factors are dimensionless and in (0,1], so Q30 -- which is also
+		// what makes them exact at c = 0, the overwhelmingly common case.
+		b3c linearDamping = b3DivFFToC( b3f_one, b3AddF( b3f_one, b3MulFT( sim->linearDamping, h ) ) );
+		b3c angularDamping = b3DivFFToC( b3f_one, b3AddF( b3f_one, b3MulFT( sim->angularDamping, h ) ) );
+
+		// Kinematic bodies have zero inverse mass and must not fall.
+		b3f gravityScale = b3Raw( sim->invMass ) > 0 ? sim->gravityScale : b3f_zero;
+
+		// Acceleration first, then the sub-step. Forming (h * invMass) first
+		// would be a Q24 x Q24 product of two small numbers -- 1/240 times
+		// 1/1000 is 4.2e-6, which is seventy raw units at Q24 and throws away
+		// four bits before the force is even applied.
+		b3Vec3 linearAccel = b3MulWV( sim->invMass, sim->force );
+		b3Vec3 gravityAccel = b3MulSV( gravityScale, gravity );
+		b3Vec3 dv = b3MulVT( b3Add( linearAccel, gravityAccel ), h );
+
+		v = b3Add( dv, b3MulCV( linearDamping, v ) );
+
+		b3Vec3 angularAccel = b3MulMWV( sim->invInertiaWorld, sim->torque );
+		b3Vec3 dw = b3MulVT( angularAccel, h );
+
+		w = b3Add( dw, b3MulCV( angularDamping, w ) );
+
+#if B3_GYROSCOPIC_ITERATIONS > 0
+		// Gyroscopic torque, by Newton-Raphson on
+		//     I*(w2 - w1) + h * cross(w2, I*w2) = 0
+		// solved in local coordinates where the Jacobian is tractable. This is
+		// what keeps a long skinny body tumbling correctly rather than spinning
+		// about a false axis.
+		//
+		// Two things make it portable, and neither is obvious:
+		//
+		// 1. The equation is **homogeneous of degree one in I**. Scaling I by
+		//    any positive constant scales every term equally and leaves w2
+		//    unchanged. So the port may use the inertia at whatever scale it
+		//    can actually represent -- and 3A's uniform Q7.24 clamp on the
+		//    inverse inertia, which would otherwise bias the answer, cancels
+		//    exactly instead.
+		// 2. That is also what keeps b3InvertMatrix and b3Solve3 in range: a
+		//    determinant is cubic in the entries, so it is only the fact that
+		//    these entries are of order one that makes Q24 enough.
+		//
+		// It is nevertheless off by default -- B3_GYROSCOPIC_ITERATIONS is 0 in
+		// nea_config.h. One iteration is a 3x3 inverse plus a 3x3 solve, two
+		// divides and about forty multiplies, per body per sub-step. At four
+		// sub-steps and 60 Hz that is the most expensive per-body operation in
+		// the engine, and it buys accuracy only for bodies spinning about a
+		// non-principal axis. A game that wants it can raise the count.
+		{
+			b3Quat q = b3MulQuat( state->deltaRotation, sim->transform.q );
+
+			// Q24 inverse inertia narrowed to Q12 for the inverse. Legitimate
+			// only because of the homogeneity above: this is the inertia up to
+			// an unknown positive factor, which is all the solve needs.
+			const b3MatrixW* iw = &sim->invInertiaLocal;
+			b3Matrix3 invInertia =
+				b3MakeMatrix3( b3MakeVec3( b3WToF( iw->cx.x ), b3WToF( iw->cx.y ), b3WToF( iw->cx.z ) ),
+							   b3MakeVec3( b3WToF( iw->cy.x ), b3WToF( iw->cy.y ), b3WToF( iw->cy.z ) ),
+							   b3MakeVec3( b3WToF( iw->cz.x ), b3WToF( iw->cz.y ), b3WToF( iw->cz.z ) ) );
+			b3Matrix3 inertiaLocal = b3InvertMatrix( invInertia );
+
+			b3Vec3 omega1 = b3InvRotateVector( q, w );
+			b3Vec3 omega2 = omega1;
+
+			// Symmetric, so six unique entries.
+			b3f i00 = inertiaLocal.cx.x, i01 = inertiaLocal.cy.x, i02 = inertiaLocal.cz.x;
+			b3f i11 = inertiaLocal.cy.y, i12 = inertiaLocal.cz.y, i22 = inertiaLocal.cz.z;
+
+			// Narrowing h to Q12 here would cost the same 0.39% b3MulVT's
+			// comment describes, so every h in the iteration is a b3MulFT.
+			#define GYRO_MUL_H( x ) b3MulFT( ( x ), h )
+
+			for ( int gyroIteration = 0; gyroIteration < B3_GYROSCOPIC_ITERATIONS; ++gyroIteration )
+			{
+				b3f w1 = omega2.x, w2 = omega2.y, w3 = omega2.z;
+
+				// Iw = I * omega2, shared by the residual and the Jacobian.
+				b3f Iw1 = b3AddF( b3AddF( b3MulFF( i00, w1 ), b3MulFF( i01, w2 ) ), b3MulFF( i02, w3 ) );
+				b3f Iw2 = b3AddF( b3AddF( b3MulFF( i01, w1 ), b3MulFF( i11, w2 ) ), b3MulFF( i12, w3 ) );
+				b3f Iw3 = b3AddF( b3AddF( b3MulFF( i02, w1 ), b3MulFF( i12, w2 ) ), b3MulFF( i22, w3 ) );
+
+				b3Vec3 dwv = b3Sub( omega2, omega1 );
+
+				b3Vec3 b = b3MakeVec3(
+					b3AddF( b3AddF( b3AddF( b3MulFF( i00, dwv.x ), b3MulFF( i01, dwv.y ) ), b3MulFF( i02, dwv.z ) ),
+							GYRO_MUL_H( b3SubF( b3MulFF( w2, Iw3 ), b3MulFF( w3, Iw2 ) ) ) ),
+					b3AddF( b3AddF( b3AddF( b3MulFF( i01, dwv.x ), b3MulFF( i11, dwv.y ) ), b3MulFF( i12, dwv.z ) ),
+							GYRO_MUL_H( b3SubF( b3MulFF( w3, Iw1 ), b3MulFF( w1, Iw3 ) ) ) ),
+					b3AddF( b3AddF( b3AddF( b3MulFF( i02, dwv.x ), b3MulFF( i12, dwv.y ) ), b3MulFF( i22, dwv.z ) ),
+							GYRO_MUL_H( b3SubF( b3MulFF( w1, Iw2 ), b3MulFF( w2, Iw1 ) ) ) ) );
+
+				// J = I + h * (skew(omega2) * I - skew(I * omega2)). Upstream's
+				// derivation; the doubled inertia terms fold into Iw.
+				b3Matrix3 J = b3MakeMatrix3(
+					b3MakeVec3(
+						b3AddF( i00, GYRO_MUL_H( b3SubF( b3MulFF( w2, i02 ), b3MulFF( w3, i01 ) ) ) ),
+						b3AddF( i01, GYRO_MUL_H( b3SubF( b3SubF( b3MulFF( w3, i00 ), b3MulFF( w1, i02 ) ), Iw3 ) ) ),
+						b3AddF( i02, GYRO_MUL_H( b3AddF( b3SubF( b3MulFF( w1, i01 ), b3MulFF( w2, i00 ) ), Iw2 ) ) ) ),
+					b3MakeVec3(
+						b3AddF( i01, GYRO_MUL_H( b3AddF( b3SubF( b3MulFF( w2, i12 ), b3MulFF( w3, i11 ) ), Iw3 ) ) ),
+						b3AddF( i11, GYRO_MUL_H( b3SubF( b3MulFF( w3, i01 ), b3MulFF( w1, i12 ) ) ) ),
+						b3AddF( i12, GYRO_MUL_H( b3SubF( b3SubF( b3MulFF( w1, i11 ), b3MulFF( w2, i01 ) ), Iw1 ) ) ) ),
+					b3MakeVec3(
+						b3AddF( i02, GYRO_MUL_H( b3SubF( b3SubF( b3MulFF( w2, i22 ), b3MulFF( w3, i12 ) ), Iw2 ) ) ),
+						b3AddF( i12, GYRO_MUL_H( b3AddF( b3SubF( b3MulFF( w3, i02 ), b3MulFF( w1, i22 ) ), Iw1 ) ) ),
+						b3AddF( i22, GYRO_MUL_H( b3SubF( b3MulFF( w1, i12 ), b3MulFF( w2, i02 ) ) ) ) ) );
+
+				omega2 = b3Sub( omega2, b3Solve3( J, b ) );
+			}
+
+			w = b3RotateVector( q, omega2 );
+		}
+#endif
+
+		state->linearVelocity = v;
+		state->angularVelocity = w;
+	}
+}
+
+static void b3IntegratePositionsTask( int startIndex, int endIndex, b3StepContext* context )
+{
+	b3BodyState* states = context->states;
+	b3t h = context->h;
+
+	b3f maxLinearSpeed = context->maxLinearVelocity;
+
+	// B3_MAX_ROTATION is a b3a -- brads, 32768 to a *full circle* -- so this is
+	// a unit conversion, not a multiply. The division is by the whole circle,
+	// giving revolutions, and 2*pi then turns revolutions into radians:
+	// 4096/32768 = 0.125 rev = pi/4 rad. At 60 Hz maxAngularSpeed is 47 rad/s.
+	//
+	// Dividing by half the circle instead reads as "brads per half turn" and
+	// silently doubles the cap, which lets a body rotate pi/2 in a step --
+	// exactly what B3_MAX_ROTATION's comment warns breaks continuous collision.
+	b3f maxAngularSpeed = b3MulFF( b3fFromFrac( B3_MAX_ROTATION, 32768 ), b3MulFF( B3_TWO_PI, context->inv_dt ) );
+
+	// Both squares are compared wide. 47.1^2 is 2219, which at Q24 is 3.7e10
+	// and overflows int32 by four bits -- so a Q12 threshold here would wrap
+	// and the cap would fire on almost every body. Same treatment 3B's
+	// recycling thresholds needed.
+	int64_t maxLinearSpeedSq = (int64_t)b3Raw( maxLinearSpeed ) * b3Raw( maxLinearSpeed );
+	int64_t maxAngularSpeedSq = (int64_t)b3Raw( maxAngularSpeed ) * b3Raw( maxAngularSpeed );
+
+	for ( int i = startIndex; i < endIndex; ++i )
+	{
+		b3BodyState* state = states + i;
+
+		b3Vec3 v = state->linearVelocity;
+		b3Vec3 w = state->angularVelocity;
+
+		// Motion locks read as a constraint applied last.
+		uint32_t flags = state->flags;
+		v.x = ( flags & b3_lockLinearX ) ? b3f_zero : v.x;
+		v.y = ( flags & b3_lockLinearY ) ? b3f_zero : v.y;
+		v.z = ( flags & b3_lockLinearZ ) ? b3f_zero : v.z;
+		w.x = ( flags & b3_lockAngularX ) ? b3f_zero : w.x;
+		w.y = ( flags & b3_lockAngularY ) ? b3f_zero : w.y;
+		w.z = ( flags & b3_lockAngularZ ) ? b3f_zero : w.z;
+
+		if ( b3LengthSquaredWide( v ) > maxLinearSpeedSq )
+		{
+			b3f ratio = b3DivFF( maxLinearSpeed, b3Length( v ) );
+			v = b3MulSV( ratio, v );
+			state->flags |= b3_isSpeedCapped;
+		}
+
+		if ( b3LengthSquaredWide( w ) > maxAngularSpeedSq && ( flags & b3_allowFastRotation ) == 0 )
+		{
+			b3f ratio = b3DivFF( maxAngularSpeed, b3Length( w ) );
+			w = b3MulSV( ratio, w );
+			state->flags |= b3_isSpeedCapped;
+		}
+
+		state->linearVelocity = v;
+		state->angularVelocity = w;
+		// Q24, not Q12. The increment is tens of quanta at Q12 and the velocity
+		// does not change between the sub-steps of a step, so rounding it lands
+		// the same way every time -- a constant bias that round-to-nearest
+		// cannot cancel. b3BodyState::deltaPosition carries the derivation.
+		state->deltaPosition = b3AddW3( state->deltaPosition, b3MulVTToW( v, h ) );
+
+		// b3IntegrateRotation keeps the half-angle increment at Q30 throughout.
+		// Phase 1 finding 3: at Q12 a body at 1 rad/s advances eight quanta per
+		// sub-step and halving truncates to four, which put a body 35.8 degrees
+		// out after ten seconds.
+		state->deltaRotation = b3IntegrateRotation( state->deltaRotation, w, h );
+	}
+}
+
+// =========================================================================
+// Joints
+// =========================================================================
+//
+// The plumbing landed in 3A and these loops ran over an always-empty array
+// until Phase 6 Stage 1 -- kept, rather than stripped and re-added, because
+// removing them would have churned every call site twice.
+//
+// Upstream reaches the same loops through b3PrepareJoints_Overflow and its two
+// siblings, which exist to distinguish the overflow colour from the 23 solved
+// in parallel. The port has one colour, so those wrappers would each be a loop
+// with nothing to choose between and the bodies live here directly.
+
+static void b3PrepareJointsTask( int startIndex, int endIndex, b3StepContext* context )
+{
+	b3JointSim* joints = context->graph->colors[B3_OVERFLOW_INDEX].jointSims.data;
+	B3_ASSERT( startIndex == endIndex || joints != NULL );
+
+	for ( int i = startIndex; i < endIndex; ++i )
+	{
+		b3PrepareJoint( joints + i, context );
+	}
+}
+
+static void b3WarmStartJointsTask( int startIndex, int endIndex, b3StepContext* context )
+{
+	b3JointSim* joints = context->graph->colors[B3_OVERFLOW_INDEX].jointSims.data;
+	B3_ASSERT( startIndex == endIndex || joints != NULL );
+
+	for ( int i = startIndex; i < endIndex; ++i )
+	{
+		b3WarmStartJoint( joints + i, context );
+	}
+}
+
+static void b3SolveJointsTask( int startIndex, int endIndex, b3StepContext* context, bool useBias )
+{
+	b3JointSim* joints = context->graph->colors[B3_OVERFLOW_INDEX].jointSims.data;
+	B3_ASSERT( startIndex == endIndex || joints != NULL );
+
+	b3World* world = context->world;
+	b3BitSet* jointStateBitSet = &world->jointStateBitSet;
+
+	for ( int i = startIndex; i < endIndex; ++i )
+	{
+		b3JointSim* joint = joints + i;
+		b3SolveJoint( joint, context, useBias );
+
+		// The joint-event threshold test. Only on the biased pass, so a joint is
+		// measured once per sub-step rather than twice, and only while it still
+		// has an unset bit -- the reaction queries are not free and a joint that
+		// has already tripped cannot trip harder.
+		if ( useBias == false )
+		{
+			continue;
+		}
+
+		if ( b3Raw( joint->forceThreshold ) >= b3Raw( B3_NO_BOUND ) &&
+			 b3Raw( joint->torqueThreshold ) >= b3Raw( B3_NO_BOUND ) )
+		{
+			continue;
+		}
+
+		if ( b3GetBit( jointStateBitSet, (uint32_t)joint->jointId ) )
+		{
+			continue;
+		}
+
+		b3f force, torque;
+		b3GetJointReactionScalars( world, joint, &force, &torque );
+
+		// `>=`, so a threshold of zero reports every awake joint rather than
+		// none -- upstream's behaviour, and a useful way to watch everything.
+		if ( b3Raw( force ) >= b3Raw( joint->forceThreshold ) || b3Raw( torque ) >= b3Raw( joint->torqueThreshold ) )
+		{
+			b3SetBit( jointStateBitSet, (uint32_t)joint->jointId );
+			world->hasJointEvents = true;
+		}
+	}
+}
+
+// =========================================================================
+// Finalize
+// =========================================================================
+
+/// Advance every awake body's transform from the deltas the sub-steps
+/// accumulated, then decide what that motion means: is the body sleepy, is it
+/// moving fast enough to need continuous collision, and did any of its shapes
+/// outgrow their fat AABB.
+static void b3FinalizeBodiesTask( int startIndex, int endIndex, b3StepContext* context )
+{
+	b3World* world = context->world;
+	b3Body* bodies = world->bodies.data;
+	b3BodySim* sims = context->sims;
+	b3BodyState* states = context->states;
+
+	bool enableSleep = world->enableSleep;
+	bool enableContinuous = world->enableContinuous;
+	b3t timeStep = context->dt;
+	b3f invTimeStep = context->inv_dt;
+	uint16_t worldId = world->worldId;
+
+	b3BodyMoveEvent* moveEvents = world->bodyMoveEvents.data;
+
+	b3BitSet* enlargedSimBitSet = &world->enlargedSimBitSet;
+	b3BitSet* awakeIslandBitSet = &world->awakeIslandBitSet;
+
+	for ( int simIndex = startIndex; simIndex < endIndex; ++simIndex )
+	{
+		b3BodyState* state = states + simIndex;
+		b3BodySim* sim = sims + simIndex;
+
+		b3Vec3 v = state->linearVelocity;
+		b3Vec3 w = state->angularVelocity;
+		b3Vec3 localOmega = b3InvRotateVector( sim->transform.q, w );
+		b3Vec3 localDeltaRotation = b3InvRotateVector( sim->transform.q, b3FromDir3( state->deltaRotation.v ) );
+
+		B3_ASSERT( b3IsValidVec3( v ) );
+		B3_ASSERT( b3IsValidVec3( w ) );
+
+		// The Q24 accumulator is narrowed to the Q12 position exactly once,
+		// here. Whatever did not fit stays in deltaPosition and is applied by
+		// a later step -- see the field's comment. Zeroing it instead would
+		// discard up to half a quantum per step, always with the same sign for
+		// a body in steady motion, which is 7 mm/s of drift at 60 Hz.
+		b3Vec3 appliedPosition = b3W3ToVec3( state->deltaPosition );
+		b3Vec3W positionRemainder = b3SubW3( state->deltaPosition, b3Vec3ToW3( appliedPosition ) );
+
+		sim->center = b3OffsetPos( sim->center, appliedPosition );
+		sim->transform.q = b3NormalizeQuat( b3MulQuat( state->deltaRotation, sim->transform.q ) );
+
+		// The velocity of the farthest point on the body, so that a body which
+		// is only spinning still counts as moving.
+		b3Vec3 velocityArc = b3ModifiedCrossFF( b3Abs( localOmega ), sim->maxExtent );
+		b3f maxVelocity = b3AddF( b3Length( v ), b3Length( velocityArc ) );
+
+		// Sleep must observe position correction as well as true velocity: a
+		// body being pushed out of penetration is not at rest even if its
+		// velocity says so.
+		//   q = [sin(theta/2) * v, cos(theta/2)], so for small angles
+		//   |theta| ~= 2 * |sin(theta/2) * v|.
+		b3Vec3 rotationArc = b3ModifiedCrossFF( b3Abs( localDeltaRotation ), sim->maxExtent );
+		b3f rotationArcLength = b3Length( rotationArc );
+		b3f maxDeltaPosition = b3AddF( b3Length( appliedPosition ), b3AddF( rotationArcLength, rotationArcLength ) );
+
+		// inv_dt times a length is a velocity, so this is Q12 x Q12 -> Q12 with
+		// inv_dt carried at the length scale (see B3_NEA_INV_DT). Position
+		// correction counts for half, because it matters less than true motion.
+		b3f positionSleepVelocity = b3MulFF( b3MulFF( b3fFromFrac( 1, 2 ), invTimeStep ), maxDeltaPosition );
+		b3f sleepVelocity = b3MaxF( maxVelocity, positionSleepVelocity );
+
+		state->deltaPosition = positionRemainder;
+		state->deltaRotation = b3Quat_identityFn();
+
+		sim->transform.p = b3OffsetPos( sim->center, b3Neg( b3RotateVector( sim->transform.q, sim->localCenter ) ) );
+
+		b3Body* body = bodies + sim->bodyId;
+		body->bodyMoveIndex = simIndex;
+		body->sleepVelocity = sleepVelocity;
+
+		moveEvents[simIndex].userData = body->userData;
+		moveEvents[simIndex].transform = sim->transform;
+		moveEvents[simIndex].bodyId = ( b3BodyId ){ sim->bodyId + 1, worldId, body->generation };
+		moveEvents[simIndex].fellAsleep = false;
+
+		sim->force = b3Vec3_zeroFn();
+		sim->torque = b3Vec3_zeroFn();
+
+		// If this fires the caller deferred mass computation and never called
+		// b3Body_ApplyMassFromShapes or b3Body_SetMassData.
+		B3_ASSERT( ( body->flags & b3_dirtyMass ) == 0 );
+
+		body->flags &= ~b3_bodyTransientFlags;
+		body->flags |= ( sim->flags & ( b3_isSpeedCapped | b3_hadTimeOfImpact ) );
+		body->flags |= ( state->flags & ( b3_isSpeedCapped | b3_hadTimeOfImpact ) );
+		sim->flags &= ~b3_bodyTransientFlags;
+		state->flags &= ~b3_bodyTransientFlags;
+
+		// A body that has left the world is parked where it is.
+		//
+		// Fixed point makes this necessary where float does not. A dynamic body
+		// with nothing under it falls at maxLinearSpeed forever, and in Q19.12
+		// "forever" runs into the format: b3AABB_Center's sum overflows at
+		// 2^18 units and the position wraps at 2^19. Either one puts a proxy
+		// with a nonsense centre into the broad phase, and in a release build
+		// -- where B3_ASSERT is compiled out -- nothing notices until a
+		// traversal reads through a corrupted index. That was the physics
+		// examples' softlock: push a box off the floor, wait about eleven
+		// minutes, watch the ROM freeze.
+		//
+		// Parking rather than destroying, clamping or teleporting: the body
+		// keeps its position, so a game can find it and decide. It is checked
+		// against the *center*, which is what the broad phase actually uses.
+		//
+		// Zero disables the check and restores the old behaviour.
+		if ( body->type == b3_dynamicBody && b3Raw( world->maxWorldExtent ) > 0 )
+		{
+			int32_t extent = b3Raw( world->maxWorldExtent );
+			b3Pos c = sim->center;
+
+			if ( b3Raw( b3AbsF( c.x ) ) > extent || b3Raw( b3AbsF( c.y ) ) > extent ||
+				 b3Raw( b3AbsF( c.z ) ) > extent )
+			{
+				// Stop it dead and mark it sleepy enough that the island check
+				// below parks it this step rather than after B3_TIME_TO_SLEEP
+				// more seconds of falling.
+				state->linearVelocity = b3Vec3_zeroFn();
+				state->angularVelocity = b3Vec3_zeroFn();
+				v = state->linearVelocity;
+				w = state->angularVelocity;
+				sleepVelocity = b3f_zero;
+
+				body->sleepVelocity = sleepVelocity;
+				body->sleepTime = B3_TIME_TO_SLEEP;
+				world->parkedBodyCount += 1;
+			}
+		}
+
+		if ( enableSleep == false || ( body->flags & b3_enableSleep ) == 0 ||
+			 b3Raw( sleepVelocity ) > b3Raw( body->sleepThreshold ) )
+		{
+			body->sleepTime = b3t_zero;
+
+			b3f maxMotion = b3MaxF( maxDeltaPosition, b3MulFT( maxVelocity, timeStep ) );
+			b3f safeMotion = b3Makeb3f( b3Raw( sim->minExtent ) >> 1 );
+
+			if ( body->type == b3_dynamicBody && enableContinuous && b3Raw( maxMotion ) > b3Raw( safeMotion ) )
+			{
+				// Retained for debug draw, and read by the enlarged-AABB pass
+				// below -- so the bookkeeping continuous collision needs is
+				// exercised from this increment onward even though the sweep
+				// itself is not here. b3SolveContinuous is deferred past 3C;
+				// upstream branches on b3_isBullet here and calls it.
+				sim->flags |= b3_isFast;
+			}
+
+			sim->center0 = sim->center;
+			sim->rotation0 = sim->transform.q;
+		}
+		else
+		{
+			// Safe to advance, and falling asleep.
+			sim->center0 = sim->center;
+			sim->rotation0 = sim->transform.q;
+			body->sleepTime = b3AddT( body->sleepTime, timeStep );
+		}
+
+		// Q30 similarity transform, not the Q12 matrix form: b3RotateInertiaW
+		// was built that way in 3A precisely because a Q12 rotation matrix is
+		// not exactly orthonormal and the off-diagonal terms of an isotropic
+		// tensor must cancel to zero.
+		sim->invInertiaWorld = b3RotateInertiaW( sim->transform.q, sim->invInertiaLocal );
+
+		// One awake body keeps its whole island awake.
+		b3Island* island = b3Array_Get( world->islands, body->islandId );
+		if ( b3Raw( body->sleepTime ) < b3Raw( B3_TIME_TO_SLEEP ) )
+		{
+			b3SetBit( awakeIslandBitSet, island->localIndex );
+		}
+		else if ( island->constraintRemoveCount > 0 )
+		{
+			// Wants to sleep, but the island needs splitting first. Ties are
+			// broken by island id so the choice is deterministic.
+			if ( b3Raw( body->sleepTime ) > b3Raw( world->splitSleepTime ) ||
+				 ( b3Raw( body->sleepTime ) == b3Raw( world->splitSleepTime ) && body->islandId > world->splitIslandId ) )
+			{
+				world->splitIslandId = body->islandId;
+				world->splitSleepTime = body->sleepTime;
+			}
+		}
+
+		// Rebuild the shape AABBs.
+		b3WorldTransform transform = sim->transform;
+		bool isFast = ( sim->flags & b3_isFast ) != 0;
+		int shapeId = body->headShapeId;
+		while ( shapeId != B3_NULL_INDEX )
+		{
+			b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+			if ( isFast )
+			{
+				// A fast body's AABB is enlarged by the continuous pass, which
+				// this phase does not have -- so it is marked enlarged
+				// unconditionally and the proxy is refreshed from the tight
+				// AABB below. Through a bit set rather than directly, to keep
+				// the move array in deterministic order.
+				b3SetBit( enlargedSimBitSet, simIndex );
+			}
+
+			b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, B3_SPECULATIVE_DISTANCE );
+			shape->aabb = aabb;
+
+			if ( b3AABB_Contains( shape->fatAABB, aabb ) == false )
+			{
+				b3f margin = shape->aabbMargin;
+				b3Vec3 aabbMargin = b3MakeVec3( margin, margin, margin );
+				shape->fatAABB.lowerBound = b3Sub( aabb.lowerBound, aabbMargin );
+				shape->fatAABB.upperBound = b3Add( aabb.upperBound, aabbMargin );
+				shape->flags |= b3_enlargedAABB;
+
+				b3SetBit( enlargedSimBitSet, simIndex );
+			}
+
+			shapeId = shape->nextShapeId;
+		}
+	}
+}
+
+// =========================================================================
+// b3Solve
+// =========================================================================
+
+int b3SolverStackDemand( int contactCount, int manifoldCount )
+{
+	// Three live entries at the peak, each rounded up to B3_ALIGNMENT by
+	// b3StackAlloc: the contact index list b3World_Step takes before calling in
+	// here, then the two constraint arrays below.
+	int bytes = 0;
+
+	if ( contactCount > 0 )
+	{
+		int indices = contactCount * (int)sizeof( int );
+		bytes += ( ( indices - 1 ) | ( B3_ALIGNMENT - 1 ) ) + 1;
+
+		int contacts = contactCount * (int)sizeof( b3ContactConstraint );
+		bytes += ( ( contacts - 1 ) | ( B3_ALIGNMENT - 1 ) ) + 1;
+	}
+
+	if ( manifoldCount > 0 )
+	{
+		int manifolds = manifoldCount * (int)sizeof( b3ManifoldConstraint );
+		bytes += ( ( manifolds - 1 ) | ( B3_ALIGNMENT - 1 ) ) + 1;
+	}
+
+	return bytes;
+}
+
+/// @note ITCM group B3_ITCM_CORE -- see nea_config.h.
+void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context )
+{
+	// Only steps that advance the simulation are counted.
+	world->stepIndex += 1;
+
+	b3SolverSet* awakeSet = b3Array_Get( world->solverSets, b3_awakeSet );
+	int awakeBodyCount = awakeSet->bodySims.count;
+	if ( awakeBodyCount == 0 )
+	{
+		b3ValidateNoEnlarged( &world->broadPhase );
+		return;
+	}
+
+	context->sims = awakeSet->bodySims.data;
+	context->states = awakeSet->bodyStates.data;
+	context->graph = &world->constraintGraph;
+
+	// One move event per awake body, filled by the finalize pass.
+	b3Array_Resize( world->bodyMoveEvents, awakeBodyCount );
+
+	// Per-step scratch. Upstream sizes these per worker and unions them
+	// afterwards; there is one of each here.
+	b3SetBitCountAndClear( &world->enlargedSimBitSet, (uint32_t)awakeBodyCount );
+	b3SetBitCountAndClear( &world->awakeIslandBitSet, (uint32_t)world->islands.count );
+	world->splitIslandId = B3_NULL_INDEX;
+	world->splitSleepTime = b3t_zero;
+
+	b3GraphColor* color = world->constraintGraph.colors + B3_OVERFLOW_INDEX;
+	int contactCount = color->contacts.count;
+	int jointCount = color->jointSims.count;
+
+	// Upstream computes manifold starts across every active colour here. There
+	// is one colour, so this is the whole of it.
+	int manifoldCount = 0;
+	for ( int i = 0; i < contactCount; ++i )
+	{
+		color->contacts.data[i].manifoldStart = manifoldCount;
+		manifoldCount += color->contacts.data[i].manifoldCount;
+	}
+
+	// The per-step constraint arrays. From the stack allocator rather than the
+	// heap: they live for exactly one step, they are the largest transient
+	// allocation the engine makes, and b3World_Step asserts the stack is empty
+	// again at the end -- so a missed free here is caught immediately rather
+	// than leaking a step at a time.
+	//
+	// b3SolverStackDemand below must account for both, because b3CreateWorld
+	// sizes the stack from it and a shortfall would send b3GrowStack to the
+	// heap mid-step.
+	color->contactConstraintCount = contactCount;
+	color->manifoldConstraintCount = manifoldCount;
+	color->contactConstraints =
+		(b3ContactConstraint*)b3StackAlloc( &world->stack, contactCount * (int)sizeof( b3ContactConstraint ), "contacts" );
+	color->manifoldConstraints = (b3ManifoldConstraint*)b3StackAlloc(
+		&world->stack, manifoldCount * (int)sizeof( b3ManifoldConstraint ), "manifold constraints" );
+
+	context->contactConstraints = color->contactConstraints;
+	context->manifoldConstraints = color->manifoldConstraints;
+
+	// Hit events are collected by b3StoreImpulses into a bit set indexed by
+	// contact id, then turned into events once at the end of the step. One
+	// worker, so upstream's per-worker union is gone.
+	b3SetBitCountAndClear( &world->hitEventBitSet, (uint32_t)world->contacts.count );
+	world->hasHitEvents = false;
+
+	// Same shape for joint events, sized by the joint array rather than the
+	// contact array because the bit index is a joint id.
+	b3SetBitCountAndClear( &world->jointStateBitSet, (uint32_t)world->joints.count );
+	world->hasJointEvents = false;
+
+	// The sub-step loop. Upstream drives this through a stage table so that
+	// workers can synchronise between stages; serially it is just the loop the
+	// stage table describes.
+	// Prepare runs **once**, before the loop -- not per sub-step.
+	//
+	// 3C-i placed b3PrepareJointsTask inside the loop, which was invisible
+	// while the joint stages were stubs. It is not invisible for contacts:
+	// prepare captures `relativeVelocity`, the approach speed restitution is
+	// computed from, and re-running it each sub-step captures the velocity
+	// *after* the normal solve has already stopped the body. A ball dropped
+	// with restitution 0.5 then never bounced at all, because by the last
+	// sub-step it was no longer approaching. Prepare also seeds the impulse
+	// accumulators from the manifold, so re-running it discarded each
+	// sub-step's accumulation.
+	b3PrepareJointsTask( 0, jointCount, context );
+	b3PrepareContacts( 0, contactCount, context );
+
+	for ( int i = 0; i < context->subStepCount; ++i )
+	{
+		b3IntegrateVelocitiesTask( 0, awakeBodyCount, context );
+
+		b3WarmStartJointsTask( 0, jointCount, context );
+
+		b3WarmStartContacts( 0, contactCount, context );
+
+		b3SolveJointsTask( 0, jointCount, context, true );
+
+		b3SolveContacts( 0, contactCount, context, true );
+
+		b3IntegratePositionsTask( 0, awakeBodyCount, context );
+
+		b3SolveJointsTask( 0, jointCount, context, false );
+
+		// The relax pass. Without bias, so it removes the velocity the bias
+		// injected rather than adding more -- and it is where friction is
+		// applied, since a friction impulse computed against a biased normal
+		// impulse would be scaled by the position correction.
+		b3SolveContacts( 0, contactCount, context, false );
+	}
+
+	b3ApplyRestitution( 0, contactCount, context );
+	b3StoreImpulses( 0, contactCount, context );
+
+	// -----------------------------------------------------------------
+	// Hit events
+	// -----------------------------------------------------------------
+	//
+	// The last piece of the event API 3B plumbed and left unfed: the array is
+	// created, cleared each step and published by b3World_GetContactEvents,
+	// and until now nothing ever pushed to it.
+	//
+	// b3StoreImpulses flags a *contact* whose approach speed cleared the
+	// threshold; this turns each flagged contact into one event carrying its
+	// fastest point. Upstream unions a bit set per worker first, which is one
+	// loop here.
+	if ( world->hasHitEvents )
+	{
+		B3_ASSERT( world->contactHitEvents.count == 0 );
+
+		b3f threshold = world->hitEventThreshold;
+		b3Contact* contactArray = world->contacts.data;
+		uint16_t worldIdShort = world->worldId;
+
+		b3BitSet* hitEventBitSet = &world->hitEventBitSet;
+		for ( uint32_t k = 0; k < hitEventBitSet->blockCount; ++k )
+		{
+			uint64_t word = hitEventBitSet->bits[k];
+			while ( word != 0 )
+			{
+				uint32_t ctz = b3CTZ64( word );
+				int contactId = (int)( 64 * k + ctz );
+
+				b3Contact* contact = contactArray + contactId;
+				B3_ASSERT( contact->setIndex == b3_awakeSet && contact->colorIndex != B3_NULL_INDEX );
+
+				b3Shape* shapeA = b3Array_Get( world->shapes, contact->shapeIdA );
+				b3Shape* shapeB = b3Array_Get( world->shapes, contact->shapeIdB );
+				b3Body* bodyA = b3Array_Get( world->bodies, shapeA->bodyId );
+				b3Body* bodyB = b3Array_Get( world->bodies, shapeB->bodyId );
+				b3BodySim* simA = b3GetBodySim( world, bodyA );
+				b3BodySim* simB = b3GetBodySim( world, bodyB );
+				b3Pos midCenter = b3Lerp( simA->center, simB->center, b3cFromFrac( 1, 2 ) );
+
+				b3ContactHitEvent event = { 0 };
+				event.approachSpeed = threshold;
+
+				bool found = false;
+				int triangleIndex = 0;
+				int manifoldCount = contact->manifoldCount;
+				for ( int i = 0; i < manifoldCount; ++i )
+				{
+					b3Manifold* manifold = contact->manifolds + i;
+					int pointCount = manifold->pointCount;
+					for ( int p = 0; p < pointCount; ++p )
+					{
+						b3ManifoldPoint* mp = manifold->points + p;
+						b3f approachSpeed = b3NegF( mp->normalVelocity );
+
+						// The total impulse test is what excludes a speculative
+						// point that was approaching fast but never touched.
+						if ( b3Raw( approachSpeed ) > b3Raw( event.approachSpeed ) &&
+							 b3Raw( mp->totalNormalImpulse ) > 0 )
+						{
+							event.approachSpeed = approachSpeed;
+							event.point =
+								b3OffsetPos( midCenter, b3Lerp( mp->anchorA, mp->anchorB, b3cFromFrac( 1, 2 ) ) );
+							event.normal = manifold->normal;
+							triangleIndex = mp->triangleIndex;
+							found = true;
+						}
+					}
+				}
+
+				if ( found )
+				{
+					event.shapeIdA = ( b3ShapeId ){ shapeA->id + 1, worldIdShort, shapeA->generation };
+					event.shapeIdB = ( b3ShapeId ){ shapeB->id + 1, worldIdShort, shapeB->generation };
+					event.contactId = ( b3ContactId ){
+						.index1 = contact->contactId + 1,
+						.world0 = worldIdShort,
+						.padding = 0,
+						.generation = contact->generation,
+					};
+
+					// shapeB is never a compound (asserted in b3CreateContact),
+					// so its child index is irrelevant; shapeA carries it.
+					event.userMaterialIdA = b3GetShapeUserMaterialId( shapeA, contact->childIndex, triangleIndex );
+					event.userMaterialIdB = b3GetShapeUserMaterialId( shapeB, 0, triangleIndex );
+
+					b3Array_Push( world->contactHitEvents, event );
+				}
+
+				word = word & ( word - 1 );
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------
+	// Joint events
+	// -----------------------------------------------------------------
+	//
+	// The same drain as above, over joint ids rather than contact ids.
+	// b3SolveJointsTask flagged each joint whose reaction crossed a threshold;
+	// this reads the reaction back once per flagged joint and pushes one event.
+	//
+	// Reading it again here rather than stashing it in the solve is deliberate:
+	// the flag can be set on any sub-step, and the number worth reporting is the
+	// one that stands at the end of the step -- which is what
+	// b3Joint_GetConstraintForce would report to a caller looking at the same
+	// joint after b3World_Step returns.
+	if ( world->hasJointEvents )
+	{
+		B3_ASSERT( world->jointEvents.count == 0 );
+
+		b3Joint* jointArray = world->joints.data;
+
+		b3BitSet* jointStateBitSet = &world->jointStateBitSet;
+		for ( uint32_t k = 0; k < jointStateBitSet->blockCount; ++k )
+		{
+			uint64_t word = jointStateBitSet->bits[k];
+			while ( word != 0 )
+			{
+				uint32_t ctz = b3CTZ64( word );
+				int jointId = (int)( 64 * k + ctz );
+
+				b3Joint* joint = jointArray + jointId;
+				b3JointSim* base = b3GetJointSim( world, joint );
+
+				b3f force, torque;
+				b3GetJointReactionScalars( world, base, &force, &torque );
+
+				b3JointEvent event = { 0 };
+				event.jointId = ( b3JointId ){
+					.index1 = jointId + 1,
+					.world0 = world->worldId,
+					.generation = joint->generation,
+				};
+				event.userData = joint->userData;
+				event.force = force;
+				event.torque = torque;
+				event.forceExceeded = b3Raw( force ) >= b3Raw( base->forceThreshold );
+				event.torqueExceeded = b3Raw( torque ) >= b3Raw( base->torqueThreshold );
+
+				b3Array_Push( world->jointEvents, event );
+
+				word = word & ( word - 1 );
+			}
+		}
+	}
+
+	b3FinalizeBodiesTask( 0, awakeBodyCount, context );
+
+	// Reverse order, because the stack allocator is a stack. Done before the
+	// sleeping pass below, which can move body sims between solver sets and
+	// invalidate everything the constraints point at.
+	b3StackFree( &world->stack, color->manifoldConstraints );
+	b3StackFree( &world->stack, color->contactConstraints );
+	color->manifoldConstraints = NULL;
+	color->contactConstraints = NULL;
+	color->manifoldConstraintCount = 0;
+	color->contactConstraintCount = 0;
+	context->manifoldConstraints = NULL;
+	context->contactConstraints = NULL;
+
+	// -----------------------------------------------------------------
+	// Apply the AABB growth to the broad phase
+	// -----------------------------------------------------------------
+	//
+	// Walking a bit set of *bodies* rather than shapes, because a world can
+	// hold far more shapes than bodies and the move array has to come out in
+	// deterministic order.
+	{
+		b3BroadPhase* broadPhase = &world->broadPhase;
+		b3BitSet* bitSet = &world->enlargedSimBitSet;
+		b3BodySim* sims = context->sims;
+		b3Body* bodies = world->bodies.data;
+
+		for ( uint32_t k = 0; k < bitSet->blockCount; ++k )
+		{
+			uint64_t bits = bitSet->bits[k];
+			while ( bits != 0 )
+			{
+				uint32_t ctz = b3CTZ64( bits );
+				int simIndex = (int)( 64 * k + ctz );
+
+				b3BodySim* sim = sims + simIndex;
+				b3Body* body = bodies + sim->bodyId;
+
+				int shapeId = body->headShapeId;
+				while ( shapeId != B3_NULL_INDEX )
+				{
+					b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+					// The body being flagged does not mean every one of its
+					// shapes grew -- a multi-shape body may have enlarged only
+					// one, and a fast body is flagged regardless.
+					if ( shape->flags & b3_enlargedAABB )
+					{
+						b3BroadPhase_EnlargeProxy( broadPhase, shape->proxyKey, shape->fatAABB );
+						shape->flags &= ~b3_enlargedAABB;
+					}
+
+					shapeId = shape->nextShapeId;
+				}
+
+				bits = bits & ( bits - 1 );
+			}
+		}
+
+		b3ValidateBroadPhase( &world->broadPhase );
+	}
+
+	// -----------------------------------------------------------------
+	// Island splitting and sleeping
+	// -----------------------------------------------------------------
+	//
+	// Last, and it has to be: putting an island to sleep moves body sims
+	// between solver sets, which invalidates every index the enlarged bit set
+	// above is expressed in.
+	if ( world->enableSleep )
+	{
+		if ( world->splitIslandId != B3_NULL_INDEX )
+		{
+			b3SplitIsland( world, world->splitIslandId );
+		}
+
+		// Islands whose bit is clear had no awake body this step.
+		b3BitSet* awakeIslandBitSet = &world->awakeIslandBitSet;
+		for ( int islandIndex = 0; islandIndex < world->solverSets.data[b3_awakeSet].islandSims.count; ++islandIndex )
+		{
+			if ( b3GetBit( awakeIslandBitSet, (uint32_t)islandIndex ) == true )
+			{
+				continue;
+			}
+
+			int islandId = world->solverSets.data[b3_awakeSet].islandSims.data[islandIndex].islandId;
+
+			// Only step back when the island actually slept. A sleeping island
+			// is swap-removed, so an unvisited one lands in the slot just
+			// looked at and the index has to be revisited -- but an island
+			// with a pending split *declines*, and stepping back onto one of
+			// those is an infinite loop: same index, awake bit still clear,
+			// same refusal, forever. It hung the ROM in about forty seconds in
+			// any scene that makes and breaks contacts often enough.
+			if ( b3TrySleepIsland( world, islandId ) )
+			{
+				islandIndex -= 1;
+			}
+		}
+	}
+
+	b3ValidateSolverSets( world );
+}

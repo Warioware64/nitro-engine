@@ -1520,6 +1520,7 @@ def parse_md5collimesh(path):
                         'half_height': 0.0,
                         'half_extents': (0.0, 0.0, 0.0),
                         'offset': (0.0, 0.0, 0.0),
+                        'axis': None,
                     }
                     mode = "bone"
 
@@ -1546,21 +1547,30 @@ def parse_md5collimesh(path):
                     current['offset'] = (
                         float(tokens[1]), float(tokens[2]), float(tokens[3]))
 
+                elif cmd == "axis":
+                    # Optional, and new with .b3col. A capsule should lie along
+                    # its bone rather than along Y, and a shape's orientation is
+                    # the one thing .boncol has no room for; this is where it
+                    # comes from. Absent, the shape keeps .boncol's convention
+                    # of being Y-aligned in bone-local space.
+                    current['axis'] = (
+                        float(tokens[1]), float(tokens[2]), float(tokens[3]))
+
     return bones
 
 
-def save_bone_collision(joints, collision_bones, output_path, blender_fix):
-    """Write a .boncol binary file.
+def resolve_collision_bones(joints, collision_bones):
+    """Map bone names to joint indices, dropping any the model does not have.
 
-    Maps bone names from collision_bones to joint indices in the MD5 model.
-    Only bones present in both the collision data and the joint list are written.
+    Shared by the .boncol and .b3col writers so that the two files always
+    describe the same bone set in the same order.
+
+    :return: a list of (joint_index, bone) sorted by joint index.
     """
-    # Build name->index map from joints
     joint_map = {}
     for i, joint in enumerate(joints):
         joint_map[joint.name] = i
 
-    # Resolve collision bones to joint indices
     resolved = []
     for cb in collision_bones:
         name = cb['name']
@@ -1572,6 +1582,16 @@ def save_bone_collision(joints, collision_bones, output_path, blender_fix):
 
     # Sort by joint index for predictable output
     resolved.sort(key=lambda x: x[0])
+    return resolved
+
+
+def save_bone_collision(joints, collision_bones, output_path, blender_fix):
+    """Write a .boncol binary file.
+
+    This is the format the *older* NEABoneCollision module reads. Box3D wants a
+    .b3col instead -- see save_bone_collision_b3.
+    """
+    resolved = resolve_collision_bones(joints, collision_bones)
 
     num_bones = len(resolved)
     if num_bones == 0:
@@ -1631,6 +1651,155 @@ def save_bone_collision(joints, collision_bones, output_path, blender_fix):
             f.write(struct.pack('<I', 0))  # reserved
 
     print(f"  Bone collision: {num_bones} bones -> {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# Box3D bone collision (.b3col) support
+# ---------------------------------------------------------------------------
+
+B3CL_MAGIC = 0x4C433342   # "B3CL" little-endian
+B3CL_VERSION = 1
+
+# Type codes matching NEA_B3COL_TYPE_* in NEAPhysics3D.h.
+B3COL_TYPE_NONE    = 0
+B3COL_TYPE_SPHERE  = 1
+B3COL_TYPE_CAPSULE = 2
+B3COL_TYPE_BOX     = 3
+
+# b3n, the port's scale for unit vectors and quaternions. A quaternion
+# component is in [-1, 1], so storing one as f32 would spend 19 of 32 bits on an
+# integer part that is always 0 and leave 12 fractional bits -- about a third of
+# a degree of resolution on a hitbox. Q30 is what b3Quat holds, so the loader
+# reads these straight in with no conversion and no loss.
+B3_N_SHIFT = 30
+
+
+def float_to_b3n(val):
+    """Convert a quaternion or unit-vector component to b3n (Q30)."""
+    res = int(val * (1 << B3_N_SHIFT))
+    if res < -0x80000000 or res > 0x7FFFFFFF:
+        raise MD5FormatError(
+            f"{val} is out of range for a quaternion component")
+    if res < 0:
+        res = 0x100000000 + res
+    return res
+
+
+def quat_from_y_to_axis(axis):
+    """The shortest-arc rotation taking +Y onto `axis`, as (x, y, z, w).
+
+    A capsule in Box3D runs between two hemisphere centres, and this is what
+    puts those centres along the bone instead of along Y. The degenerate cases
+    matter: an axis already pointing along +Y needs no rotation, and one
+    pointing along -Y has no shortest arc at all -- every half-turn about an
+    axis in the XZ plane works, so one is picked.
+    """
+    length = sqrt(axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2)
+    if length < 1e-9:
+        return (0.0, 0.0, 0.0, 1.0)
+
+    x, y, z = axis[0] / length, axis[1] / length, axis[2] / length
+
+    # dot((0,1,0), axis) is just y.
+    if y > 1.0 - 1e-9:
+        return (0.0, 0.0, 0.0, 1.0)
+
+    if y < -1.0 + 1e-9:
+        # Antiparallel: a half turn about any perpendicular axis. +X will do.
+        return (1.0, 0.0, 0.0, 0.0)
+
+    # cross((0,1,0), axis) = (z, 0, -x), and the half-angle form keeps this to
+    # one square root.
+    cx, cy, cz = z, 0.0, -x
+    w = 1.0 + y
+    norm = sqrt(cx * cx + cy * cy + cz * cz + w * w)
+
+    return (cx / norm, cy / norm, cz / norm, w / norm)
+
+
+def save_bone_collision_b3(joints, collision_bones, output_path, blender_fix):
+    """Write a .b3col binary file: per-bone Box3D shapes.
+
+    The Box3D counterpart of .boncol. Same source data, same bone set, but the
+    shapes are described the way b3Sphere, b3Capsule and b3MakeTransformedBoxHull
+    want them, and each carries an orientation .boncol has no room for.
+
+    The intended use is **one kinematic body per bone**, its transform driven
+    each frame from the animated skeleton -- a single body cannot deform, so a
+    hitbox set is bodies, not shapes on one body. NEA_Phys3DBodyAddBoneShapeI
+    attaches one entry.
+
+    Everything except the quaternion is f32 (Q19.12), which is exactly b3f, so
+    nothing is requantized at load. There is no uint64_t in the layout, so unlike
+    a .b3mesh a .b3col is fine 4-byte aligned and may go through bin2c into a
+    project's data/ directory.
+    """
+    resolved = resolve_collision_bones(joints, collision_bones)
+
+    num_bones = len(resolved)
+    if num_bones == 0:
+        print("  WARNING: No collision bones matched model joints")
+        return
+
+    counts = {'sphere': 0, 'capsule': 0, 'box': 0, 'none': 0}
+
+    with open(output_path, 'wb') as f:
+        # Header: magic, version, num_bones, reserved
+        f.write(struct.pack('<IIII', B3CL_MAGIC, B3CL_VERSION, num_bones, 0))
+
+        for joint_idx, cb in resolved:
+            col_type = cb['type']
+            offset = cb['offset']
+
+            # NOTE: Do NOT apply blender_fix to bone-local offsets. The bone's
+            # quaternion in the DSA file already includes the blender_fix
+            # rotation, and the runtime transforms the offset from bone-local to
+            # model space with it. Applying it here would double-convert. This
+            # is .boncol's rule, restated because it is easy to lose.
+
+            if col_type == 'sphere':
+                type_code = B3COL_TYPE_SPHERE
+                p1, p2, p3 = cb['radius'], 0.0, 0.0
+            elif col_type == 'capsule':
+                type_code = B3COL_TYPE_CAPSULE
+                p1, p2, p3 = cb['radius'], cb['half_height'], 0.0
+            elif col_type == 'aabb':
+                # An 'aabb' in .md5collimesh is a box; Box3D can orient it, so
+                # it stops being axis-aligned the moment `axis` is given.
+                type_code = B3COL_TYPE_BOX
+                p1, p2, p3 = cb['half_extents']
+                if blender_fix:
+                    p1, p2, p3 = p1, p3, p2
+            else:
+                type_code = B3COL_TYPE_NONE
+                p1 = p2 = p3 = 0.0
+
+            counts[{B3COL_TYPE_SPHERE: 'sphere', B3COL_TYPE_CAPSULE: 'capsule',
+                    B3COL_TYPE_BOX: 'box', B3COL_TYPE_NONE: 'none'}[type_code]] += 1
+
+            axis = cb.get('axis')
+            rot = (0.0, 0.0, 0.0, 1.0) if axis is None else quat_from_y_to_axis(axis)
+
+            # Per-bone entry: 48 bytes
+            #   type(u8) + joint(u8) + pad(2)   =  4
+            #   param1/2/3 (f32)                = 12
+            #   offset xyz (f32)                = 12
+            #   rotation xyzw (b3n, Q30)        = 16
+            #   reserved                        =  4
+            f.write(struct.pack('<BBBB', type_code, joint_idx & 0xFF, 0, 0))
+            f.write(struct.pack('<III',
+                float_to_f32(p1), float_to_f32(p2), float_to_f32(p3)))
+            f.write(struct.pack('<III',
+                float_to_f32(offset[0]),
+                float_to_f32(offset[1]),
+                float_to_f32(offset[2])))
+            f.write(struct.pack('<IIII',
+                float_to_b3n(rot[0]), float_to_b3n(rot[1]),
+                float_to_b3n(rot[2]), float_to_b3n(rot[3])))
+            f.write(struct.pack('<I', 0))  # reserved
+
+    summary = ", ".join(f"{n} {kind}" for kind, n in counts.items() if n > 0)
+    print(f"  Box3D bone collision: {num_bones} bones ({summary}) -> {output_path}")
 
 
 def convert_md5anim(name, output_folder, anim_file, skip_frames, extension_anim,
@@ -1706,7 +1875,12 @@ if __name__ == "__main__":
                              "(6 values per joint instead of 9)")
     parser.add_argument("--collision", required=False, type=str, default=None,
                         help="path to .md5collimesh file for per-bone collision "
-                             "data (generates .boncol binary)")
+                             "data (generates .boncol binary, for the "
+                             "NEABoneCollision module)")
+    parser.add_argument("--collision-b3", required=False,
+                        action='store_true',
+                        help="also write a .b3col of per-bone Box3D shapes, for "
+                             "NEA_Phys3DBodyAddBoneShape(). Needs --collision")
     parser.add_argument("--format", required=False, choices=["dsma", "nsmw"],
                         default="dsma",
                         help="skinning format: 'dsma' (1 weight, rigid) or "
@@ -1739,6 +1913,11 @@ if __name__ == "__main__":
             if not is_valid_texture_size(args.texture[1]):
                 print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
                 sys.exit(1)
+
+    if args.collision_b3 and args.collision is None:
+        print("--collision-b3 needs --collision <file.md5collimesh>, which is "
+              "where the shapes come from")
+        sys.exit(1)
 
     # Create output directory if it doesn't exist
     os.makedirs(args.output, exist_ok=True)
@@ -1786,6 +1965,16 @@ if __name__ == "__main__":
                                        f"{args.name}{extension_boncol}")
             save_bone_collision(joints, collision_bones, boncol_path,
                                 args.blender_fix)
+
+            # The Box3D shapes are an addition, not a replacement: .boncol
+            # feeds the older NEABoneCollision module and a project can want
+            # either or both.
+            if args.collision_b3:
+                extension_b3col = "_b3col.bin" if args.bin else ".b3col"
+                b3col_path = os.path.join(args.output,
+                                          f"{args.name}{extension_b3col}")
+                save_bone_collision_b3(joints, collision_bones, b3col_path,
+                                       args.blender_fix)
 
     except BaseException as e:
         print("ERROR: " + str(e))
