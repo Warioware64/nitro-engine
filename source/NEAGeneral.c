@@ -1718,10 +1718,44 @@ static int ne_cpucount;
 static int ne_noise_value = 0xF;
 static int ne_sine_mult = 10, ne_sine_shift = 9;
 
+// -------------------------------------------------------------------------
+// Frame rate
+// -------------------------------------------------------------------------
+//
+// Two counters and a publish. NEA_WaitForVBL is called once per frame the game
+// completes, and NEA_VBLFunc runs on the vertical blank interrupt -- 59.8261 Hz
+// whatever the game is doing. So the first counts frames, the second counts
+// time, and every 60 vblanks the ratio is published.
+//
+// Why this is not derivable from NEA_GetCPUPercent(). That is a scanline count
+// over one frame: it says how much of a frame's budget was spent, and it
+// saturates. A game at 200% and a game at 400% both report "over budget", and
+// the frame rates they actually achieve -- 30 and 15 -- are the number a player
+// sees. The two answer different questions and are worth reading together.
+//
+// The window is 60 vblanks rather than a second, which is 1.0029 s. Using
+// vblanks means a game holding full speed reads exactly 60 rather than
+// oscillating between 59 and 60 as a real-time window drifts against the
+// refresh.
+static int ne_fps_frames;
+static int ne_fps_vbls;
+static int NEA_FPS;
+
 void NEA_VBLFunc(void)
 {
     if (ne_execution_mode == NEA_ModeUninitialized)
         return;
+
+    // The frame-rate time base. This handler is the only thing in the engine
+    // that runs at a fixed rate no matter how long a frame takes, which is what
+    // makes it the clock rather than the thing being clocked.
+    ne_fps_vbls++;
+    if (ne_fps_vbls >= 60)
+    {
+        NEA_FPS = ne_fps_frames;
+        ne_fps_frames = 0;
+        ne_fps_vbls = 0;
+    }
 
     if (ne_dma_enabled)
     {
@@ -1923,6 +1957,16 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
                    | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_RIGIDBODY
                    | NEA_UPDATE_PARTICLES | NEA_UPDATE_PHYS3D);
 
+    // One completed frame, counted here rather than at the end of the function
+    // because the NEA_CAN_SKIP_VBL path below returns early -- and a frame that
+    // ran over budget is exactly the frame a rate counter must not miss.
+    //
+    // Two-pass mode calls this once per half, so only the left pass counts. The
+    // reported rate is then displayed frames, which tops out at 30 in that mode
+    // and is what a player sees.
+    if (!ne_two_pass_enabled || ne_two_pass_frame == 0)
+        ne_fps_frames++;
+
     if (flags & NEA_UPDATE_GUI)
     {
         NEA_GUIUpdate();
@@ -1999,6 +2043,11 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
 int NEA_GetCPUPercent(void)
 {
     return NEA_CPUPercent;
+}
+
+int NEA_GetFPS(void)
+{
+    return NEA_FPS;
 }
 
 bool NEA_GPUIsRendering(void)

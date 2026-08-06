@@ -498,6 +498,30 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags);
 /// @return CPU usage (0 - 100).
 int NEA_GetCPUPercent(void);
 
+/// Returns the frame rate measured over the last 60 vertical blanks.
+///
+/// Frames are counted by NEA_WaitForVBL() and the window is timed by
+/// NEA_VBLFunc(), so NEA_VBLFunc() must be installed as the VBL interrupt
+/// handler for this to work. No HBL handler is needed -- unlike the CPU meter.
+///
+/// The window is 60 vblanks (1.0029 s) rather than one second, so a game
+/// holding full speed reads exactly 60 instead of drifting between 59 and 60.
+/// In two-pass mode only complete displayed frames count, so the ceiling is 30.
+///
+/// @section vs Reading this next to NEA_GetCPUPercent()
+///
+/// They answer different questions and disagree usefully. The CPU meter is a
+/// scanline count over a single frame -- how much of the budget was spent --
+/// and it stops being informative once a frame overruns, because a game at 200%
+/// and one at 400% both simply read "over". This says what actually came out:
+/// 30 and 15. Use the CPU meter to see how close to the edge a frame is, and
+/// this to see what the player gets once it goes over.
+///
+/// Zero until the first 60 vblanks have elapsed.
+///
+/// @return Frames completed in the last 60 vertical blanks.
+int NEA_GetFPS(void);
+
 /// Returns true if the GPU is in a rendering period.
 ///
 /// The period when the GPU isn't drawing is when VCOUNT is between 192 and 213.
