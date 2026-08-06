@@ -75,12 +75,17 @@
 ///     against spheres, capsules and hulls, and castable against as of Phase 7
 ///     (`b3RayCastMesh`, `b3ShapeCastMesh`, `b3OverlapMesh` in `collision.h`).
 ///     There is no run-time mesh builder: blobs are baked offline.
-///   - **Names, profiles and counters** -- see `B3_NEA_NO_NAMES` and the
-///     "What is not in b3World" note in `source/box3d/physics_world.h`.
+///   - **Names** -- see `B3_NEA_NO_NAMES`.
+///
+/// Upstream's millisecond `b3Profile` is gone too, but it was replaced rather
+/// than dropped: `b3profile.h` measures the same phases in timer ticks, which
+/// is the unit a 16.6 ms frame can actually be divided by. It is compiled out
+/// unless `B3_NEA_PROFILE` is set.
 ///
 /// The shape-level collision functions (`b3CollideSpheres`, `b3ShapeDistance`,
 /// `b3MakeBoxHull`, ...) are in `collision.h`, which this header includes.
 
+#include "box3d/b3profile.h"
 #include "box3d/base.h"
 #include "box3d/collision.h"
 #include "box3d/constants.h"

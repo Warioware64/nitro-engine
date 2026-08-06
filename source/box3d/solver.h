@@ -36,6 +36,7 @@
 #include "container.h"
 #include "core.h"
 
+#include "box3d/b3profile.h"
 #include "box3d/math_fixed.h"
 
 #include <stdint.h>
@@ -169,6 +170,10 @@ typedef struct b3StepContext
 /// Integrate velocities, solve the constraints, integrate positions, then
 /// finalize the bodies -- update transforms and world inertia, emit move
 /// events, enlarge broad-phase proxies, and sleep whatever islands settled.
+///
+/// Marks its own eight sub-phases against b3World::profileTimer rather than
+/// being bracketed from outside: it is where most of the step goes, and one
+/// number for the whole of it would answer nothing.
 void b3Solve( b3World* world, b3StepContext* context );
 
 /// Bytes of b3Stack the solve stage holds live at its peak.

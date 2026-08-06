@@ -418,7 +418,7 @@ static b3Vec3 b3DistanceJointSeparation( const b3DistanceJoint* joint, const b3B
 }
 
 /// @note ITCM group B3_ITCM_DISTANCE -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_DISTANCE, b3WarmStartDistanceJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_DISTANCE_WARM, b3WarmStartDistanceJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_distanceJoint );
 
@@ -455,7 +455,7 @@ void B3_ITCM_IF( B3_ITCM_DISTANCE, b3WarmStartDistanceJoint )( b3JointSim* base,
 }
 
 /// @note ITCM group B3_ITCM_DISTANCE -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_DISTANCE, b3SolveDistanceJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_DISTANCE_SOLVE, b3SolveDistanceJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_distanceJoint );
 

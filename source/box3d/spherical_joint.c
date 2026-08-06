@@ -524,7 +524,7 @@ void b3PrepareSphericalJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_SPHERICAL -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_SPHERICAL, b3WarmStartSphericalJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_SPHERICAL_WARM, b3WarmStartSphericalJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_sphericalJoint );
 
@@ -573,7 +573,7 @@ void B3_ITCM_IF( B3_ITCM_SPHERICAL, b3WarmStartSphericalJoint )( b3JointSim* bas
 }
 
 /// @note ITCM group B3_ITCM_SPHERICAL -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_SPHERICAL, b3SolveSphericalJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_SPHERICAL_SOLVE, b3SolveSphericalJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_sphericalJoint );
 

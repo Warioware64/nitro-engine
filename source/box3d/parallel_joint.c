@@ -253,7 +253,7 @@ void b3PrepareParallelJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_PARALLEL -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_PARALLEL, b3WarmStartParallelJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_PARALLEL_WARM, b3WarmStartParallelJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_parallelJoint );
 
@@ -286,7 +286,7 @@ void B3_ITCM_IF( B3_ITCM_PARALLEL, b3WarmStartParallelJoint )( b3JointSim* base,
 }
 
 /// @note ITCM group B3_ITCM_PARALLEL -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_PARALLEL, b3SolveParallelJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_PARALLEL_SOLVE, b3SolveParallelJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_parallelJoint );
 

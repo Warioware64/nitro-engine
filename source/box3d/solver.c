@@ -1016,9 +1016,16 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 
 	b3SolverSet* awakeSet = b3Array_Get( world->solverSets, b3_awakeSet );
 	int awakeBodyCount = awakeSet->bodySims.count;
+	world->profile.awakeBodyCount = awakeBodyCount;
 	if ( awakeBodyCount == 0 )
 	{
 		b3ValidateNoEnlarged( &world->broadPhase );
+
+		// Marked even though it is nothing, so the phases still tile the step.
+		// Without this the whole of a fully-asleep step lands on sensorTicks,
+		// which is the one reading that would make sleeping look expensive at
+		// exactly the moment it is doing its job.
+		B3_PROFILE_MARK( &world->profileTimer, &world->profile.solveTicks );
 		return;
 	}
 
@@ -1095,32 +1102,64 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 	// sub-step's accumulation.
 	b3PrepareJointsTask( 0, jointCount, context );
 	b3PrepareContacts( 0, contactCount, context );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.prepareTicks );
+
+	// The stage counts the solver actually worked on, for the profile. Free --
+	// all three are already in hand.
+	world->profile.contactCount = contactCount;
+	world->profile.manifoldCount = manifoldCount;
+	world->profile.jointCount = jointCount;
 
 	for ( int i = 0; i < context->subStepCount; ++i )
 	{
+		// The eight B3_PROFILE_SUBSTEP marks below accumulate rather than
+		// assign, so each field ends the step holding that stage's total over
+		// every sub-step. They are gated on B3_NEA_PROFILE_SUBSTEP separately
+		// from level 1 because they grow this loop -- see the switch's comment
+		// in nea_config.h for why that makes their absolute values suspect and
+		// their ratios still useful.
 		b3IntegrateVelocitiesTask( 0, awakeBodyCount, context );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.integrateVelocitiesTicks );
 
 		b3WarmStartJointsTask( 0, jointCount, context );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.warmStartJointsTicks );
 
 		b3WarmStartContacts( 0, contactCount, context );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.warmStartContactsTicks );
 
 		b3SolveJointsTask( 0, jointCount, context, true );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.solveJointsTicks );
 
 		b3SolveContacts( 0, contactCount, context, true );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.solveContactsTicks );
 
 		b3IntegratePositionsTask( 0, awakeBodyCount, context );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.integratePositionsTicks );
 
 		b3SolveJointsTask( 0, jointCount, context, false );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.relaxJointsTicks );
 
 		// The relax pass. Without bias, so it removes the velocity the bias
 		// injected rather than adding more -- and it is where friction is
 		// applied, since a friction impulse computed against a biased normal
 		// impulse would be scaled by the position correction.
 		b3SolveContacts( 0, contactCount, context, false );
+		B3_PROFILE_SUBSTEP( &world->profileTimer, &world->profile.relaxContactsTicks );
 	}
+
+	// Level 1's view of the same loop, and the one to trust. With level 2 off
+	// this is a single mark across the whole loop and the only probe inside
+	// b3Solve's hot region, so it does not disturb what it measures.
+	//
+	// With level 2 *on* the eight marks above have already advanced the
+	// timer's reference point to here, so this charges zero rather than
+	// double-counting -- which is why it is a mark and not an elapsed-since.
+	// Sum the eight instead in that build.
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.subStepTicks );
 
 	b3ApplyRestitution( 0, contactCount, context );
 	b3StoreImpulses( 0, contactCount, context );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.restitutionTicks );
 
 	// -----------------------------------------------------------------
 	// Hit events
@@ -1269,7 +1308,14 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 		}
 	}
 
+	// Both event drains above are conditional on hasHitEvents/hasJointEvents,
+	// so this reads zero in the common step where nothing crossed a threshold.
+	// That is the useful answer, not a missing one: it says the drains are not
+	// what the step is spending.
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.eventTicks );
+
 	b3FinalizeBodiesTask( 0, awakeBodyCount, context );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.finalizeTicks );
 
 	// Reverse order, because the stack allocator is a stack. Done before the
 	// sleeping pass below, which can move body sims between solver sets and
@@ -1311,6 +1357,12 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 				b3SolveContinuous( world, simIndex, context );
 			}
 		}
+
+		// Pairs with toiEventCount and the three TOI iteration counters. A
+		// large reading here beside a zero event count means the sweeps are
+		// running and finding nothing, which is a different problem from the
+		// sweeps being expensive when they hit.
+		B3_PROFILE_MARK( &world->profileTimer, &world->profile.continuousTicks );
 	}
 
 	// -----------------------------------------------------------------
@@ -1359,6 +1411,8 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 		}
 
 		b3ValidateBroadPhase( &world->broadPhase );
+
+		B3_PROFILE_MARK( &world->profileTimer, &world->profile.enlargeTicks );
 	}
 
 	// -----------------------------------------------------------------
@@ -1401,4 +1455,20 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 	}
 
 	b3ValidateSolverSets( world );
+
+	// Outside the enableSleep guard, so the field is written on every step
+	// rather than keeping a stale value from the last step that had sleeping
+	// on. A world with sleeping disabled reads zero here, which is the truth.
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.sleepTicks );
+
+	// The eight sub-phases summed. Done here rather than by b3World_Step
+	// because this is the only scope that knows the sub-phases exist -- and
+	// summing them rather than bracketing b3Solve from outside means a phase
+	// added later without a probe shows up as a gap against totalTicks instead
+	// of silently inflating the solve.
+	{
+		const b3Profile* p = &world->profile;
+		world->profile.solveTicks = p->prepareTicks + p->subStepTicks + p->restitutionTicks + p->eventTicks +
+									p->finalizeTicks + p->continuousTicks + p->enlargeTicks + p->sleepTicks;
+	}
 }

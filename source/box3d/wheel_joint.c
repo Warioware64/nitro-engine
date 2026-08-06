@@ -973,7 +973,7 @@ void b3PrepareWheelJoint( b3JointSim* base, b3StepContext* context )
 /// instruction fetch. It fits the instruction cache on its own, so it is the
 /// cheaper half of the pair; it is here because it is called from the same
 /// loop and would otherwise be what evicts its sibling.
-void B3_ITCM_IF( B3_ITCM_WHEEL, b3WarmStartWheelJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_WHEEL_WARM, b3WarmStartWheelJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_wheelJoint );
 
@@ -1092,7 +1092,7 @@ void B3_ITCM_IF( B3_ITCM_WHEEL, b3WarmStartWheelJoint )( b3JointSim* base, b3Ste
 ///
 /// This costs 11 KB of a 32 KB budget shared with the whole ROM, which is why
 /// it is not unconditional -- see NEA_BOX3D_NO_ITCM in Makefile.blocksds.
-void B3_ITCM_IF( B3_ITCM_WHEEL, b3SolveWheelJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_WHEEL_SOLVE, b3SolveWheelJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_wheelJoint );
 

@@ -235,7 +235,7 @@ void b3PrepareWeldJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_WELD -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_WELD, b3WarmStartWeldJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_WELD_WARM, b3WarmStartWeldJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_weldJoint );
 
@@ -276,7 +276,7 @@ void B3_ITCM_IF( B3_ITCM_WELD, b3WarmStartWeldJoint )( b3JointSim* base, b3StepC
 }
 
 /// @note ITCM group B3_ITCM_WELD -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_WELD, b3SolveWeldJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_WELD_SOLVE, b3SolveWeldJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_weldJoint );
 

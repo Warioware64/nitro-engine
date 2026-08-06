@@ -188,12 +188,44 @@ arm7:
 # The group table is expanded by make into "NAME:sym+sym:sel" words before the
 # shell runs -- B3_ITCM_SYMS_* and NEA_BOX3D_ITCM_* are make variables, so a
 # shell-side $$NAME lookup would find nothing.
+#
+# The selection logic below has to mirror nea_config.h's alias block exactly,
+# because a report that disagrees with the linker is worse than no report at
+# all -- `NEA_BOX3D_ITCM_WHEEL=1` really does place both halves, and a table
+# that renders them "no" would have a game hunting for 14 KB that is already
+# spent. The rules, in the order the header applies them:
+#
+#   1. A joint alias only forces **on**: `WHEEL=1` sets both halves, `WHEEL=0`
+#      is ignored and the halves keep their own values. That mirrors
+#      `#if defined(B3_ITCM_WHEEL) && B3_ITCM_WHEEL`.
+#   2. The CONTACTS alias forces **either way**, because both its halves
+#      default on and turning them off is how a scene affords a joint group.
+#      That mirrors the bare `#if defined(B3_ITCM_CONTACTS)`.
+#   3. Otherwise the half's own variable wins, then B3_ITCM_DEFAULT_ON.
 b3_empty	:=
 b3_space	:= $(b3_empty) $(b3_empty)
+
+# Which alias governs a half: its name with the _SOLVE / _WARM suffix removed.
+#
+# Derived rather than tabulated, and deliberately so -- this block is read
+# before B3_ITCM_JOINTS is defined further down, so any table built here with
+# $(eval) would be built from an empty list and every alias would silently
+# resolve to nothing. A `=` variable expanded at use time has no such ordering
+# hazard. CORE and MESH have no suffix and so are their own alias, which lands
+# on the same answer their own variable would give.
+b3_alias_of	= $(patsubst %_SOLVE,%,$(patsubst %_WARM,%,$(1)))
+
+# The `!` suffix marks a value the caller chose rather than inherited; the shell
+# below strips it and renders "(explicit)".
+b3_sel_default	= $(if $(filter $(1),$(B3_ITCM_DEFAULT_ON)),1,0)
+b3_sel_own	= $(if $(NEA_BOX3D_ITCM_$(1)),$(NEA_BOX3D_ITCM_$(1))!,$(call b3_sel_default,$(1)))
+b3_sel		= $(strip \
+		    $(if $(filter CONTACTS,$(call b3_alias_of,$(1))),\
+		      $(if $(NEA_BOX3D_ITCM_CONTACTS),$(NEA_BOX3D_ITCM_CONTACTS)!,$(call b3_sel_own,$(1))),\
+		      $(if $(filter 1,$(NEA_BOX3D_ITCM_$(call b3_alias_of,$(1)))),1!,$(call b3_sel_own,$(1)))))
+
 b3_report_rows	= $(foreach g,$(B3_ITCM_GROUPS),\
-		    $(g):$(subst $(b3_space),+,$(B3_ITCM_SYMS_$(g))):$(strip \
-		      $(if $(NEA_BOX3D_ITCM_$(g)),$(NEA_BOX3D_ITCM_$(g))!,\
-		        $(if $(filter $(g),$(B3_ITCM_DEFAULT_ON)),1,0))))
+		    $(g):$(subst $(b3_space),+,$(B3_ITCM_SYMS_$(g))):$(call b3_sel,$(g)))
 
 itcm-report: $(ARCHIVE_BOX3D)
 	@$(PREFIX)nm -S --size-sort -t d $(ARCHIVE_BOX3D) 2>/dev/null \
@@ -320,6 +352,26 @@ ifeq ($(NEA_BOX3D_NO_ITCM),1)
 $(OBJS_BOX3D): CFLAGS += -DB3_NO_ITCM
 endif
 
+# Per-step cost attribution. Three levels, passed through the same way the ITCM
+# switches are, with the defaults and the caveats in include/box3d/nea_config.h.
+#
+#   make -f Makefile.blocksds install NEA_BOX3D_PROFILE=1
+#   make -f Makefile.blocksds install NEA_BOX3D_PROFILE=1 NEA_BOX3D_PROFILE_SUBSTEP=1
+#
+# SUBSTEP and NARROW are meaningless without PROFILE, since they ride on the
+# same probe -- so asking for either turns PROFILE on rather than silently
+# producing a profile of nothing.
+B3_PROFILE_LEVELS := PROFILE PROFILE_SUBSTEP PROFILE_NARROW
+
+ifneq ($(NEA_BOX3D_PROFILE_SUBSTEP)$(NEA_BOX3D_PROFILE_NARROW),)
+NEA_BOX3D_PROFILE := 1
+endif
+
+B3_PROFILE_DEFINES := $(foreach l,$(B3_PROFILE_LEVELS),\
+		        $(if $(NEA_BOX3D_$(l)),-DB3_NEA_$(l)=$(NEA_BOX3D_$(l))))
+
+$(OBJS_BOX3D): CFLAGS += $(B3_PROFILE_DEFINES)
+
 # Per-group ITCM selection for the solver itself, which is far too large to
 # place unconditionally. Each group is a slice of per-sub-step code with a
 # published byte cost; the defaults and the reasoning live in
@@ -332,21 +384,77 @@ endif
 # directions work: turning a default-off group on, and turning the default-on
 # CONTACTS group off to afford a large joint group. A group the caller does not
 # mention gets no -D at all and keeps nea_config.h's default.
-B3_ITCM_GROUPS	:= WHEEL PRISMATIC REVOLUTE SPHERICAL DISTANCE MOTOR WELD \
-		   PARALLEL CONTACTS CORE MESH
+# Solve and warm start are separate groups per joint type, because their fetch
+# volumes differ by roughly 8x and the solve halves are what does not fit. See
+# the "Why solve and warm start are separate groups" comment in nea_config.h for
+# the arithmetic that forced the split.
+#
+# The whole-group names are still accepted and set both halves -- nea_config.h
+# has the aliases -- so an existing NEA_BOX3D_ITCM_WHEEL=1 build line is
+# unchanged in meaning. They are listed after the halves so that the report
+# renders the halves and the aliases stay purely a compatibility path.
+B3_ITCM_JOINTS	:= WHEEL PRISMATIC REVOLUTE SPHERICAL DISTANCE MOTOR WELD PARALLEL
 
-B3_ITCM_DEFINES	:= $(foreach g,$(B3_ITCM_GROUPS),\
+B3_ITCM_GROUPS	:= $(foreach j,$(B3_ITCM_JOINTS),$(j)_SOLVE $(j)_WARM) \
+		   CONTACTS_SOLVE CONTACTS_WARM CORE MESH
+
+B3_ITCM_ALIASES	:= $(B3_ITCM_JOINTS) CONTACTS
+
+B3_ITCM_DEFINES	:= $(foreach g,$(B3_ITCM_GROUPS) $(B3_ITCM_ALIASES),\
 		     $(if $(NEA_BOX3D_ITCM_$(g)),-DB3_ITCM_$(g)=$(NEA_BOX3D_ITCM_$(g))))
 
 $(OBJS_BOX3D): CFLAGS += $(B3_ITCM_DEFINES)
 
+# -------------------------------------------------------------------------
+# Rebuild when the configuration changes, not only when the sources do
+# -------------------------------------------------------------------------
+#
+# Make compares timestamps of files. None of the switches above is a file, so
+# changing one and rebuilding without `clean` leaves every object exactly as it
+# was -- the .c is older than the .o, so nothing recompiles, and the archive
+# keeps whatever placement the *previous* flags asked for.
+#
+# That is not a cosmetic problem. Going from NEA_BOX3D_ITCM_WHEEL=1 to
+# NEA_BOX3D_ITCM_WHEEL_SOLVE=1 without a clean leaves b3WarmStartWheelJoint in
+# .itcm from the earlier build, and the link fails with "section .itcm will not
+# fit" against a configuration whose own report says it has 1,104 bytes spare.
+# The failure at least announces itself; the reverse case does not. Turning a
+# group *off* and rebuilding leaves it on, so an A/B of two ITCM configurations
+# silently measures the same ROM twice -- and the whole reason these switches
+# exist is to be measured against each other.
+#
+# So the configuration is written to a file and the objects depend on it. The
+# stamp is rewritten only when the signature actually changes, so an unchanged
+# configuration still does nothing.
+B3_CONFIG_SIG	:= $(strip $(B3_ITCM_DEFINES) $(B3_PROFILE_DEFINES) NO_ITCM=$(NEA_BOX3D_NO_ITCM))
+B3_CONFIG_STAMP	:= $(BUILDDIR)/.box3d-config
+
+$(shell mkdir -p $(BUILDDIR); \
+	[ "$$(cat $(B3_CONFIG_STAMP) 2>/dev/null)" = "$(B3_CONFIG_SIG)" ] \
+	  || printf '%s' "$(B3_CONFIG_SIG)" > $(B3_CONFIG_STAMP))
+
+$(OBJS_BOX3D): $(B3_CONFIG_STAMP)
+
 # What each group contains, for `make itcm-report`. Kept next to the group list
 # so that adding a group means editing one place.
-B3_ITCM_SYMS_WHEEL	:= b3SolveWheelJoint b3WarmStartWheelJoint
-B3_ITCM_SYMS_PRISMATIC	:= b3SolvePrismaticJoint b3WarmStartPrismaticJoint
-B3_ITCM_SYMS_REVOLUTE	:= b3SolveRevoluteJoint b3WarmStartRevoluteJoint
-B3_ITCM_SYMS_SPHERICAL	:= b3SolveSphericalJoint b3WarmStartSphericalJoint
-B3_ITCM_SYMS_DISTANCE	:= b3SolveDistanceJoint b3WarmStartDistanceJoint
+B3_ITCM_SYMS_WHEEL_SOLVE	:= b3SolveWheelJoint
+B3_ITCM_SYMS_WHEEL_WARM		:= b3WarmStartWheelJoint
+B3_ITCM_SYMS_PRISMATIC_SOLVE	:= b3SolvePrismaticJoint
+B3_ITCM_SYMS_PRISMATIC_WARM	:= b3WarmStartPrismaticJoint
+B3_ITCM_SYMS_REVOLUTE_SOLVE	:= b3SolveRevoluteJoint
+B3_ITCM_SYMS_REVOLUTE_WARM	:= b3WarmStartRevoluteJoint
+B3_ITCM_SYMS_SPHERICAL_SOLVE	:= b3SolveSphericalJoint
+B3_ITCM_SYMS_SPHERICAL_WARM	:= b3WarmStartSphericalJoint
+B3_ITCM_SYMS_DISTANCE_SOLVE	:= b3SolveDistanceJoint
+B3_ITCM_SYMS_DISTANCE_WARM	:= b3WarmStartDistanceJoint
+B3_ITCM_SYMS_MOTOR_SOLVE	:= b3SolveMotorJoint
+B3_ITCM_SYMS_MOTOR_WARM		:= b3WarmStartMotorJoint
+B3_ITCM_SYMS_WELD_SOLVE		:= b3SolveWeldJoint
+B3_ITCM_SYMS_WELD_WARM		:= b3WarmStartWeldJoint
+B3_ITCM_SYMS_PARALLEL_SOLVE	:= b3SolveParallelJoint
+B3_ITCM_SYMS_PARALLEL_WARM	:= b3WarmStartParallelJoint
+B3_ITCM_SYMS_CONTACTS_SOLVE	:= b3SolveContacts
+B3_ITCM_SYMS_CONTACTS_WARM	:= b3WarmStartContacts
 B3_ITCM_SYMS_MOTOR	:= b3SolveMotorJoint b3WarmStartMotorJoint
 B3_ITCM_SYMS_WELD	:= b3SolveWeldJoint b3WarmStartWeldJoint
 B3_ITCM_SYMS_PARALLEL	:= b3SolveParallelJoint b3WarmStartParallelJoint
@@ -356,7 +464,7 @@ B3_ITCM_SYMS_MESH	:= b3ComputeMeshManifolds
 
 # Groups on by default, mirroring the #ifndef defaults in nea_config.h. Only
 # used to render the report; the compiler still takes its truth from the header.
-B3_ITCM_DEFAULT_ON	:= CONTACTS
+B3_ITCM_DEFAULT_ON	:= CONTACTS_SOLVE CONTACTS_WARM
 
 $(BUILDDIR)/%.arm.c.o : %.arm.c
 	@echo "  CC      $<"

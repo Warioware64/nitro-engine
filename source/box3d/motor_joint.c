@@ -338,7 +338,7 @@ void b3PrepareMotorJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_MOTOR -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_MOTOR, b3WarmStartMotorJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_MOTOR_WARM, b3WarmStartMotorJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_motorJoint );
 
@@ -387,7 +387,7 @@ void B3_ITCM_IF( B3_ITCM_MOTOR, b3WarmStartMotorJoint )( b3JointSim* base, b3Ste
 }
 
 /// @note ITCM group B3_ITCM_MOTOR -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_MOTOR, b3SolveMotorJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_MOTOR_SOLVE, b3SolveMotorJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_motorJoint );
 

@@ -785,12 +785,19 @@ bool b3UpdateContact( b3World* world, b3Contact* contact, b3Shape* shapeA, b3Vec
 
 	bool touching;
 
+	// Level 3 opens here rather than at the top of the function: what it is
+	// separating is the two branches below, and the dozen lines above them are
+	// shared by both. Charging those to whichever branch happened to run would
+	// blur exactly the line being drawn.
+	B3_PROFILE_NARROW( &world->profileTimer, &world->profile.narrowPhaseOtherTicks );
+
 	if ( shapeA->type == b3_meshShape )
 	{
 		// The registers put the mesh first, so there is no flipped mesh pair to
 		// handle and `materialMap` -- upstream's compound-child remapping --
 		// is not a parameter at all.
 		touching = b3ComputeMeshManifolds( world, contact, shapeA, xfA, shapeB, xfB, isFast, arena );
+		B3_PROFILE_NARROW( &world->profileTimer, &world->profile.meshManifoldTicks );
 
 		// Unlike the convex path, which sets this once after the manifold is
 		// built, the mesh path owns its own hit-event flag. Transliterated.
@@ -809,8 +816,13 @@ bool b3UpdateContact( b3World* world, b3Contact* contact, b3Shape* shapeA, b3Vec
 	{
 		bool flip = false;
 		touching = b3UpdateConvexContact( world, contact, shapeA, xfA, shapeB, xfB, flip, arena );
+		B3_PROFILE_NARROW( &world->profileTimer, &world->profile.narrowPhaseOtherTicks );
 	}
 
+	// The re-anchoring below runs for both branches and is charged to the
+	// convex field, which is a small deliberate inaccuracy: splitting it would
+	// need a third field for work that is a handful of subtractions per
+	// manifold point and belongs to neither branch.
 	if ( touching )
 	{
 		b3Vec3 centerA = b3RotateVector( xfA.q, localCenterA );
