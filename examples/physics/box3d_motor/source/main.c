@@ -626,7 +626,8 @@ int main(int argc, char *argv[])
         printf("\x1b[15;0Hlate   %5d allocs, %ld ovf  ",
                NEA_Phys3DWorldGetLateAllocCount(),
                (long)NEA_Phys3DWorldGetOverflowBytes());
-        printf("\x1b[16;0Hcpu    %3d %%                ", NEA_GetCPUPercent());
+        printf("\x1b[16;0Hcpu %3d %%  fps %2d             ",
+               NEA_GetCPUPercent(), NEA_GetFPS());
         printf("\x1b[17;0Hmissing %d bd %d jt %d shp   ",
                bodiesMissing, jointsMissing, shapesMissing);
         printf("\x1b[18;0Hrespawn %3d  frame %8lu    ", respawns,

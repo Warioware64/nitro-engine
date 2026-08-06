@@ -559,7 +559,8 @@ int main(int argc, char *argv[])
         printf("\x1b[14;0Hlate   %5d allocs, %ld ovf   ",
                NEA_Phys3DWorldGetLateAllocCount(),
                (long)NEA_Phys3DWorldGetOverflowBytes());
-        printf("\x1b[15;0Hcpu    %3d %%                 ", NEA_GetCPUPercent());
+        printf("\x1b[15;0Hcpu %3d %%  fps %2d             ",
+               NEA_GetCPUPercent(), NEA_GetFPS());
         printf("\x1b[16;0Hframes %5d                  ", frames);
 
         NEA_WaitForVBL(NEA_CAN_SKIP_VBL);

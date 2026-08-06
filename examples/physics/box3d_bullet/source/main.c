@@ -370,7 +370,8 @@ int main(int argc, char *argv[])
         printf("\x1b[16;0Hlate   %5d allocs, %ld ovf   ",
                NEA_Phys3DWorldGetLateAllocCount(),
                (long)NEA_Phys3DWorldGetOverflowBytes());
-        printf("\x1b[17;0Hcpu    %3d %%                 ", NEA_GetCPUPercent());
+        printf("\x1b[17;0Hcpu %3d %%  fps %2d             ",
+               NEA_GetCPUPercent(), NEA_GetFPS());
 
         // The comparison, in three lines: the same shot, the same speed, the
         // same floor, and one of them goes through.
