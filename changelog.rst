@@ -1,6 +1,64 @@
 Changelog
 =========
 
+Version 3.0.0 (2026-08-06)
+---------------------------
+
+The headline is a complete 3D rigid body physics engine. Everything else in
+this release is engine plumbing that landed alongside it.
+
+**3D rigid body physics (Box3D)** — a fixed-point port of Erin Catto's
+`Box3D <https://github.com/erincatto/box3d>`_, with no floating point anywhere
+in the simulation. It ships as its own archive, ``libNEA_box3d.a``, so a
+project that does not want physics pays nothing for it; ``libNEA.a`` is Nitro
+Engine Advanced without it.
+
+- **Shapes**: spheres, capsules, convex hulls and baked triangle meshes, in any
+  combination. Hulls and meshes are baked offline by ``obj2dl --collision-b3``
+  and ``md5_to_dsma --collision-b3``; there is no run-time builder, because
+  running quickhull or building a BVH on a 67 MHz ARM9 is work for the asset
+  pipeline.
+- **Contacts** that persist across steps with warm starting, gathered into
+  islands that fall asleep when they settle.
+- **Nine joint types**: distance, revolute, spherical, weld, motor, prismatic,
+  parallel and wheel, plus a filter joint that solves nothing and only stops
+  two bodies colliding. Each with the springs, motors and limits its type
+  allows.
+- **Continuous collision**, so a fast body does not tunnel through a wall.
+- **Sensors**: shapes that report what overlaps them and resolve nothing,
+  including bodies that cross one entirely within a single step.
+- **World queries**: ray casts, shape casts and overlap queries against every
+  shape type, meshes included.
+- **A character mover** (``NEA_Phys3DMover``): a kinematic capsule that is not
+  a rigid body, so a player stops fighting the solver for every step, slope and
+  ledge. Friction, acceleration, jumping, a ground probe that climbs stairs
+  without a step-up hack, and dynamic bodies it can shove.
+- **A pool allocator that makes sizing visible**: the world reserves every pool
+  up front and seals itself on the first step, so any allocation after that is
+  counted and, in the debug build, asserts.
+- **Selectable ITCM residency**: the ARM9's 8 KB instruction cache does not hold
+  the solver, so the hot routines can be moved into ITCM per group. Print the
+  live budget with ``make -f Makefile.blocksds itcm-report``.
+- Twelve examples under ``examples/physics/box3d_*``, one per feature, each
+  printing its own cost on the bottom screen.
+
+**NSMW (NitroSkin MultiWeight) skinning**: an animated mesh format supporting
+two bone weights per vertex, against DSMA's rigid single-weight skinning. The
+DS GPU has no hardware skinning, so NSMW uses the same matrix-palette scheme
+the retail NSBMD format does.
+
+**Display list improvements**: display lists can now be edited at runtime, and
+on a DSi they can be sent with NDMA in GFX FIFO mode — an engine independent of
+the legacy DS DMA, so it is safe alongside dual 3D and two-pass rendering. It
+is opt-in via ``NEA_DisplayListEnableNDMA()`` and never selected automatically.
+
+**Dirty texture system**: materials can keep their texture in a RAM buffer,
+be modified in place, marked with ``NEA_MaterialTexSetDirty()`` and pushed to
+VRAM with ``NEA_MaterialTexVramUpdate()``. Palettes gained the same treatment.
+
+**Hardware 2D (NEAHw2D)**: substantial rework, plus corrected text rendering on
+bitmap backgrounds and a fix for a 2D OBJ initialization issue.
+
 Version 2.0.0 (2026-03-06)
 ---------------------------
 
