@@ -445,6 +445,100 @@ void NEA_Phys3DSetSubStepCount(int subStepCount)
 }
 
 // =========================================================================
+// Queries
+// =========================================================================
+
+bool NEA_Phys3DRayCastI(int32_t ox, int32_t oy, int32_t oz,
+                        int32_t dx, int32_t dy, int32_t dz,
+                        NEA_Phys3DRayHit *out)
+{
+    if (out == NULL)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    out->triangleIndex = -1;
+
+    if (nea_worldExists == false)
+        return false;
+
+    b3Vec3 origin = b3MakeVec3(b3Makeb3f(ox), b3Makeb3f(oy), b3Makeb3f(oz));
+    b3Vec3 translation = b3MakeVec3(b3Makeb3f(dx), b3Makeb3f(dy), b3Makeb3f(dz));
+
+    b3RayResult result = b3World_CastRayClosest(nea_worldId, origin, translation,
+                                                b3DefaultQueryFilter());
+
+    // Reported whether or not anything was hit: a ray that finds nothing still
+    // cost a traversal, and that is exactly the case worth being able to see.
+    out->nodeVisits = result.nodeVisits;
+    out->leafVisits = result.leafVisits;
+
+    if (result.hit == false)
+        return false;
+
+    out->hit = true;
+    out->x = b3Raw(result.point.x);
+    out->y = b3Raw(result.point.y);
+    out->z = b3Raw(result.point.z);
+    out->nx = b3Raw(result.normal.x);
+    out->ny = b3Raw(result.normal.y);
+    out->nz = b3Raw(result.normal.z);
+
+    // b3c is Q30 and this module speaks f32 (Q12), so the fraction narrows
+    // here rather than being handed out at a scale nothing else in the header
+    // uses. A fraction is in [0, 1], so the 18 bits dropped are below the
+    // precision anything f32 could act on anyway.
+    out->fraction = b3Raw(b3CToF(result.fraction));
+
+    out->userMaterialId = result.userMaterialId;
+    out->triangleIndex = result.triangleIndex;
+
+    return true;
+}
+
+typedef struct {
+    NEA_Phys3DOverlapFn fn;
+    void *context;
+    int count;
+} nea_phys3d_overlap_ctx;
+
+static bool nea_phys3d_overlap_cb(b3ShapeId shapeId, void *context)
+{
+    nea_phys3d_overlap_ctx *ctx = context;
+
+    // Every body this module creates installs its NEA_Phys3DBody as the Box3D
+    // body's user data, which is the same hop NEA_Phys3DSyncModels makes from a
+    // move event. A body created through the raw b3 API has none, and is
+    // skipped rather than reported as NULL.
+    NEA_Phys3DBody *body = b3Body_GetUserData(b3Shape_GetBody(shapeId));
+    if (body == NULL)
+        return true;
+
+    ctx->count++;
+    return ctx->fn(body, ctx->context);
+}
+
+int NEA_Phys3DOverlapBoxI(int32_t lx, int32_t ly, int32_t lz,
+                          int32_t ux, int32_t uy, int32_t uz,
+                          NEA_Phys3DOverlapFn fn, void *context)
+{
+    if (nea_worldExists == false || fn == NULL)
+        return 0;
+
+    // A caller who passes the corners the other way round gets an empty box
+    // from b3MakeAABB and no hits, which reads as "nothing there" rather than
+    // as a bug. Normalize instead -- it costs six compares once per query.
+    b3Vec3 a = b3MakeVec3(b3Makeb3f(lx), b3Makeb3f(ly), b3Makeb3f(lz));
+    b3Vec3 b = b3MakeVec3(b3Makeb3f(ux), b3Makeb3f(uy), b3Makeb3f(uz));
+    b3AABB aabb = b3MakeAABB(b3Min(a, b), b3Max(a, b));
+
+    nea_phys3d_overlap_ctx ctx = { fn, context, 0 };
+    b3World_OverlapAABB(nea_worldId, aabb, b3DefaultQueryFilter(),
+                        nea_phys3d_overlap_cb, &ctx);
+
+    return ctx.count;
+}
+
+// =========================================================================
 // Memory reporting
 // =========================================================================
 
@@ -1006,4 +1100,574 @@ void NEA_Phys3DBodySetAwake(NEA_Phys3DBody *body, bool awake)
         return;
 
     b3Body_SetAwake(body->id, awake);
+}
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// Upstream's samples/mover.cpp, in this module's conventions. Seven steps per
+// frame, and the order is the whole design:
+//
+//   1. friction, applied to the horizontal velocity only;
+//   2. accelerate toward what the throttles ask for, clamped to maxSpeed;
+//   3. gravity;
+//   4. the ground probe, which is a ray and a soft spring;
+//   5. the slide loop -- collect planes, solve, sweep, advance, up to five
+//      times;
+//   6. push the dynamic bodies the planes named;
+//   7. fix up the velocity, either by clipping it against the planes or by
+//      deriving it from the distance actually covered.
+//
+// @section fixed What Q12 changed
+//
+// Three things, each commented at its site: the ground spring's coefficients
+// fold to two compile-time constants because the timestep is fixed, the
+// slide-loop's break test has to be taken wide because its threshold squared
+// rounds to zero in Q12, and the friction ratio goes through b3DivFFToC
+// because it is a genuine ratio and Q30 keeps eighteen more bits of it.
+//
+// @section absent What is not here
+//
+// Upstream's per-shape MoverShapeUserData -- a maxPush and a clipVelocity read
+// back from each shape's user data, so a game can make particular surfaces
+// soft. Every plane here is rigid (pushLimit B3_F_MAX) and clipVelocity comes
+// from the def. Adding it needs a place to put per-shape user data that
+// NEA_Phys3DBodyAdd*I does not currently offer, which is a shape-API question
+// rather than a mover one.
+
+/// The mover's slide loop iteration cap. Upstream's number.
+#define NEA_PHYS3D_MOVER_SLIDE_ITERATIONS 5
+
+/// Squared distance below which the slide loop stops, in raw Q12 units.
+///
+/// Upstream tests `b3LengthSquared(delta) < 0.01f * 0.01f`. Transliterating
+/// that is a silent bug: 0.0001 in Q12 rounds to **zero**, the test becomes
+/// `x < 0`, and the loop runs all five iterations forever. Taken wide instead,
+/// where 0.01 units is 41 raw and the comparison happens at Q24.
+#define NEA_PHYS3D_MOVER_TOLERANCE_SQ ( (int64_t)41 * 41 )
+
+// The ground spring, folded to two constants because the timestep is fixed at
+// compile time -- which is the reason the port fixed it at all. Upstream
+// recomputes omega, omegaH and the denominator every frame from `h`:
+//
+//   omega  = 2*pi*hertz,  omegaH = omega*h
+//   denom  = 1 + 2*zeta*omegaH + omegaH^2
+//   v      = (v - omega*omegaH*(length - rest)) / denom
+//
+// With zeta 0.7, hertz 4 and h = 1/60 that is v*massCoef - biasCoef*(length -
+// rest), and there is no per-frame divide at all.
+//
+//   omega*omegaH / denom = 10.527578 / 1.76189026 = 5.975270  [1/s]
+//   1 / denom            =                          0.5675727 [-]
+//
+// biasCoef is a b3f and not a b3c because it is 5.975 -- outside Q30's [-1, 1]
+// range, and dimensionally a rate rather than a coefficient. massCoef is a b3c
+// and not a b3f because it is a true dimensionless ratio, and Q30 keeps
+// eighteen more bits of it than Q12 would.
+//
+// Resolution: one raw unit of length error produces 24475 >> 12 = 5 raw of
+// velocity, so the spring resolves length at the Q12 quantum with 5x headroom.
+// The equilibrium compression against gravity is gravity*h/biasCoef = 0.042
+// units, or 171 raw.
+_Static_assert(B3_NEA_STEP_HZ == 60,
+               "the pogo constants below are precomputed for a 1/60 timestep");
+
+#define NEA_PHYS3D_POGO_BIAS b3Makeb3f(24475)       // 5.975270 * 4096
+#define NEA_PHYS3D_POGO_MASS b3Makeb3c(609426868)   // 0.5675727 * 2^30
+
+/// Rest length of the ground spring, as a multiple of the capsule radius.
+#define NEA_PHYS3D_POGO_REST 3
+
+/// Probe length, as a multiple of the capsule radius. One radius further than
+/// the rest length, which is the slack that lets the mover find ground it has
+/// stepped off.
+#define NEA_PHYS3D_POGO_REACH 4
+
+NEA_Phys3DMoverDef NEA_Phys3DDefaultMoverDef(void)
+{
+    NEA_Phys3DMoverDef def;
+    memset(&def, 0, sizeof(def));
+
+    def.radius = floattof32(0.3f);
+    def.halfHeight = floattof32(0.5f);
+    def.maxSpeed = floattof32(6.0f);
+    def.minSpeed = floattof32(0.01f);
+    def.stopSpeed = floattof32(1.0f);
+    def.accelerate = floattof32(30.0f);
+    def.friction = floattof32(4.0f);
+    def.gravity = floattof32(15.0f);
+    def.jumpSpeed = floattof32(5.0f);
+    def.pogo = true;
+    def.clipVelocity = true;
+
+    b3QueryFilter filter = b3DefaultQueryFilter();
+    def.categoryBits = filter.categoryBits;
+    def.maskBits = filter.maskBits;
+
+    def.modelOffsetY = -(def.halfHeight + def.radius);
+
+    return def;
+}
+
+void NEA_Phys3DMoverInitI(NEA_Phys3DMover *mover, const NEA_Phys3DMoverDef *def,
+                          int32_t x, int32_t y, int32_t z)
+{
+    NEA_AssertPointer(mover, "NULL mover");
+
+    memset(mover, 0, sizeof(*mover));
+
+    mover->def = (def != NULL) ? *def : NEA_Phys3DDefaultMoverDef();
+    mover->x = x;
+    mover->y = y;
+    mover->z = z;
+}
+
+void NEA_Phys3DMoverSetPositionI(NEA_Phys3DMover *mover, int32_t x, int32_t y, int32_t z)
+{
+    if (mover == NULL)
+        return;
+
+    mover->x = x;
+    mover->y = y;
+    mover->z = z;
+
+    // The old ground contact says nothing about the new position, and a spring
+    // velocity carried across a teleport launches the mover on the next step.
+    mover->onGround = false;
+    mover->pogoVelocity = 0;
+}
+
+void NEA_Phys3DMoverSetVelocityI(NEA_Phys3DMover *mover, int32_t x, int32_t y, int32_t z)
+{
+    if (mover == NULL)
+        return;
+
+    mover->vx = x;
+    mover->vy = y;
+    mover->vz = z;
+}
+
+void NEA_Phys3DMoverSetModel(NEA_Phys3DMover *mover, NEA_Model *model)
+{
+    NEA_AssertPointer(mover, "NULL mover");
+
+    mover->model = model;
+}
+
+void NEA_Phys3DMoverIgnoreShape(NEA_Phys3DMover *mover, b3ShapeId shapeId)
+{
+    if (mover == NULL || mover->ignoreCount >= NEA_PHYS3D_MOVER_MAX_IGNORE)
+        return;
+
+    mover->ignore[mover->ignoreCount++] = shapeId;
+}
+
+void NEA_Phys3DMoverClearIgnored(NEA_Phys3DMover *mover)
+{
+    if (mover == NULL)
+        return;
+
+    mover->ignoreCount = 0;
+}
+
+bool NEA_Phys3DMoverJump(NEA_Phys3DMover *mover)
+{
+    if (mover == NULL || mover->onGround == false)
+        return false;
+
+    mover->vy = mover->def.jumpSpeed;
+    mover->onGround = false;
+
+    // Zeroed so the spring does not spend the first frames of the jump pulling
+    // the mover back down toward the ground it just left.
+    mover->pogoVelocity = 0;
+    return true;
+}
+
+/// Is this shape on the mover's ignore list?
+static bool nea_phys3d_mover_ignores(const NEA_Phys3DMover *mover, b3ShapeId shapeId)
+{
+    for (int i = 0; i < mover->ignoreCount; i++)
+    {
+        if (mover->ignore[i].index1 == shapeId.index1 &&
+            mover->ignore[i].world0 == shapeId.world0 &&
+            mover->ignore[i].generation == shapeId.generation)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/// Implements b3PlaneResultFcn.
+static bool nea_phys3d_mover_planes(b3ShapeId shapeId, const b3PlaneResult *planes,
+                                    int planeCount, void *context)
+{
+    NEA_Phys3DMover *mover = context;
+
+    if (nea_phys3d_mover_ignores(mover, shapeId))
+        return true;
+
+    for (int i = 0; i < planeCount; i++)
+    {
+        if (mover->planeCount >= B3_NEA_MAX_MOVER_PLANES)
+            return false;
+
+        // A zero normal would be accepted by b3SolvePlanes and then push
+        // nothing forever, so it is worth an assert rather than a silent slot.
+        // Every backend either produces a unit normal or produces no plane.
+        B3_ASSERT(b3IsNormalized(planes[i].plane.normal));
+
+        b3CollisionPlane *plane = &mover->planes[mover->planeCount];
+        plane->plane = planes[i].plane;
+        plane->pushLimit = B3_F_MAX;
+        plane->push = b3f_zero;
+        plane->clipVelocity = mover->def.clipVelocity;
+
+        mover->planeShapes[mover->planeCount] = shapeId;
+        mover->planePoints[mover->planeCount] = planes[i].point;
+        mover->planeCount += 1;
+    }
+
+    return true;
+}
+
+/// Implements b3MoverFilterFcn.
+static bool nea_phys3d_mover_cast_filter(b3ShapeId shapeId, void *context)
+{
+    return nea_phys3d_mover_ignores((const NEA_Phys3DMover *)context, shapeId) == false;
+}
+
+/// The mover's capsule at its current position, in world space.
+static b3Capsule nea_phys3d_mover_capsule(const NEA_Phys3DMover *mover)
+{
+    b3f half = b3Makeb3f(mover->def.halfHeight);
+    b3Vec3 centre = b3MakeVec3(b3Makeb3f(mover->x), b3Makeb3f(mover->y), b3Makeb3f(mover->z));
+
+    b3Capsule capsule;
+    capsule.center1 = b3MakeVec3(centre.x, b3SubF(centre.y, half), centre.z);
+    capsule.center2 = b3MakeVec3(centre.x, b3AddF(centre.y, half), centre.z);
+    capsule.radius = b3Makeb3f(mover->def.radius);
+    return capsule;
+}
+
+static b3QueryFilter nea_phys3d_mover_filter(const NEA_Phys3DMover *mover)
+{
+    b3QueryFilter filter = b3DefaultQueryFilter();
+    filter.categoryBits = mover->def.categoryBits;
+    filter.maskBits = mover->def.maskBits;
+    return filter;
+}
+
+/// Push the mover's model matrix, which nothing else will.
+///
+/// NEA_Phys3DSyncModels walks the step's move events; a mover has no body and
+/// produces none, so it drives its own model. A yaw rotation about Y plus a
+/// translation, through the same NEA_ModelSetMatrix path bodies use.
+static void nea_phys3d_mover_sync_model(NEA_Phys3DMover *mover)
+{
+    NEA_Model *m = mover->model;
+    if (m == NULL)
+        return;
+
+    int32_t s = sinLerp(mover->yaw);
+    int32_t c = cosLerp(mover->yaw);
+
+    int32_t px = mover->x;
+    int32_t py = mover->y + mover->def.modelOffsetY;
+    int32_t pz = mover->z;
+
+    m->x = px;
+    m->y = py;
+    m->z = pz;
+
+    // The model's own scale folded into the rotation columns, exactly as
+    // nea_phys3d_apply_transform does and for the same reason.
+    m4x3 mat;
+    mat.m[0]  = mulf32(c, m->sx);
+    mat.m[1]  = 0;
+    mat.m[2]  = mulf32(-s, m->sx);
+    mat.m[3]  = 0;
+    mat.m[4]  = m->sy;
+    mat.m[5]  = 0;
+    mat.m[6]  = mulf32(s, m->sz);
+    mat.m[7]  = 0;
+    mat.m[8]  = mulf32(c, m->sz);
+    mat.m[9]  = px;
+    mat.m[10] = py;
+    mat.m[11] = pz;
+
+    NEA_ModelSetMatrix(m, &mat);
+}
+
+void NEA_Phys3DMoverStepI(NEA_Phys3DMover *mover,
+                          int32_t fx, int32_t fy, int32_t fz,
+                          int32_t rx, int32_t ry, int32_t rz,
+                          int32_t forwardThrottle, int32_t strafeThrottle)
+{
+    NEA_AssertPointer(mover, "NULL mover");
+
+    if (!nea_worldExists)
+        return;
+
+    // dt as a b3f. The timestep is fixed, so this is a constant.
+    const b3f dt = b3fFromFrac(1, B3_NEA_STEP_HZ);
+
+    b3Vec3 velocity = b3MakeVec3(b3Makeb3f(mover->vx), b3Makeb3f(mover->vy), b3Makeb3f(mover->vz));
+    b3Vec3 position = b3MakeVec3(b3Makeb3f(mover->x), b3Makeb3f(mover->y), b3Makeb3f(mover->z));
+    b3Vec3 startPosition = position;
+
+    b3f radius = b3Makeb3f(mover->def.radius);
+    b3QueryFilter filter = nea_phys3d_mover_filter(mover);
+
+    // ---- 1. Friction, horizontal only ----
+    {
+        b3Vec3 flat = b3MakeVec3(velocity.x, b3f_zero, velocity.z);
+        b3f speed = b3Length(flat);
+
+        if (b3Raw(speed) < b3Raw(b3Makeb3f(mover->def.minSpeed)))
+        {
+            velocity.x = b3f_zero;
+            velocity.z = b3f_zero;
+        }
+        else
+        {
+            b3f control = b3MaxFloat(speed, b3Makeb3f(mover->def.stopSpeed));
+            b3f drop = b3MulFF(b3MulFF(control, b3Makeb3f(mover->def.friction)), dt);
+            b3f newSpeed = b3MaxFloat(b3f_zero, b3SubF(speed, drop));
+
+            // A genuine dimensionless ratio in [0, 1], so b3DivFFToC and not
+            // b3DivFF: the quotient is usually 0.98, and Q30 keeps eighteen
+            // more bits of it than Q12 would.
+            b3c ratio = b3DivFFToC(newSpeed, speed);
+            velocity.x = b3MulFC(velocity.x, ratio);
+            velocity.z = b3MulFC(velocity.z, ratio);
+        }
+    }
+
+    // ---- 2. Accelerate ----
+    {
+        // Only the horizontal part of the basis steers, and neither vector has
+        // to arrive unit length.
+        b3Vec3 forward = b3MakeVec3(b3Makeb3f(fx), b3f_zero, b3Makeb3f(fz));
+        b3Vec3 right = b3MakeVec3(b3Makeb3f(rx), b3f_zero, b3Makeb3f(rz));
+        B3_UNUSED(fy, ry);
+
+        forward = b3Normalize(forward);
+        right = b3Normalize(right);
+
+        b3Vec3 wish = b3Add(b3MulSV(b3Makeb3f(forwardThrottle), forward),
+                            b3MulSV(b3Makeb3f(strafeThrottle), right));
+
+        b3f wishSpeed;
+        b3Vec3 wishDir = b3GetLengthAndNormalize(&wishSpeed, wish);
+
+        b3f maxSpeed = b3Makeb3f(mover->def.maxSpeed);
+        wishSpeed = b3MulFF(b3MinFloat(wishSpeed, b3f_one), maxSpeed);
+
+        if (b3Raw(wishSpeed) > 0)
+        {
+            // How much of the wanted speed is missing along the wanted
+            // direction. Quake's formulation, and the reason a mover cannot
+            // accelerate past maxSpeed by holding two directions at once.
+            b3f current = b3Dot(velocity, wishDir);
+            b3f add = b3SubF(wishSpeed, current);
+
+            if (b3Raw(add) > 0)
+            {
+                b3f accel = b3MulFF(b3MulFF(b3Makeb3f(mover->def.accelerate), maxSpeed), dt);
+                velocity = b3MulAdd(velocity, b3MinFloat(accel, add), wishDir);
+            }
+        }
+    }
+
+    // ---- 3. Gravity ----
+    velocity.y = b3SubF(velocity.y, b3MulFF(b3Makeb3f(mover->def.gravity), dt));
+
+    // ---- 4. The ground probe ----
+    //
+    // A ray straight down from the lower cap centre, driving a soft spring
+    // toward a rest length of three radii. This is what rides stairs and slopes
+    // without a step-up hack: a 0.2-unit step is a 0.2-unit compression.
+    //
+    // It also keeps the capsule off the floor entirely, which matters more here
+    // than upstream. Resting *on* the floor means a floor plane every frame and
+    // a solver push of B3_LINEAR_SLOP -- a real 0.0049 units in Q12, 0.29
+    // units per second at 60 Hz, injected into the velocity forever.
+    if (mover->def.pogo)
+    {
+        b3Capsule probeCapsule = nea_phys3d_mover_capsule(mover);
+        b3f reach = b3MulFF(radius, b3fFromInt(NEA_PHYS3D_POGO_REACH));
+        b3f rest = b3MulFF(radius, b3fFromInt(NEA_PHYS3D_POGO_REST));
+
+        b3RayResult ground = b3World_CastRayClosest(nea_worldId, probeCapsule.center1,
+                                                    b3MakeVec3(b3f_zero, b3NegF(reach), b3f_zero),
+                                                    filter);
+
+        // Rising, or nothing under us: no ground, and the spring is released
+        // rather than left holding a stale compression.
+        if (ground.hit == false || b3Raw(velocity.y) > 0)
+        {
+            mover->onGround = false;
+            mover->pogoVelocity = 0;
+        }
+        else
+        {
+            // b3RayResult::fraction is b3c, so this is Q12 x Q30 -> Q12 with
+            // no conversion on either side.
+            b3f length = b3MulFC(reach, ground.fraction);
+
+            b3f pogo = b3Makeb3f(mover->pogoVelocity);
+            pogo = b3SubF(b3MulFC(pogo, NEA_PHYS3D_POGO_MASS),
+                          b3MulFF(NEA_PHYS3D_POGO_BIAS, b3SubF(length, rest)));
+
+            mover->pogoVelocity = b3Raw(pogo);
+            mover->onGround = true;
+
+            // The spring drives the mover, not the velocity: writing it into
+            // velocity.y would have it fight gravity and friction both.
+            position.y = b3AddF(position.y, b3MulFF(pogo, dt));
+            velocity.y = b3f_zero;
+        }
+    }
+    else
+    {
+        mover->onGround = false;
+    }
+
+    // ---- 5. The slide loop ----
+    mover->solverIterations = 0;
+    mover->castIterations = 0;
+
+    b3Vec3 target = b3MulAdd(position, dt, velocity);
+
+    for (int iteration = 0; iteration < NEA_PHYS3D_MOVER_SLIDE_ITERATIONS; iteration++)
+    {
+        mover->castIterations = iteration + 1;
+
+        // Collect the planes where the mover is *now*. Their offsets are
+        // depths relative to this position, which is why this has to be redone
+        // every iteration rather than hoisted.
+        mover->x = b3Raw(position.x);
+        mover->y = b3Raw(position.y);
+        mover->z = b3Raw(position.z);
+
+        b3Capsule capsule = nea_phys3d_mover_capsule(mover);
+
+        mover->planeCount = 0;
+        b3World_CollideMover(nea_worldId, &capsule, filter, nea_phys3d_mover_planes, mover);
+
+        b3PlaneSolverResult solved = b3SolvePlanes(b3Sub(target, position), mover->planes,
+                                                   mover->planeCount);
+        mover->solverIterations += solved.iterationCount;
+
+        b3c fraction = b3World_CastMover(nea_worldId, &capsule, solved.delta, filter,
+                                         nea_phys3d_mover_cast_filter, mover);
+
+        b3Vec3 delta = b3MulCV(fraction, solved.delta);
+        position = b3Add(position, delta);
+
+        // Wide, and that is not a style choice: 0.01 squared is 1e-4, which in
+        // Q12 rounds to zero, so the narrow spelling never terminates and the
+        // loop always runs its full five.
+        if (b3LengthSquaredWide(delta) < NEA_PHYS3D_MOVER_TOLERANCE_SQ)
+            break;
+    }
+
+    mover->x = b3Raw(position.x);
+    mover->y = b3Raw(position.y);
+    mover->z = b3Raw(position.z);
+
+    // ---- 6. Push the dynamic bodies we leaned on ----
+    for (int i = 0; i < mover->planeCount; i++)
+    {
+        b3BodyId bodyId = b3Shape_GetBody(mover->planeShapes[i]);
+        if (b3Body_GetType(bodyId) != b3_dynamicBody)
+            continue;
+
+        // Only planes the solver actually pushed against: a plane it never
+        // used describes a surface the mover is not leaning on.
+        if (b3Raw(mover->planes[i].push) == 0)
+            continue;
+
+        b3Vec3 normal = mover->planes[i].plane.normal;
+        b3f approach = b3Dot(velocity, normal);
+        if (b3Raw(approach) >= 0)
+            continue;
+
+        // A crude but stable exchange: shove the body along the plane normal
+        // in proportion to how hard the mover is moving into it. Upstream
+        // computes a proper normal mass from the body's inverse mass and world
+        // inverse inertia; that needs b3Body_GetWorldInverseRotationalInertia,
+        // which the port does not expose, and the visible difference on a crate
+        // is not worth the surface.
+        b3f mass = b3f_one;
+        b3f inverseMass = b3Body_GetMass(bodyId);
+        if (b3Raw(inverseMass) > 0)
+            mass = inverseMass;
+
+        b3Vec3 impulse = b3MulSV(b3MulFF(b3NegF(approach), mass), normal);
+        b3Body_ApplyLinearImpulse(bodyId, impulse, mover->planePoints[i], true);
+
+        // And take it out of the mover, so pushing a heavy crate slows it.
+        velocity = b3MulSub(velocity, b3NegF(approach), normal);
+    }
+
+    // ---- 7. Velocity fix-up ----
+    if (mover->def.clipVelocity)
+    {
+        // Clip rather than derive, so the mover does not inherit the
+        // depenetration push as speed and launch off what it was resting on.
+        velocity = b3ClipVector(velocity, mover->planes, mover->planeCount);
+    }
+    else
+    {
+        // The honest alternative: whatever distance was actually covered, over
+        // the step. Costs a divide, and it does pick up depenetration.
+        b3Vec3 moved = b3Sub(position, startPosition);
+        velocity = b3MakeVec3(b3DivFF(moved.x, dt), b3DivFF(moved.y, dt), b3DivFF(moved.z, dt));
+    }
+
+    mover->vx = b3Raw(velocity.x);
+    mover->vy = b3Raw(velocity.y);
+    mover->vz = b3Raw(velocity.z);
+
+    nea_phys3d_mover_sync_model(mover);
+}
+
+void NEA_Phys3DMoverStepYawI(NEA_Phys3DMover *mover, int yaw,
+                             int32_t forwardThrottle, int32_t strafeThrottle)
+{
+    NEA_AssertPointer(mover, "NULL mover");
+
+    mover->yaw = (int16_t)yaw;
+
+    // Two table lookups, exactly unit length by construction, no normalize and
+    // no divide -- which is why this and not the explicit-basis form is what a
+    // DS character should steer by. right = forward rotated -90 degrees about
+    // Y, so that positive strafe is to the player's right.
+    int32_t s = sinLerp((int16_t)yaw);
+    int32_t c = cosLerp((int16_t)yaw);
+
+    NEA_Phys3DMoverStepI(mover, s, 0, c, c, 0, -s, forwardThrottle, strafeThrottle);
+}
+
+int NEA_Phys3DWorldGetMoverPlaneDropCount(void)
+{
+    if (!nea_worldExists)
+        return 0;
+
+    b3World *world = b3GetWorldFromId(nea_worldId);
+    return world->moverPlaneDropCount;
+}
+
+int NEA_Phys3DWorldGetTeleportCount(void)
+{
+    if (!nea_worldExists)
+        return 0;
+
+    b3World *world = b3GetWorldFromId(nea_worldId);
+    return world->teleportCount;
 }

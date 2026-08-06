@@ -203,6 +203,18 @@ int main(int argc, char *argv[])
 
     // Crate boxes against the platform, against the floor once the welds break,
     // and against each other the whole time.
+    //
+    // Phase 6 left this carrying a suspected `late 15`, on the theory that
+    // NUM_BODIES * 8 was the same under-reservation that gave box3d_slider its
+    // `late 27`. Phase 7 measured it instead of inheriting it, and both halves
+    // of that theory were wrong. With BOX3D_AUTO_BREAK driving the welds apart
+    // so the loose crate is actually contacting the floor, this example reports
+    // `late 1`, not 15. Doubling to * 16 then cost 43,672 bytes of pool -- 91,000
+    // to 134,672 of 163,840, 56% full to 82% -- and left `late` at exactly 1.
+    //
+    // So the one late allocation is not a contact array growing, and paying a
+    // quarter of the pool to not find that out is the trade box3d_car already
+    // rejected for meshContactCount. Left at * 8, deliberately.
     def.box3d.capacity.contactCount = NUM_BODIES * 8;
 
     // A weld joint's sim is 176 bytes and a motor joint's is 240, but the union

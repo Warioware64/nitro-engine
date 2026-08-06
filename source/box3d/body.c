@@ -655,6 +655,13 @@ void b3Body_SetTransform( b3BodyId bodyId, b3Pos position, b3Quat rotation )
 	b3Body* body = b3GetBodyFullId( world, bodyId );
 	b3BodySim* bodySim = b3GetBodySim( world, body );
 
+	// A teleport re-enters every one of this body's shapes into the move
+	// buffer below, which re-pairs them next step and re-forms the island --
+	// and in a world sized from a settled scene, that is where a mid-step
+	// allocation comes from. Counted so that a rising lateAllocCount has an
+	// explanation instead of looking like a leak. See physics_world.h.
+	world->teleportCount += 1;
+
 	bodySim->transform.p = position;
 	bodySim->transform.q = rotation;
 	bodySim->center = b3TransformPoint( bodySim->transform, bodySim->localCenter );

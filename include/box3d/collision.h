@@ -43,6 +43,16 @@ B3_API b3CastOutput b3ShapeCastSphere( const b3Sphere* shape, const b3ShapeCastI
 /// b3RayCastSphere and every other cast. See the implementation note.
 B3_API b3CastOutput b3RayCastHollowSphere( const b3Sphere* shape, const b3RayCastInput* input );
 
+/// Collision plane between a character mover and a sphere.
+///
+/// Analytic rather than GJK: the closest point on the mover's segment to the
+/// sphere centre is all the geometry there is. Writes at most one plane and
+/// returns how many, so `result` needs room for one.
+///
+/// Deep overlap is handled here, unlike the hull and mesh forms -- see the note
+/// on b3CollideMoverAndHull for why those two decline it.
+B3_API int b3CollideMoverAndSphere( b3PlaneResult* result, const b3Sphere* shape, const b3Capsule* mover );
+
 // =========================================================================
 // Capsule
 // =========================================================================
@@ -66,6 +76,13 @@ B3_API bool b3OverlapCapsule( const b3Capsule* shape, b3Transform shapeTransform
 /// see B3_CAPSULE_RAY_MIN_DET in capsule.c for the error analysis.
 B3_API b3CastOutput b3RayCastCapsule( const b3Capsule* shape, const b3RayCastInput* input );
 B3_API b3CastOutput b3ShapeCastCapsule( const b3Capsule* shape, const b3ShapeCastInput* input );
+
+/// Collision plane between a character mover and a capsule.
+///
+/// The same shape as b3CollideMoverAndSphere with b3SegmentDistance in place of
+/// b3PointToSegmentDistance, and it handles deep overlap the same way. At most
+/// one plane.
+B3_API int b3CollideMoverAndCapsule( b3PlaneResult* result, const b3Capsule* shape, const b3Capsule* mover );
 
 // =========================================================================
 // Convex hull
@@ -181,6 +198,14 @@ B3_API bool b3OverlapHull( const b3HullData* shape, b3Transform shapeTransform, 
 B3_API b3CastOutput b3RayCastHull( const b3HullData* shape, const b3RayCastInput* input );
 B3_API b3CastOutput b3ShapeCastHull( const b3HullData* shape, const b3ShapeCastInput* input );
 
+/// Collision plane between a character mover and a convex hull.
+///
+/// GJK, with the mover as a two-point proxy carrying its radius. At most one
+/// plane, and **none at all on deep overlap**: upstream declines that case
+/// deliberately so that a hull and the same shape expressed as a mesh behave
+/// identically, and a mesh has no tractable answer for it.
+B3_API int b3CollideMoverAndHull( b3PlaneResult* result, const b3HullData* shape, const b3Capsule* mover );
+
 // =========================================================================
 // Triangle mesh
 // =========================================================================
@@ -189,8 +214,9 @@ B3_API b3CastOutput b3ShapeCastHull( const b3HullData* shape, const b3ShapeCastI
 // the host and baked, so nothing here allocates. The accessors resolve the
 // byte offsets in b3MeshData; a zero offset means the array is absent.
 //
-// b3RayCastMesh, b3ShapeCastMesh, b3OverlapMesh and b3CollideMoverAndMesh are
-// Phase 7, with the rest of the query layer.
+// b3RayCastMesh, b3ShapeCastMesh and b3OverlapMesh arrived with Phase 7's query
+// layer, and b3CollideMoverAndMesh with the mover in Stage 4. All four are
+// declared below.
 
 B3_INLINE const b3MeshNode* b3GetMeshNodes( const b3MeshData* mesh )
 {
@@ -274,6 +300,41 @@ typedef bool b3MeshQueryFcn( b3Vec3 a, b3Vec3 b, b3Vec3 c, int triangleIndex, vo
 /// narrow phase matches its per-triangle cache against the result with a linear
 /// merge join, which is only correct because of it.
 B3_API void b3QueryMesh( const b3Mesh* mesh, b3AABB bounds, b3MeshQueryFcn* fcn, void* context );
+
+/// Does any triangle of the mesh touch `proxy`, placed at `shapeTransform`
+/// relative to the mesh?
+B3_API bool b3OverlapMesh( const b3Mesh* shape, b3Transform shapeTransform, const b3ShapeProxy* proxy );
+
+/// Ray cast a mesh, returning the nearest front-facing triangle hit.
+///
+/// Back faces are culled, as upstream: a mesh is a surface with an outside, and
+/// a ray starting behind one has already passed through it.
+///
+/// Unlike b3QueryMesh, this descends **front to back** rather than
+/// left-child-first, so that each hit shortens the segment and prunes the rest
+/// of the tree. Results are therefore not in triangle-index order.
+B3_API b3CastOutput b3RayCastMesh( const b3Mesh* mesh, const b3RayCastInput* input );
+
+/// Sweep a convex proxy against a mesh, returning the first triangle it meets.
+///
+/// Same traversal as b3RayCastMesh, with the swept shape treated as a ray from
+/// its own centre and every bound fattened by its half-extent; the leaf test is
+/// the shared b3ShapeCast rather than a ray-triangle intersection.
+B3_API b3CastOutput b3ShapeCastMesh( const b3Mesh* mesh, const b3ShapeCastInput* input );
+
+/// Collision planes between a character mover and a triangle mesh.
+///
+/// Unlike the three convex forms this writes **many** planes -- one per triangle
+/// within the mover's radius -- so `planes` needs `capacity` of them and the
+/// return says how many were written. A capsule standing in the corner of a
+/// triangulated room is typically six.
+///
+/// Reaching `capacity` stops the traversal, so the remaining triangles are
+/// never tested. That is a real loss and the caller has to be able to see it:
+/// b3World_CollideMover counts a saturated batch in b3World::moverPlaneDropCount.
+///
+/// Deep overlap produces no plane, matching b3CollideMoverAndHull.
+B3_API int b3CollideMoverAndMesh( b3PlaneResult* planes, int capacity, const b3Mesh* shape, const b3Capsule* mover );
 
 // =========================================================================
 // Triangle manifolds
@@ -365,6 +426,44 @@ B3_API void b3CollideHullAndCapsule( b3LocalManifold* manifold, int capacity, co
 /// produces no points at all rather than a truncated manifold.
 B3_API void b3CollideHulls( b3LocalManifold* manifold, int capacity, const b3HullData* hullA, const b3HullData* hullB,
 							b3Transform transformBtoA, b3SATCache* cache );
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// Implemented in mover.c. Two functions, and between them they are the whole
+// of the mover's *solver*: the per-shape half is b3CollideMoverAnd*, declared
+// with each primitive above, and the world half is b3World_CollideMover and
+// b3World_CastMover in box3d.h.
+//
+// Nothing here touches a b3Shape, a body or a world -- the planes come in as a
+// flat array and a translation goes out. That is deliberate: it means a game
+// can assemble a plane set from anywhere, including from geometry the physics
+// world knows nothing about, and solve against it with the same call.
+//
+// Read the note above b3PlaneResult in types.h first. A plane's `offset` is a
+// **depth**, so both functions below take quantities relative to the mover's
+// current position rather than absolute ones.
+
+/// Find the translation that satisfies a set of collision planes.
+///
+/// Gauss-Seidel with accumulated-impulse clamping, capped at 20 iterations.
+/// Writes `push` on every plane -- including zero on the ones it did not use,
+/// which is what makes b3ClipVector's test below meaningful.
+///
+/// @param targetDelta the translation wanted, from the position the planes were
+///                    generated at
+/// @param planes      the planes, modified in place
+/// @param count       how many
+B3_API b3PlaneSolverResult b3SolvePlanes( b3Vec3 targetDelta, b3CollisionPlane* planes, int count );
+
+/// Remove the inward component of a velocity for every plane that pushed.
+///
+/// Planes with zero push, or with `clipVelocity` false, are skipped. Run this
+/// after b3SolvePlanes and before integrating: without it a mover picks up the
+/// depenetration itself as velocity and launches off whatever it was resting
+/// against.
+B3_API b3Vec3 b3ClipVector( b3Vec3 vector, const b3CollisionPlane* planes, int count );
 
 // =========================================================================
 // Dynamic tree

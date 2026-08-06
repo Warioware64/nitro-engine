@@ -60,15 +60,21 @@
 ///     upstream writes each as one switch over every type, and the ninth type
 ///     existing is what made writing them once cheaper than growing them a case
 ///     at a time.
-///   - **World queries, ray casts and the mover** (Phase 7):
-///     `b3World_CastRay`, `b3World_OverlapAABB`, `b3Body_CastShape`,
-///     `b3World_CollideMover` and friends.
-///   - **Sensors** (Phase 7).
+///   - **World queries and ray casts** are here as of Phase 7 Stage 1:
+///     `b3World_OverlapAABB`, `b3World_OverlapShape`, `b3World_CastRay`,
+///     `b3World_CastRayClosest` and `b3World_CastShape`.
+///   - **The character mover** is here as of Phase 7 Stage 4, which closes the
+///     port: `b3World_CollideMover` and `b3World_CastMover` below, the plane
+///     solver `b3SolvePlanes` / `b3ClipVector` in `collision.h`, and the whole
+///     controller loop as `NEA_Phys3DMover` in `NEAPhysics3D.h`.
+///   - **Sensors** are here as of Phase 7 Stage 3: set `b3ShapeDef::isSensor`
+///     and read `b3World_GetSensorEvents`, or poll the current contents with
+///     `b3Shape_GetSensorData`. A sensor never forms a contact and is not part
+///     of the solver.
 ///   - **Triangle meshes** are here, as `b3CreateMeshShape` -- collidable
-///     against spheres, capsules and hulls. The *queries* against them
-///     (`b3RayCastMesh`, `b3ShapeCastMesh`, `b3OverlapMesh`) are Phase 7 with
-///     the rest of the query layer, and there is no run-time mesh builder:
-///     blobs are baked offline.
+///     against spheres, capsules and hulls, and castable against as of Phase 7
+///     (`b3RayCastMesh`, `b3ShapeCastMesh`, `b3OverlapMesh` in `collision.h`).
+///     There is no run-time mesh builder: blobs are baked offline.
 ///   - **Names, profiles and counters** -- see `B3_NEA_NO_NAMES` and the
 ///     "What is not in b3World" note in `source/box3d/physics_world.h`.
 ///
@@ -124,10 +130,101 @@ B3_API b3Capacity b3World_GetMaxCapacity( b3WorldId worldId );
 B3_API b3AABB b3World_GetBounds( b3WorldId worldId );
 B3_API void b3World_RebuildStaticTree( b3WorldId worldId );
 
+// =========================================================================
+// World queries
+// =========================================================================
+//
+// None of these take upstream's `b3Pos origin` argument. See the note above
+// b3RayResult in types.h for why it exists there and cannot here.
+//
+// All five return b3TreeStats (or carry it, for the closest-hit form) so a
+// game can see what a query cost it -- on a DS that is the difference between
+// a ray you can fire every frame and one you cannot.
+
+/// Visit every shape whose fat AABB overlaps `aabb`.
+///
+/// The *fat* AABB, so this over-reports by the broad-phase margin. Use
+/// b3World_OverlapShape when the exact answer matters.
+B3_API b3TreeStats b3World_OverlapAABB( b3WorldId worldId, b3AABB aabb, b3QueryFilter filter, b3OverlapResultFcn* fcn,
+										void* context );
+
+/// Visit every shape actually touching `proxy`, which is a convex point cloud
+/// with a radius -- one point for a sphere, two for a capsule, eight for a box.
+B3_API b3TreeStats b3World_OverlapShape( b3WorldId worldId, const b3ShapeProxy* proxy, b3QueryFilter filter,
+										 b3OverlapResultFcn* fcn, void* context );
+
+/// Cast a ray and report every shape it hits, in no particular order.
+///
+/// The callback's return value clips the ray; see b3CastResultFcn. For the
+/// common "what did I point at" case, b3World_CastRayClosest does that for you.
+B3_API b3TreeStats b3World_CastRay( b3WorldId worldId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter,
+									b3CastResultFcn* fcn, void* context );
+
+/// Cast a ray and return only the nearest hit.
+B3_API b3RayResult b3World_CastRayClosest( b3WorldId worldId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter );
+
+/// Sweep a convex proxy along `translation` and report what it meets.
+B3_API b3TreeStats b3World_CastShape( b3WorldId worldId, const b3ShapeProxy* proxy, b3Vec3 translation, b3QueryFilter filter,
+									  b3CastResultFcn* fcn, void* context );
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// The two queries a kinematic character controller alternates: "what am I
+// inside" and "how far can I go". Neither steps the world and neither touches
+// a body, so a mover is not a world resource -- it is a b3Capsule the caller
+// owns, in world space.
+//
+// The loop these are meant for is: collect planes, turn them into
+// b3CollisionPlane, solve with b3SolvePlanes (collision.h), sweep along the
+// result, advance by the fraction, repeat a few times. NEA_Phys3DMover in
+// NEAPhysics3D.h is that loop, written out.
+//
+// Neither returns b3TreeStats, unlike the five above. The mover runs several
+// of these per frame and a controller that wanted the traversal cost would be
+// summing eight of them; the cost that matters is measured around the whole
+// controller instead.
+
+/// Collect the collision planes between a mover capsule and the world.
+///
+/// `fcn` is called **once per shape**, with that shape's whole batch of planes,
+/// and returning false stops the query. Batches are capped at
+/// B3_NEA_MAX_MOVER_PLANES; see that macro for what a saturated one costs and
+/// b3World::moverPlaneDropCount for how to see it happen.
+///
+/// A plane's offset is a penetration depth relative to where the mover is now,
+/// not a dot( normal, point ) -- see b3PlaneResult in types.h. That is what
+/// makes the result usable directly by b3SolvePlanes.
+B3_API void b3World_CollideMover( b3WorldId worldId, const b3Capsule* mover, b3QueryFilter filter, b3PlaneResultFcn* fcn,
+								  void* context );
+
+/// Sweep a mover capsule along `translation` and return how far it got, in
+/// [0, 1].
+///
+/// `fcn` may be NULL to accept every shape the filter passes.
+///
+/// Shapes the mover is *already* touching are ignored rather than stopping it
+/// at zero. A character resting on the floor overlaps it by the slop on every
+/// frame, and a cast that reported that as a blocked sweep would freeze it
+/// there permanently.
+B3_API b3c b3World_CastMover( b3WorldId worldId, const b3Capsule* mover, b3Vec3 translation, b3QueryFilter filter,
+							  b3MoverFilterFcn* fcn, void* context );
+
 /// The contact events accumulated by the last collide pass.
 ///
 /// Valid until the next one.
 B3_API b3ContactEvents b3World_GetContactEvents( b3WorldId worldId );
+
+/// The sensor begin and end touch events from the last step.
+///
+/// Only transitions appear here; ask b3Shape_GetSensorData for what is inside a
+/// sensor right now. End events are double buffered like the contact ones, so a
+/// sensor or visitor destroyed *between* steps still reports the overlaps it
+/// ended.
+///
+/// Valid until the next step.
+B3_API b3SensorEvents b3World_GetSensorEvents( b3WorldId worldId );
 
 /// The joint events from the last step: one per joint whose reaction crossed a
 /// threshold set on it with b3Joint_SetForceThreshold or
@@ -285,6 +382,27 @@ B3_API void b3Shape_EnableHitEvents( b3ShapeId shapeId, bool flag );
 B3_API bool b3Shape_AreHitEventsEnabled( b3ShapeId shapeId );
 B3_API void b3Shape_EnablePreSolveEvents( b3ShapeId shapeId, bool flag );
 B3_API bool b3Shape_ArePreSolveEventsEnabled( b3ShapeId shapeId );
+
+/// Sensor events are enabled on both ends: a sensor reports nothing with this
+/// off, and a shape with it off is invisible to every sensor.
+///
+/// Takes effect on the next step, not immediately: the overlap set is rebuilt
+/// once per step, so turning this off on a shape that is currently inside a
+/// sensor produces its end-touch event then.
+B3_API void b3Shape_EnableSensorEvents( b3ShapeId shapeId, bool flag );
+B3_API bool b3Shape_AreSensorEventsEnabled( b3ShapeId shapeId );
+
+/// How many shapes are inside this sensor as of the last step. Zero for a shape
+/// that is not a sensor.
+B3_API int b3Shape_GetSensorCapacity( b3ShapeId shapeId );
+
+/// Copy the ids of the shapes inside this sensor into `visitorIds`, up to
+/// `capacity` of them.
+///
+/// This is the current state, not a transition -- use it to poll a trigger
+/// volume instead of tracking b3World_GetSensorEvents yourself.
+/// @return the number written
+B3_API int b3Shape_GetSensorData( b3ShapeId shapeId, b3ShapeId* visitorIds, int capacity );
 
 B3_API b3ShapeType b3Shape_GetType( b3ShapeId shapeId );
 B3_API b3Sphere b3Shape_GetSphere( b3ShapeId shapeId );

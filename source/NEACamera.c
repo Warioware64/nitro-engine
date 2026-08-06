@@ -105,6 +105,9 @@ void NEA_CameraSetI(NEA_Camera *cam, int xfrom, int yfrom, int zfrom,
     cam->matrix_is_updated = false;
 }
 
+// ARM mode, like the rest of the hot paths in this file. It was the one that
+// was missed: 9 __aeabi_lmul calls, once per camera per frame.
+ARM_CODE
 void NEA_CameraUse(NEA_Camera *cam)
 {
     NEA_AssertPointer(cam, "NULL pointer");

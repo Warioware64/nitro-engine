@@ -1042,6 +1042,11 @@ void NEA_TwoPassSetSplit(int x)
 
 // Shared helper: compute asymmetric frustum and set viewport for the current
 // two-pass half. Used by all three two-pass modes.
+// ARM mode. The only 64-bit multiplies in this file are the three here, in the
+// asymmetric frustum arithmetic; the rest of NEAGeneral.c is init and register
+// pokes that Thumb encodes more densely, so the flag goes on the function rather
+// than on the translation unit.
+ARM_CODE
 static void ne_two_pass_setup_frustum(void)
 {
     const int split = ne_two_pass_split;

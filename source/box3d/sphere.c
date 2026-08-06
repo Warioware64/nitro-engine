@@ -251,6 +251,44 @@ b3CastOutput b3RayCastHollowSphere( const b3Sphere* sphere, const b3RayCastInput
 	return output;
 }
 
+int b3CollideMoverAndSphere( b3PlaneResult* result, const b3Sphere* shape, const b3Capsule* mover )
+{
+	b3f totalRadius = b3AddF( mover->radius, shape->radius );
+	b3Vec3 closest = b3PointToSegmentDistance( mover->center1, mover->center2, shape->center );
+
+	// The normal points from the sphere toward the mover.
+	b3f distance;
+	b3Vec3 normal = b3GetLengthAndNormalize( &distance, b3Sub( closest, shape->center ) );
+
+	if ( b3Raw( distance ) > b3Raw( totalRadius ) )
+	{
+		return 0;
+	}
+
+	if ( b3Raw( distance ) < b3Raw( B3_LINEAR_SLOP ) )
+	{
+		// Deep overlap: the mover axis passes through the sphere center, so no
+		// direction is preferred. Push perpendicular to the mover axis.
+		//
+		// b3Perp and not b3ArbitraryPerp, which is the port's other spelling of
+		// the same idea and is the wrong one here. b3ArbitraryPerp exists for
+		// inputs where every component may be small; it keeps |p| in [0.39,
+		// 0.79]. b3Perp crosses against the coordinate axis *least* aligned
+		// with the input, so for a unit input |p| is never below sqrt(2/3) =
+		// 0.816 -- a longer vector to normalize, and upstream's own choice.
+		b3f length;
+		b3Vec3 axis = b3GetLengthAndNormalize( &length, b3Sub( mover->center2, mover->center1 ) );
+		normal = b3Raw( length ) > b3Raw( B3_LINEAR_SLOP ) ? b3Perp( axis ) : b3Vec3_axisY;
+		distance = b3f_zero;
+	}
+
+	// The offset is a depth measured from where the mover is now, not a
+	// dot( normal, point ) -- see the note above b3PlaneResult in types.h.
+	b3Plane plane = { normal, b3SubF( totalRadius, distance ) };
+	*result = ( b3PlaneResult ){ plane, shape->center };
+	return 1;
+}
+
 b3CastOutput b3ShapeCastSphere( const b3Sphere* sphere, const b3ShapeCastInput* input )
 {
 	b3ShapeCastPairInput pairInput;

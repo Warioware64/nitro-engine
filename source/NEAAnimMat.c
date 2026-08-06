@@ -524,6 +524,9 @@ ARM_CODE static uint32_t ne_animmat_eval_track(
 // Evaluate
 // =========================================================================
 
+// ARM mode: 13 of the 32x32->64 multiplies in this file are in here, and
+// Thumb-1 on ARMv5TE has no SMULL, so each one was an __aeabi_lmul call.
+ARM_CODE
 void NEA_AnimMatEvaluate(NEA_AnimMatInstance *inst)
 {
     NEA_AssertPointer(inst, "NULL instance");

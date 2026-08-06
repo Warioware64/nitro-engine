@@ -20,6 +20,7 @@
 #include "contact.h"
 #include "core.h"
 #include "physics_world.h"
+#include "sensor.h"
 
 #include "box3d/collision.h"
 #include "box3d/constants.h"
@@ -203,8 +204,15 @@ static b3Shape* b3CreateShapeInternal( b3World* world, b3Body* body, b3WorldTran
 	shape->materialCount = 1;
 	shape->materials = NULL;
 
-	// Sensors are Phase 7.
 	shape->sensorIndex = B3_NULL_INDEX;
+	if ( def->isSensor )
+	{
+		// b3CreateSensor reserves the overlap arrays, which is an allocation --
+		// fine here, because shapes are created while the scene is built. It is
+		// also what makes sensorIndex meaningful: everything else in the library
+		// tests it against B3_NULL_INDEX to ask "is this a sensor".
+		b3CreateSensor( world, shape );
+	}
 
 	if ( body->setIndex != b3_disabledSet )
 	{
@@ -371,7 +379,12 @@ static void b3DestroyShapeInternal( b3World* world, b3Shape* shape, b3Body* body
 		}
 	}
 
-	// The sensor teardown upstream does here arrives with Phase 7.
+	// A sensor ends every overlap it still holds, so a body sitting inside a
+	// trigger volume when the volume is deleted still gets its end-touch event.
+	if ( shape->sensorIndex != B3_NULL_INDEX )
+	{
+		b3DestroySensor( world, shape );
+	}
 
 	b3DestroyShapeAllocations( world, shape );
 
@@ -586,8 +599,26 @@ b3CastOutput b3RayCastShape( const b3Shape* shape, b3Transform transform, const 
 		case b3_hullShape:
 			output = b3RayCastHull( shape->hull, &localInput );
 			break;
+		case b3_meshShape:
+			output = b3RayCastMesh( &shape->mesh, &localInput );
+			break;
 		default:
+			output.triangleIndex = B3_NULL_INDEX;
 			return output;
+	}
+
+	// The convex primitives build their output from { 0 } and never touch
+	// triangleIndex, which leaves it reading as **triangle zero** -- a perfectly
+	// good index, and indistinguishable from a real hit on a mesh's first
+	// triangle. b3RayResult promises a caller it can tell the two apart, so the
+	// promise is kept here rather than in three primitives that have no opinion
+	// about triangles. b3RayCastMesh sets it itself and must not be overwritten.
+	//
+	// Found on device: box3d_pick reported `hit level, tri 0` for a ray landing
+	// on the top face of a box.
+	if ( shape->type != b3_meshShape )
+	{
+		output.triangleIndex = B3_NULL_INDEX;
 	}
 
 	output.point = b3TransformPoint( transform, output.point );
@@ -621,8 +652,19 @@ b3CastOutput b3ShapeCastShape( const b3Shape* shape, b3Transform transform, cons
 		case b3_sphereShape:
 			output = b3ShapeCastSphere( &shape->sphere, &localInput );
 			break;
+		case b3_meshShape:
+			output = b3ShapeCastMesh( &shape->mesh, &localInput );
+			break;
 		default:
+			output.triangleIndex = B3_NULL_INDEX;
 			return output;
+	}
+
+	// See b3RayCastShape above: zero is a triangle, so a convex hit must say
+	// "no triangle" rather than "the first one".
+	if ( shape->type != b3_meshShape )
+	{
+		output.triangleIndex = B3_NULL_INDEX;
 	}
 
 	output.point = b3TransformPoint( transform, output.point );
@@ -643,10 +685,229 @@ bool b3OverlapShape( const b3Shape* shape, b3Transform transform, const b3ShapeP
 		case b3_sphereShape:
 			return b3OverlapSphere( &shape->sphere, transform, proxy );
 
+		case b3_meshShape:
+			return b3OverlapMesh( &shape->mesh, transform, proxy );
+
 		default:
 			B3_ASSERT( false );
 			return false;
 	}
+}
+
+// =========================================================================
+// Character mover
+// =========================================================================
+
+int b3CollideMover( b3PlaneResult* planes, int planeCapacity, const b3Shape* shape, b3Transform transform,
+					const b3Capsule* mover )
+{
+	if ( planeCapacity == 0 )
+	{
+		return 0;
+	}
+
+	// The mover comes to the shape rather than the shape going to the mover:
+	// two point transforms against one per vertex of whatever it hits.
+	b3Capsule localMover;
+	localMover.center1 = b3InvTransformPoint( transform, mover->center1 );
+	localMover.center2 = b3InvTransformPoint( transform, mover->center2 );
+	localMover.radius = mover->radius;
+
+	int planeCount = 0;
+	switch ( shape->type )
+	{
+		case b3_capsuleShape:
+			planeCount = b3CollideMoverAndCapsule( planes, &shape->capsule, &localMover );
+			break;
+
+		case b3_sphereShape:
+			planeCount = b3CollideMoverAndSphere( planes, &shape->sphere, &localMover );
+			break;
+
+		case b3_hullShape:
+			planeCount = b3CollideMoverAndHull( planes, shape->hull, &localMover );
+			break;
+
+		case b3_meshShape:
+			planeCount = b3CollideMoverAndMesh( planes, planeCapacity, &shape->mesh, &localMover );
+			break;
+
+		default:
+			B3_ASSERT( false );
+			break;
+	}
+
+	// Back to world. The normal rotates and the point transforms -- and the
+	// **offset is deliberately not touched**. It is a penetration depth
+	// measured from where the mover is, not a dot( normal, point ), so it is
+	// already invariant under this transform. Adding a b3TransformPlane here
+	// would look like a fix and would break every plane the solver sees.
+	for ( int i = 0; i < planeCount; ++i )
+	{
+		planes[i].plane.normal = b3RotateVector( transform.q, planes[i].plane.normal );
+		planes[i].point = b3TransformPoint( transform, planes[i].point );
+	}
+
+	return planeCount;
+}
+
+// =========================================================================
+// Time of impact
+// =========================================================================
+//
+// The shape-level face of distance.c's b3TimeOfImpact: it resolves shape types
+// to proxies, and handles the one type that is not a proxy at all.
+
+b3AABB b3ComputeSweptShapeAABB( const b3Shape* shape, const b3Sweep* sweep, b3c time )
+{
+	B3_ASSERT( 0 <= b3Raw( time ) && b3Raw( time ) <= B3_C_ONE );
+
+	b3Transform xf1 = { b3Sub( sweep->c1, b3RotateVector( sweep->q1, sweep->localCenter ) ), sweep->q1 };
+	b3Transform xf2 = b3GetSweepTransform( sweep, time );
+
+	switch ( shape->type )
+	{
+		case b3_capsuleShape:
+			return b3ComputeSweptCapsuleAABB( &shape->capsule, xf1, xf2 );
+
+		case b3_hullShape:
+			return b3ComputeSweptHullAABB( shape->hull, xf1, xf2 );
+
+		case b3_sphereShape:
+			return b3ComputeSweptSphereAABB( &shape->sphere, xf1, xf2 );
+
+		default:
+		{
+			// A mesh never sweeps: it is the thing being swept against. The
+			// continuous path in solver.c skips mesh shapes on the fast body
+			// for exactly this reason.
+			B3_ASSERT( false );
+			b3AABB empty = { xf1.p, xf1.p };
+			return empty;
+		}
+	}
+}
+
+/// Everything a triangle needs to be handed to b3TimeOfImpact.
+typedef struct b3MeshImpactContext
+{
+	b3TOIInput toiInput;
+	b3TOIOutput toiOutput;
+
+	/// The three triangle vertices the current callback is looking at, in the
+	/// mesh body's frame. toiInput.proxyA points here.
+	b3Vec3 triangle[3];
+
+	/// The swept shape's centroid, in its own body frame, and the radius of the
+	/// sphere that stands in for it when the sweep starts already touching.
+	b3Vec3 localCentroidB;
+	b3f fallbackRadius;
+
+	int visitCount;
+} b3MeshImpactContext;
+
+/// Implements b3MeshQueryFcn.
+static bool b3MeshTimeOfImpactFcn( b3Vec3 a, b3Vec3 b, b3Vec3 c, int triangleIndex, void* context )
+{
+	B3_UNUSED( triangleIndex );
+
+	b3MeshImpactContext* toiContext = (b3MeshImpactContext*)context;
+	toiContext->visitCount += 1;
+
+	toiContext->triangle[0] = a;
+	toiContext->triangle[1] = b;
+	toiContext->triangle[2] = c;
+
+	b3TOIOutput output = b3TimeOfImpact( &toiContext->toiInput );
+
+	if ( 0 < b3Raw( output.fraction ) && b3Raw( output.fraction ) < b3Raw( toiContext->toiInput.maxFraction ) )
+	{
+		toiContext->toiOutput = output;
+
+		// Shorten the remaining sweep, so later triangles only have to beat
+		// this one. The traversal is unordered, so this prunes work rather
+		// than deciding the answer.
+		toiContext->toiInput.maxFraction = output.fraction;
+	}
+	else if ( b3Raw( output.fraction ) == 0 )
+	{
+		// The sweep starts touching this triangle, so there is no fraction to
+		// find -- and refusing to answer here is how a body tunnels. Retry
+		// with a sphere around the swept shape's centroid, which is small
+		// enough to start clear of the triangle and still blocks the motion.
+		//
+		// Worth more in Q12 than in float: `target` is pulled in by a linear
+		// slop, and a slop is a real distance here rather than a rounding
+		// allowance, so shapes resting on a surface sit inside it routinely.
+		b3TOIInput fallbackInput = toiContext->toiInput;
+		fallbackInput.proxyB = ( b3ShapeProxy ){ &toiContext->localCentroidB, 1,
+												 b3AddF( toiContext->fallbackRadius, B3_LINEAR_SLOP ) };
+		output = b3TimeOfImpact( &fallbackInput );
+
+		if ( 0 < b3Raw( output.fraction ) && b3Raw( output.fraction ) < b3Raw( toiContext->toiInput.maxFraction ) )
+		{
+			toiContext->toiOutput = output;
+			toiContext->toiInput.maxFraction = output.fraction;
+			toiContext->toiOutput.usedFallback = true;
+		}
+	}
+
+	// Continue the query.
+	return true;
+}
+
+b3TOIOutput b3ShapeTimeOfImpact( const b3Shape* shapeA, const b3Shape* shapeB, const b3Sweep* sweepA, const b3Sweep* sweepB,
+								 b3c maxFraction )
+{
+	// Shape B is the one that moves fast, and it is never a mesh: the
+	// continuous path skips mesh shapes on the fast body.
+	B3_ASSERT( shapeB->type != b3_meshShape );
+
+	if ( shapeA->type == b3_meshShape )
+	{
+		// Upstream assumes the mesh is static, and so does this. A moving mesh
+		// would need the triangles re-fetched per evaluation, which is the
+		// traversal, not the leaf.
+		b3MeshImpactContext context = { 0 };
+		context.toiInput.proxyA = ( b3ShapeProxy ){ context.triangle, 3, b3f_zero };
+		context.toiInput.proxyB = b3MakeShapeProxy( shapeB );
+		context.toiInput.sweepA = *sweepA;
+		context.toiInput.sweepB = *sweepB;
+		context.toiInput.maxFraction = maxFraction;
+
+		context.localCentroidB = b3GetShapeCentroid( shapeB );
+
+		// Half the shape's own smallest extent, floored at a slop. Big enough
+		// to stop the shape, small enough to start clear of the triangle.
+		b3ShapeExtent extents = b3ComputeShapeExtent( shapeB, context.localCentroidB );
+		context.fallbackRadius = b3MaxF( b3Makeb3f( b3Raw( extents.minExtent ) / 2 ), B3_LINEAR_SLOP );
+
+		b3Transform xfA = { b3Sub( sweepA->c1, b3RotateVector( sweepA->q1, sweepA->localCenter ) ), sweepA->q1 };
+
+		// The traversal wants bounds in the mesh's own frame.
+		b3AABB bounds = b3ComputeSweptShapeAABB( shapeB, sweepB, maxFraction );
+		b3AABB localBounds = b3AABB_Transform( b3InvertTransform( xfA ), bounds );
+
+		b3QueryMesh( &shapeA->mesh, localBounds, b3MeshTimeOfImpactFcn, &context );
+
+		if ( context.toiOutput.state == b3_toiStateUnknown )
+		{
+			// No triangle claimed the sweep.
+			context.toiOutput.state = b3_toiStateSeparated;
+			context.toiOutput.fraction = maxFraction;
+		}
+
+		return context.toiOutput;
+	}
+
+	b3TOIInput input;
+	input.proxyA = b3MakeShapeProxy( shapeA );
+	input.proxyB = b3MakeShapeProxy( shapeB );
+	input.sweepA = *sweepA;
+	input.sweepB = *sweepB;
+	input.maxFraction = maxFraction;
+
+	return b3TimeOfImpact( &input );
 }
 
 void b3CreateShapeProxy( b3Shape* shape, b3BroadPhase* bp, b3BodyType type, b3WorldTransform transform, bool forcePairCreation )
@@ -707,48 +968,6 @@ b3ShapeProxy b3MakeShapeProxy( const b3Shape* shape )
 			return ( b3ShapeProxy ){ 0 };
 		}
 	}
-}
-
-b3ShapeProxy b3MakeLocalProxy( const b3ShapeProxy* proxy, b3Transform transform, b3Vec3* buffer )
-{
-	b3Transform invTransform = b3InvertTransform( transform );
-
-	int count = b3MinInt( proxy->count, B3_MAX_SHAPE_CAST_POINTS );
-	for ( int i = 0; i < count; ++i )
-	{
-		// Upstream builds a rotation matrix once and multiplies. Rotating by
-		// the quaternion directly is both cheaper here (counts are 1, 2 or a
-		// hull vertex count) and more accurate, since b3MakeMatrixFromQuat
-		// narrows the Q30 orientation to Q12.
-		buffer[i] = b3Add( b3RotateVector( invTransform.q, proxy->points[i] ), invTransform.p );
-	}
-
-	return ( b3ShapeProxy ){
-		.points = buffer,
-		.count = count,
-		.radius = proxy->radius,
-	};
-}
-
-b3AABB b3ComputeProxyAABB( const b3ShapeProxy* proxy )
-{
-	const b3Vec3* points = proxy->points;
-	b3AABB aabb = {
-		.lowerBound = points[0],
-		.upperBound = points[0],
-	};
-
-	for ( int i = 1; i < proxy->count; ++i )
-	{
-		aabb.lowerBound = b3Min( aabb.lowerBound, points[i] );
-		aabb.upperBound = b3Max( aabb.upperBound, points[i] );
-	}
-
-	b3Vec3 r = { proxy->radius, proxy->radius, proxy->radius };
-	aabb.lowerBound = b3Sub( aabb.lowerBound, r );
-	aabb.upperBound = b3Add( aabb.upperBound, r );
-
-	return aabb;
 }
 
 // =========================================================================
@@ -1033,6 +1252,86 @@ bool b3Shape_ArePreSolveEventsEnabled( b3ShapeId shapeId )
 	b3World* world = b3GetWorld( shapeId.world0 );
 	b3Shape* shape = b3GetShape( world, shapeId );
 	return ( shape->flags & b3_enablePreSolveEvents ) != 0;
+}
+
+void b3Shape_EnableSensorEvents( b3ShapeId shapeId, bool flag )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	// The overlap set is not touched here. It is rebuilt once per step, and
+	// that is where turning this off on a shape currently inside a sensor turns
+	// into an end-touch event -- either because the sensor stops looking, or
+	// because the visitor stops being visible to it.
+	b3Shape* shape = b3GetShape( world, shapeId );
+	if ( flag )
+	{
+		shape->flags |= b3_enableSensorEvents;
+	}
+	else
+	{
+		shape->flags &= ~b3_enableSensorEvents;
+	}
+}
+
+bool b3Shape_AreSensorEventsEnabled( b3ShapeId shapeId )
+{
+	b3World* world = b3GetWorld( shapeId.world0 );
+	b3Shape* shape = b3GetShape( world, shapeId );
+	return ( shape->flags & b3_enableSensorEvents ) != 0;
+}
+
+int b3Shape_GetSensorCapacity( b3ShapeId shapeId )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL )
+	{
+		return 0;
+	}
+
+	b3Shape* shape = b3GetShape( world, shapeId );
+	if ( shape->sensorIndex == B3_NULL_INDEX )
+	{
+		return 0;
+	}
+
+	// overlaps2 is the set the last sensor pass built, which is the current
+	// one; overlaps1 is the step before it.
+	b3Sensor* sensor = b3Array_Get( world->sensors, shape->sensorIndex );
+	return sensor->overlaps2.count;
+}
+
+int b3Shape_GetSensorData( b3ShapeId shapeId, b3ShapeId* visitorIds, int capacity )
+{
+	b3World* world = b3GetUnlockedWorld( shapeId.world0 );
+	if ( world == NULL )
+	{
+		return 0;
+	}
+
+	b3Shape* shape = b3GetShape( world, shapeId );
+	if ( shape->sensorIndex == B3_NULL_INDEX )
+	{
+		return 0;
+	}
+
+	b3Sensor* sensor = b3Array_Get( world->sensors, shape->sensorIndex );
+
+	int count = b3MinInt( sensor->overlaps2.count, capacity );
+	const b3Visitor* refs = sensor->overlaps2.data;
+	for ( int i = 0; i < count; ++i )
+	{
+		visitorIds[i] = ( b3ShapeId ){
+			.index1 = refs[i].shapeId + 1,
+			.world0 = shapeId.world0,
+			.generation = refs[i].generation,
+		};
+	}
+
+	return count;
 }
 
 b3ShapeType b3Shape_GetType( b3ShapeId shapeId )

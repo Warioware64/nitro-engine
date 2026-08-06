@@ -430,6 +430,192 @@ static void scenarioShapeCast( const pdBackend* fixed, const pdBackend* ref )
 	endScenario();
 }
 
+// A sweep that only translates, which is the overwhelmingly common case: a
+// body's rotation over one step is small, and CCD fires on translation.
+static pdSweep linearSweep( pdVec3 from, pdVec3 to )
+{
+	pdSweep s = { 0 };
+	s.c1 = from;
+	s.c2 = to;
+	s.q1w = 1.0;
+	s.q2w = 1.0;
+	return s;
+}
+
+/// Rotate the end of a sweep by `angle` about a random axis.
+///
+/// This is what puts b3MakeSeparationFunction's edge and face branches under
+/// comparison. A purely translating sweep almost always resolves to a fixed
+/// world axis, so a scenario without rotation would leave three of the four
+/// separation types unexercised.
+static void addSpin( pdSweep* s, double angle )
+{
+	double ax = rnd( -1, 1 ), ay = rnd( -1, 1 ), az = rnd( -1, 1 );
+	double n = sqrt( ax * ax + ay * ay + az * az );
+	if ( n < 1e-6 )
+	{
+		return;
+	}
+
+	double half = 0.5 * angle;
+	double sn = sin( half ) / n;
+	s->q2x = ax * sn;
+	s->q2y = ay * sn;
+	s->q2z = az * sn;
+	s->q2w = cos( half );
+}
+
+/// b3TimeOfImpact, fixed against float.
+///
+/// The comparison that matters here is the *state* -- hit, separated,
+/// overlapped -- and it is compared with exactInt, because a port that reports
+/// "separated" where the reference reports "hit" has let a body through a wall
+/// however close its fraction is. The fraction is then budgeted on its own
+/// line, before the normal, so a loose normal budget cannot launder a wrong
+/// fraction.
+///
+/// Two divergences are expected and are why the state comparison is scoped the
+/// way it is below:
+///
+///   - `failed` versus `hit` is not a disagreement about geometry. Both
+///     libraries fall back when the root finder runs out of room, and they run
+///     out at different places because one is subdividing a float and the other
+///     a Q30 fraction against a Q12 separation.
+///   - the port raises upstream's tighter near-parallel edge threshold, so it
+///     falls back to a fixed world axis in cases where the reference keeps an
+///     edge axis. That changes how many iterations each takes and can move a
+///     fraction by a slop; it cannot move a hit to a miss.
+static void scenarioTimeOfImpact( const pdBackend* fixed, const pdBackend* ref )
+{
+	beginScenario( "time of impact" );
+	reseed( 7717u );
+
+	int hits = 0, misses = 0, degenerate = 0;
+	int worstDistance = 0, worstPushBack = 0, worstRoot = 0;
+
+	for ( int i = 0; i < 240; ++i )
+	{
+		char name[64];
+		snprintf( name, sizeof( name ), "toi[%d]", i );
+
+		// A still shape at the origin and a moving one driven through it, the
+		// same geometry the shape-cast scenario uses -- so a divergence here
+		// that is not there is the sweep machinery and not the distance query.
+		pdProxy a = ( i % 3 == 0 )   ? boxProxy( rndVec( 0.2 ), rnd( 0.4, 1.0 ) )
+					: ( i % 3 == 1 ) ? sphereProxy( rndVec( 0.3 ), rnd( 0.3, 1.0 ) )
+									 : capsuleProxy( rndVec( 0.4 ), rndVec( 0.4 ), rnd( 0.2, 0.8 ) );
+
+		pdProxy b = ( i % 2 ) ? sphereProxy( rndVec( 0.2 ), rnd( 0.2, 0.7 ) ) : boxProxy( rndVec( 0.2 ), rnd( 0.3, 0.8 ) );
+
+		pdSweep sweepA = linearSweep( ( pdVec3 ){ 0, 0, 0 }, ( pdVec3 ){ 0, 0, 0 } );
+
+		// From 7 units out, straight through the origin and out the far side.
+		// Some pass wide, which is what makes the miss comparison worth
+		// anything.
+		pdVec3 start = { 7.0, rnd( -1.6, 1.6 ), rnd( -1.6, 1.6 ) };
+		pdVec3 end = { -7.0, rnd( -1.6, 1.6 ), rnd( -1.6, 1.6 ) };
+		pdSweep sweepB = linearSweep( start, end );
+
+		// A third of the cases spin as they travel, and a sixth spin the
+		// struck shape as well.
+		if ( i % 3 == 0 )
+		{
+			addSpin( &sweepB, rnd( 0.1, 1.2 ) );
+		}
+		if ( i % 6 == 0 )
+		{
+			addSpin( &sweepA, rnd( 0.1, 0.6 ) );
+		}
+
+		pdTOIOut fo, ro;
+		fixed->timeOfImpact( &a, &b, &sweepA, &sweepB, 1.0, &fo );
+		ref->timeOfImpact( &a, &b, &sweepA, &sweepB, 1.0, &ro );
+
+		s_cases++;
+
+		worstDistance = fo.distanceIterations > worstDistance ? fo.distanceIterations : worstDistance;
+		worstPushBack = fo.pushBackIterations > worstPushBack ? fo.pushBackIterations : worstPushBack;
+		worstRoot = fo.rootIterations > worstRoot ? fo.rootIterations : worstRoot;
+
+		// `failed` is each library giving up in its own arithmetic, and
+		// `overlapped` depends on whether the two cores start a quantum apart
+		// or a quantum through. Neither is a geometric claim, so those cases
+		// are counted rather than compared.
+		if ( fo.state == pd_toiFailed || ro.state == pd_toiFailed || fo.state == pd_toiOverlapped ||
+			 ro.state == pd_toiOverlapped )
+		{
+			degenerate++;
+			continue;
+		}
+
+		if ( exactInt( "state", name, fo.state, ro.state ) == false )
+		{
+			continue;
+		}
+
+		if ( ro.state != pd_toiHit )
+		{
+			misses++;
+			continue;
+		}
+
+		hits++;
+
+		drift( "fraction", name, fo.fraction, ro.fraction, TOL_POS_ABS, TOL_POS_REL );
+
+		// The sweep is 14 units, so a fraction disagreement is that times 14 in
+		// position -- measured, and handed to the normal budget as its extra
+		// term the same way the shape-cast scenario does.
+		double sweepLength = 14.0;
+		double sweepGap = fabs( fo.fraction - ro.fraction ) * sweepLength;
+		double leverArm = a.radius + b.radius > 0.25 ? a.radius + b.radius : 0.25;
+
+		driftVec( "normal", name, fo.normal, ro.normal, normalBudget( leverArm, sweepGap ), 0.0 );
+
+		// The hit point is split into its normal and tangential parts before
+		// being compared, and only the normal part is held to a positional
+		// budget.
+		//
+		// Along the normal the point is a real claim: it says how deep into
+		// the struck shape the sweep was stopped, and the two libraries must
+		// agree on that to within the fraction they already agreed on.
+		//
+		// Across the normal it is not. When the touching feature is a face or
+		// an edge rather than a vertex, *every* point on the contact patch is
+		// an equally correct witness, and which one comes back is decided by
+		// which simplex vertex GJK happened to keep -- so two libraries can
+		// return points a whole face apart and both be right. Budgeting the
+		// tangential part would either fail on ties or be loosened until the
+		// normal part stopped being checked, and the normal part is the half
+		// that carries the meaning.
+		{
+			pdVec3 d = { fo.point.x - ro.point.x, fo.point.y - ro.point.y, fo.point.z - ro.point.z };
+			double dn = d.x * ro.normal.x + d.y * ro.normal.y + d.z * ro.normal.z;
+			double tx = d.x - dn * ro.normal.x;
+			double ty = d.y - dn * ro.normal.y;
+			double tz = d.z - dn * ro.normal.z;
+			double dt = sqrt( tx * tx + ty * ty + tz * tz );
+
+			drift( "point depth", name, dn, 0.0, TOL_POS_ABS + sweepGap, TOL_POS_REL );
+
+			// Not a budget: a patch wider than the shapes themselves would
+			// mean the two libraries found different features, not different
+			// points on one.
+			if ( dt > 4.0 )
+			{
+				drift( "point patch", name, dt, 0.0, TOL_POS_ABS, TOL_POS_REL );
+			}
+		}
+
+		noteLeverArm( leverArm );
+	}
+
+	printf( "  %d hits, %d misses, %d degenerate; worst port iterations %d distance / %d push back / %d root\n", hits,
+			misses, degenerate, worstDistance, worstPushBack, worstRoot );
+
+	endScenario();
+}
+
 static void scenarioManifolds( const pdBackend* fixed, const pdBackend* ref )
 {
 	beginScenario( "primitive manifolds" );
@@ -4032,6 +4218,275 @@ static void scenarioStep( const pdBackend* fixed, const pdBackend* ref )
 #define TOL_SLIDER_REL TOL_HINGE_REL
 #define TOL_SLIDER_FORCE_REL TOL_HINGE_FORCE_REL
 
+// Sensors: the one comparison in this harness with no tolerance in it.
+//
+// Every other scenario budgets a drift, because every other quantity it
+// compares is the output of an iterative search over quantized inputs. A
+// sensor event is not a quantity at all -- it is a *set membership decision*
+// published as a pair of shape ids, so the two libraries name the same pairs on
+// the same pass or one of them is wrong. `exactInt` throughout, and that is the
+// point of the scenario rather than a strictness applied for its own sake.
+//
+// What it can actually catch:
+//
+//   - the port's insertion sort and dedup reaching a different set than
+//     upstream's qsort, which is the one place the port replaced an algorithm
+//     rather than transliterating it;
+//   - a boundary case where one library calls a marginal overlap "in" and the
+//     other "out" -- which would show as the same transition on adjacent
+//     passes, and which no tolerance could have absorbed honestly;
+//   - the CCD sensor path firing on one side and not the other, which is what
+//     the fast scenes below are for.
+static void scenarioSensors( const pdBackend* fixed, const pdBackend* ref )
+{
+	beginScenario( "sensors -- overlap sets, transitions and the swept path" );
+	reseed( 90210u );
+
+	// A 1-unit box for the sensor volume and a small one for a hull visitor,
+	// so the scenes cover a hull entering a hull as well as spheres.
+	pdHull hulls[2];
+	int hullCount = 0;
+	{
+		double sensorParams[3] = { 1.0, 1.0, 1.0 };
+		if ( pdRefMakeHull( pd_hullBox, sensorParams, &hulls[hullCount] ) )
+		{
+			hullCount += 1;
+		}
+
+		double visitorParams[3] = { 0.2, 0.2, 0.2 };
+		if ( pdRefMakeHull( pd_hullBox, visitorParams, &hulls[hullCount] ) )
+		{
+			hullCount += 1;
+		}
+	}
+
+	if ( hullCount < 2 )
+	{
+		printf( "  could not build the scene hulls -- skipping\n" );
+		endScenario();
+		return;
+	}
+
+	int transitionsSeen = 0;
+	int occupiedPasses = 0;
+
+	for ( int sceneIndex = 0; sceneIndex < 6; ++sceneIndex )
+	{
+		pdSceneDesc desc = { 0 };
+		char sceneName[64];
+
+		// No gravity anywhere in this scenario: every visitor is carried by the
+		// velocity it was given, so where it is on each pass is a closed form
+		// and a disagreement about *when* it entered cannot be blamed on two
+		// integrators settling differently.
+		desc.subStepCount = 4;
+
+		// Body 0 is always the sensor volume: static, at the origin, one hull
+		// shape marked isSensor.
+		desc.bodyCount = 1;
+		desc.bodies[0].isStatic = true;
+		desc.bodies[0].body.xf.qw = 1.0;
+		desc.bodies[0].body.shapeCount = 1;
+		desc.bodies[0].body.shapes[0].kind = pd_bodyShapeHull;
+		desc.bodies[0].body.shapes[0].hullIndex = 0;
+		desc.bodies[0].body.shapes[0].density = 1000.0;
+		desc.bodies[0].body.shapes[0].isSensor = true;
+		desc.bodies[0].body.shapes[0].enableSensorEvents = true;
+
+		// Visitors travel along +x from outside the box, at a speed chosen so
+		// that the crossing takes several passes rather than resolving inside
+		// one -- the transitions are the thing being compared, so they have to
+		// land on passes both libraries can be asked about.
+		int visitorCount = 1;
+		double speed = 3.0;
+		bool sensorBlind = false;
+
+		switch ( sceneIndex )
+		{
+			case 0:
+				snprintf( sceneName, sizeof( sceneName ), "one sphere crossing" );
+				break;
+
+			case 1:
+				snprintf( sceneName, sizeof( sceneName ), "three spheres, staggered" );
+				visitorCount = 3;
+				break;
+
+			case 2:
+				snprintf( sceneName, sizeof( sceneName ), "hull visitors" );
+				visitorCount = 2;
+				break;
+
+			case 3:
+				// The visitor's own sensor-event flag off. Both libraries must
+				// report nothing at all -- the flag is tested on the *visitor*
+				// as well as on the sensor, and a port that only tested the
+				// sensor would pass every other scene here.
+				snprintf( sceneName, sizeof( sceneName ), "visitor with events off" );
+				visitorCount = 2;
+				sensorBlind = true;
+				break;
+
+			case 4:
+				// Fast enough to cross the whole 2-unit box within one step:
+				// 300 units/s is 5 units of travel per step. Only the
+				// continuous path can see this, on either side.
+				snprintf( sceneName, sizeof( sceneName ), "swept clean through" );
+				speed = 300.0;
+				break;
+
+			case 5:
+				// Fast, but with several visitors, so the port's per-body
+				// sensor-hit array is exercised with more than one entry.
+				snprintf( sceneName, sizeof( sceneName ), "three swept through" );
+				visitorCount = 3;
+				speed = 300.0;
+				break;
+
+			default:
+				snprintf( sceneName, sizeof( sceneName ), "scene %d", sceneIndex );
+				break;
+		}
+
+		bool fast = speed > 100.0;
+
+		for ( int v = 0; v < visitorCount; ++v )
+		{
+			pdSceneBody* sb = desc.bodies + desc.bodyCount;
+			desc.bodyCount += 1;
+
+			sb->isStatic = false;
+			sb->disableSleep = true;
+			sb->body.xf.qw = 1.0;
+			sb->linearVelocity.x = speed;
+
+			if ( fast )
+			{
+				// All three start level with each other and cross in the same
+				// step: five units of travel from x = -3 puts the end pose at
+				// +2, so the sweep passes entirely through the box and *no*
+				// pose at either end of it overlaps. Only the continuous path
+				// can produce an event here, on either side -- and starting
+				// them together is what puts more than one hit in the port's
+				// per-body sensor-hit array at once.
+				// 0.7 between lanes, not 0.5: two 0.25-radius spheres half a
+				// unit apart are exactly touching, and the first version of
+				// this scene had the visitors colliding with each other on
+				// every pass -- which the "no contacts" check caught, on both
+				// sides at once, which is how it was clearly the scene and not
+				// the port.
+				sb->body.xf.p.x = -3.0;
+				sb->body.xf.p.y = -0.7 + 0.7 * v;
+				sb->body.xf.p.z = rnd( -0.2, 0.2 );
+			}
+			else
+			{
+				// Staggered starts and jittered lanes, so the visitors enter on
+				// different passes and the merge join in the publish pass has
+				// more than one visitor to order.
+				sb->body.xf.p.x = -4.0 - 1.3 * v + rnd( -0.2, 0.2 );
+				sb->body.xf.p.y = rnd( -0.4, 0.4 );
+				sb->body.xf.p.z = rnd( -0.4, 0.4 );
+			}
+
+			sb->body.shapeCount = 1;
+			sb->body.shapes[0].density = 1000.0;
+			sb->body.shapes[0].enableSensorEvents = sensorBlind == false;
+
+			if ( sceneIndex == 2 )
+			{
+				sb->body.shapes[0].kind = pd_bodyShapeHull;
+				sb->body.shapes[0].hullIndex = 1;
+			}
+			else
+			{
+				sb->body.shapes[0].kind = pd_bodyShapeSphere;
+				sb->body.shapes[0].radius = 0.25;
+			}
+		}
+
+		desc.passCount = 8;
+		for ( int p = 0; p < 8; ++p )
+		{
+			// A fast scene crosses in a single step, so it gets one step per
+			// pass. A slow one gets twenty, which at 3 units/s carries the
+			// visitor one unit per pass -- enough that the furthest-back of
+			// three staggered visitors still crosses within the eight passes,
+			// and coarse enough that entering and leaving land on different
+			// ones.
+			desc.passes[p].stepCount = fast ? 1 : 20;
+		}
+
+		pdSceneOut fo, ro;
+		fixed->worldScene( &desc, hulls, hullCount, NULL, 0, &fo );
+		ref->worldScene( &desc, hulls, hullCount, NULL, 0, &ro );
+
+		for ( int p = 0; p < ro.passCount; ++p )
+		{
+			const pdScenePassOut* fp = fo.passes + p;
+			const pdScenePassOut* rp = ro.passes + p;
+
+			char name[96];
+			snprintf( name, sizeof( name ), "%s[pass %d]", sceneName, p );
+			s_cases++;
+
+			// A sensor forms no contacts, on either side. This is the check on
+			// the broad-phase skip, and it is worth making in the cross-library
+			// harness as well as on the host: if the port started creating
+			// them, every contact scenario would still pass.
+			exactInt( "contact count (must be 0)", name, fp->contactCount, 0 );
+			exactInt( "reference contact count (must be 0)", name, rp->contactCount, 0 );
+
+			// The transitions, as sets.
+			if ( exactInt( "sensor begin count", name, fp->sensorBeginCount, rp->sensorBeginCount ) )
+			{
+				for ( int e = 0; e < rp->sensorBeginCount; ++e )
+				{
+					char label[128];
+					snprintf( label, sizeof( label ), "begin[%d] sensor", e );
+					exactInt( label, name, fp->sensorBegins[e].sensorShape, rp->sensorBegins[e].sensorShape );
+					snprintf( label, sizeof( label ), "begin[%d] visitor", e );
+					exactInt( label, name, fp->sensorBegins[e].visitorShape, rp->sensorBegins[e].visitorShape );
+				}
+			}
+
+			if ( exactInt( "sensor end count", name, fp->sensorEndCount, rp->sensorEndCount ) )
+			{
+				for ( int e = 0; e < rp->sensorEndCount; ++e )
+				{
+					char label[128];
+					snprintf( label, sizeof( label ), "end[%d] sensor", e );
+					exactInt( label, name, fp->sensorEnds[e].sensorShape, rp->sensorEnds[e].sensorShape );
+					snprintf( label, sizeof( label ), "end[%d] visitor", e );
+					exactInt( label, name, fp->sensorEnds[e].visitorShape, rp->sensorEnds[e].visitorShape );
+				}
+			}
+
+			transitionsSeen += rp->sensorBeginCount + rp->sensorEndCount;
+
+			// And the state the transitions add up to. Comparing only the
+			// events would let two libraries that had both drifted the same
+			// number of passes agree; comparing occupancy as well pins the
+			// answer to the geometry.
+			exactInt( "sensor occupancy", name, fp->sensorOccupancy[0], rp->sensorOccupancy[0] );
+			if ( rp->sensorOccupancy[0] > 0 )
+			{
+				occupiedPasses += 1;
+			}
+
+			// The blind scene asserts its own premise rather than trusting it.
+			if ( sensorBlind )
+			{
+				exactInt( "blind visitors trip nothing", name, rp->sensorBeginCount + rp->sensorEndCount, 0 );
+			}
+		}
+	}
+
+	printf( "  %d transitions compared exactly, %d passes with something inside the sensor\n", transitionsSeen,
+			occupiedPasses );
+	endScenario();
+}
+
 static void scenarioJoints( const pdBackend* fixed, const pdBackend* ref )
 {
 	beginScenario( "distance joints -- constraint trajectories and reaction forces" );
@@ -5354,6 +5809,10 @@ int main( int argc, char** argv )
 	{
 		scenarioShapeCast( &pdPortBackend, &pdRefBackend );
 	}
+	if ( all || strcmp( argv[1], "toi" ) == 0 )
+	{
+		scenarioTimeOfImpact( &pdPortBackend, &pdRefBackend );
+	}
 	if ( all || strcmp( argv[1], "manifold" ) == 0 )
 	{
 		scenarioManifolds( &pdPortBackend, &pdRefBackend );
@@ -5392,6 +5851,10 @@ int main( int argc, char** argv )
 	if ( all || strcmp( argv[1], "step" ) == 0 )
 	{
 		scenarioStep( &pdPortBackend, &pdRefBackend );
+	}
+	if ( all || strcmp( argv[1], "sensors" ) == 0 )
+	{
+		scenarioSensors( &pdPortBackend, &pdRefBackend );
 	}
 	if ( all || strcmp( argv[1], "joints" ) == 0 )
 	{

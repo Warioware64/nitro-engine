@@ -65,10 +65,29 @@ static inline int32_t NEA_Vec3Dot(NEA_Vec3 a, NEA_Vec3 b)
     return dotf32(va, vb);
 }
 
-/// Squared length of a vector (f32 result, but may overflow for large vectors).
+/// Squared length of a vector (f32 result, saturating at INT32_MAX).
+///
+/// Not NEA_Vec3Dot(a, a): the hardware dot narrows to 32 bits, and a squared
+/// length is a *square*, so it leaves the representable range at a vector
+/// length of only ~724 units. The overflow wraps, and the sign it lands on is
+/// arbitrary -- which broke the degeneracy test in NEA_ColTestTriangleVsTriangle,
+/// where the axes are cross products of triangle edges and comfortably exceed
+/// that for a mesh with edges longer than ~27 units. A wrapped value reads as
+/// non-zero for a genuinely degenerate axis, or as zero for a good one.
+///
+/// Each term is a square, so the sum is non-negative and fits a uint64 with
+/// room to spare even for INT32_MIN components. Exact wherever the answer is
+/// representable, saturating above it -- and saturation is the right answer
+/// here, because every caller is asking "is this long enough to normalize".
 static inline int32_t NEA_Vec3LengthSq(NEA_Vec3 a)
 {
-    return NEA_Vec3Dot(a, a);
+    uint64_t sq = (uint64_t)((int64_t)a.x * a.x)
+                + (uint64_t)((int64_t)a.y * a.y)
+                + (uint64_t)((int64_t)a.z * a.z);
+
+    sq >>= 12;
+
+    return sq > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)sq;
 }
 
 /// Scale a vector by an f32 scalar.

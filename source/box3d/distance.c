@@ -8,14 +8,12 @@
 // This file is part of Nitro Engine Advanced
 
 /// @file   distance.c
-/// @brief  GJK closest points and shape casting.
+/// @brief  GJK closest points, shape casting and time of impact.
 ///
-/// NOTE: this file is being converted in two passes. Present so far: the
-/// support functions, barycentric coordinates, the simplex metric, and the
-/// 2- and 3-vertex simplex solvers. Still to come in Phase 2A:
-/// b3SolveSimplex4, b3ComputeWitnessPoints, b3ShapeDistance and b3ShapeCast.
-/// b3TimeOfImpact and its separation function belong to Phase 7 (continuous
-/// collision) and stay in upstream until then.
+/// Three layers, each built on the one above it: the simplex solvers and
+/// b3ShapeDistance (Phase 2A), b3ShapeCast's conservative advancement (Phase
+/// 2A), and b3TimeOfImpact's separation function and root finder (Phase 7,
+/// Stage 2). The two proxy helpers at the end joined in Phase 7 Stage 1.
 ///
 /// @section deferred Deferred division
 ///
@@ -232,11 +230,26 @@ static int64_t b3GetMetric( const b3Simplex* simplex )
 		case 4:
 		{
 			// The triple product is already Q24.
+			//
+			// Upstream divides by 6, which is a tetrahedron's volume. This
+			// shifts by 3 instead -- the same quantity scaled by 3/4 -- because
+			// an int64 divide by 6 is a call to __aeabi_ldivmod, and it was the
+			// only one left in either archive.
+			//
+			// That is sound only because of what this number is for, which the
+			// comment above spells out: it is compared against another metric
+			// from the same query and nothing else. Within a count-4 pair both
+			// sides carry the same factor and it cancels. Across counts the
+			// comparison is between a volume and an area and is meaningless
+			// whatever the factor is. And the `metric2 <= 0` degeneracy test is
+			// a sign test, which a positive scale cannot change.
+			//
+			// Measured, not argued: run_pair holds at 7886 / 0 / 30 either way.
 			b3Vec3 a = vertices[0].w;
 			b3Vec3 b = vertices[1].w;
 			b3Vec3 c = vertices[2].w;
 			b3Vec3 d = vertices[3].w;
-			return b3ScalarTripleProductWide( b3Sub( b, a ), b3Sub( c, a ), b3Sub( d, a ) ) / 6;
+			return b3ScalarTripleProductWide( b3Sub( b, a ), b3Sub( c, a ), b3Sub( d, a ) ) >> 3;
 		}
 
 		default:
@@ -1083,5 +1096,964 @@ b3CastOutput b3ShapeCast( const b3ShapeCastPairInput* input )
 	}
 
 	// Ran out of iterations.
+	return output;
+}
+
+// =========================================================================
+// Proxy helpers
+// =========================================================================
+//
+// These two used to live in shape.c, and moved here in Phase 7. Neither has
+// anything to do with a b3Shape: both take a b3ShapeProxy, which is a public
+// point cloud with a radius, and they sit naturally beside b3ShapeDistance and
+// b3ShapeCast, the two functions that consume one.
+//
+// The move was forced by a link rather than chosen on taste, and the link was
+// right. tests/box3d_host builds `bake_ref` from a deliberately minimal set of
+// objects -- the mesh baker needs b3IsValidMesh and therefore mesh.c, and
+// nothing else. When Phase 7 gave mesh.c its query half, calling these two
+// through shape.c would have dragged the body list, the broad phase and the
+// contact graph into a command-line mesh baker. Here, they cost distance.c,
+// which needs nothing outside that set.
+
+b3ShapeProxy b3MakeLocalProxy( const b3ShapeProxy* proxy, b3Transform transform, b3Vec3* buffer )
+{
+	b3Transform invTransform = b3InvertTransform( transform );
+
+	int count = b3MinInt( proxy->count, B3_MAX_SHAPE_CAST_POINTS );
+	for ( int i = 0; i < count; ++i )
+	{
+		// Upstream builds a rotation matrix once and multiplies. Rotating by
+		// the quaternion directly is both cheaper here (counts are 1, 2 or a
+		// hull vertex count) and more accurate, since b3MakeMatrixFromQuat
+		// narrows the Q30 orientation to Q12.
+		buffer[i] = b3Add( b3RotateVector( invTransform.q, proxy->points[i] ), invTransform.p );
+	}
+
+	return ( b3ShapeProxy ){
+		.points = buffer,
+		.count = count,
+		.radius = proxy->radius,
+	};
+}
+
+b3AABB b3ComputeProxyAABB( const b3ShapeProxy* proxy )
+{
+	const b3Vec3* points = proxy->points;
+	b3AABB aabb = {
+		.lowerBound = points[0],
+		.upperBound = points[0],
+	};
+
+	for ( int i = 1; i < proxy->count; ++i )
+	{
+		aabb.lowerBound = b3Min( aabb.lowerBound, points[i] );
+		aabb.upperBound = b3Max( aabb.upperBound, points[i] );
+	}
+
+	b3Vec3 r = { proxy->radius, proxy->radius, proxy->radius };
+	aabb.lowerBound = b3Sub( aabb.lowerBound, r );
+	aabb.upperBound = b3Add( aabb.upperBound, r );
+
+	return aabb;
+}
+
+// =========================================================================
+// Time of impact
+// =========================================================================
+//
+// The first time two moving convex shapes touch, found by root finding on a
+// separating axis. Three nested loops, and each one has a different job:
+//
+//   outer   pick a separating axis from a GJK distance query at t1, and
+//           advance t1 until the shapes are within `target` of each other
+//   middle  resolve the deepest point along that axis, one witness pair at a
+//           time ("push back")
+//   inner   the actual root find on f(t) = separation(t) - target, alternating
+//           false position with bisection
+//
+// The outer loop is what makes this robust: the axis is only valid near t1, so
+// each advance re-derives it rather than trusting the old one.
+//
+// @section toiscale What lives at which scale
+//
+// Time fractions are b3c (Q30). That is not for precision -- it is because
+// bisection halves, and halving a Q30 value is a shift with no rounding at
+// all, so the bracket is exact for as long as it is meaningful.
+//
+// Separations are b3f (Q12), like every other length. The pairing of the two
+// is the one genuinely new fixed-point problem in this file, and it is handled
+// by the bracket floor in b3TimeOfImpact: Q30 can keep subdividing time long
+// after Q12 has stopped being able to tell two separations apart, and a root
+// finder that does not know that will spend its whole iteration budget
+// comparing a value against itself.
+
+/// The pose a sweep has reached at `time`.
+///
+/// The rotation is an nlerp rather than a slerp, as upstream: over one time
+/// step the two quaternions are close, so the constant-speed property a slerp
+/// buys is not worth an acos and a pair of sines.
+///
+/// The equal-rotation fast path is the port's, and it is not a micro
+/// optimization. b3NLerp ends in b3NormalizeQuat, which is a reciprocal square
+/// root, and the mesh path in b3ShapeTimeOfImpact sweeps against a *static*
+/// mesh -- so sweepA has q1 == q2 and this is called with it once per
+/// separation evaluation, per triangle, per iteration. Skipping it there costs
+/// one comparison of four Q30 words.
+b3Transform b3GetSweepTransform( const b3Sweep* sweep, b3c time )
+{
+	B3_ASSERT( 0 <= b3Raw( time ) && b3Raw( time ) <= B3_C_ONE );
+
+	b3Transform transform;
+
+	if ( b3Raw( sweep->q1.v.x ) == b3Raw( sweep->q2.v.x ) && b3Raw( sweep->q1.v.y ) == b3Raw( sweep->q2.v.y ) &&
+		 b3Raw( sweep->q1.v.z ) == b3Raw( sweep->q2.v.z ) && b3Raw( sweep->q1.s ) == b3Raw( sweep->q2.s ) )
+	{
+		transform.q = sweep->q1;
+	}
+	else
+	{
+		transform.q = b3NLerp( sweep->q1, sweep->q2, time );
+	}
+
+	transform.p = b3Sub( b3Lerp( sweep->c1, sweep->c2, time ), b3RotateVector( transform.q, sweep->localCenter ) );
+	return transform;
+}
+
+/// The pose at the end of the sweep, without interpolating to get there.
+static inline b3Transform b3GetFinalSweepTransform( const b3Sweep* sweep )
+{
+	b3Transform transform;
+	transform.q = sweep->q2;
+	transform.p = b3Sub( sweep->c2, b3RotateVector( transform.q, sweep->localCenter ) );
+	return transform;
+}
+
+/// How many distinct vertices the cached simplex names on one shape.
+///
+/// The cache stores `count` indices, but a simplex can name the same vertex
+/// twice -- an edge that degenerated to a point, a triangle standing on an
+/// edge. The separation function needs to know which geometric feature it
+/// really has before it can pick an axis, and this is that test.
+static int b3UniqueCount( int vertexCount, int vertices[3] )
+{
+	B3_ASSERT( 1 <= vertexCount && vertexCount <= 3 );
+
+	switch ( vertexCount )
+	{
+		case 1:
+			return 1;
+
+		case 2:
+			return vertices[0] != vertices[1] ? 2 : 1;
+
+		case 3:
+			if ( vertices[0] != vertices[1] && vertices[0] != vertices[2] && vertices[1] != vertices[2] )
+			{
+				// All different
+				return 3;
+			}
+
+			if ( vertices[0] == vertices[1] && vertices[0] == vertices[2] && vertices[1] == vertices[2] )
+			{
+				// All equal
+				return 1;
+			}
+
+			return 2;
+
+		default:
+			B3_ASSERT( !"Should never get here!" );
+			return 0;
+	}
+}
+
+/// Would the edge-edge cross product flip sign before the sweep ends?
+///
+/// An edge-edge separating axis is cross(edgeA, edgeB), and that reverses when
+/// the two edges rotate through being parallel. If it does, the axis stops
+/// describing the same side of the contact partway through the sweep and the
+/// root finder is chasing a function that changes sign under it. Cheaper to
+/// ask the question once, at the end pose, and fall back to a fixed world axis
+/// than to detect the failure afterwards.
+static inline bool b3CheckFastEdges( b3Transform xfA, b3Vec3 localEdgeA, b3Transform xfB, b3Vec3 localEdgeB, b3Vec3 axis0 )
+{
+	// The local witness axes, so a flipped one stays flipped.
+	b3Vec3 edgeA = b3RotateVector( xfA.q, localEdgeA );
+	b3Vec3 edgeB = b3RotateVector( xfB.q, localEdgeB );
+
+	// Direction only: the magnitude of this cross is an area and two nearly
+	// parallel unit edges make it vanish in Q12. Only the sign of the dot is
+	// read, and rescaling cannot change a sign.
+	b3Vec3 axis = b3CrossDirection( edgeA, edgeB );
+	return b3Raw( b3Dot( axis, axis0 ) ) < 0;
+}
+
+typedef enum b3SeparationType
+{
+	b3_separationUnknown = 0,
+	b3_separationVertices,
+	b3_separationEdges,
+	b3_separationFaceA,
+	b3_separationFaceB,
+} b3SeparationType;
+
+typedef struct b3SeparationFunction
+{
+	const b3ShapeProxy* proxyA;
+	const b3ShapeProxy* proxyB;
+	b3Sweep sweepA;
+	b3Sweep sweepB;
+
+	// Which body these belong to depends on the type -- both can be on A.
+	b3Vec3 witness1;
+	b3Vec3 witness2;
+
+	b3SeparationType type;
+} b3SeparationFunction;
+
+/// The smallest edge-edge cross product worth normalizing, squared.
+///
+/// Upstream rejects |cross(eA, eB)| < 0.05 for unit edges, which is sin(alpha)
+/// between two directions and so a near-parallel test. The port takes the same
+/// threshold on a *wide* cross, where both sides are exact integers: two Q12
+/// unit vectors cross to Q24, so 0.05 is (B3_F_ONE / 20) * B3_F_ONE = 835,584
+/// and the test never rounds.
+///
+/// Upstream uses a second, ten times smaller threshold (0.005) in the
+/// three-point branch. **The port uses this one in both places.** At
+/// sin(alpha) = 0.005 the two normalized Q12 edges cross to components of
+/// about 20 raw, and b3Normalize has already spent a quantum or two of each
+/// input -- so the axis that survives is some 10-20% wrong in *direction*, and
+/// the root finder would then be converging carefully onto a function built on
+/// it. The fallback is the fixed world axis, which is always valid and merely
+/// converges more slowly. Q12 cannot honour the tighter threshold, so it does
+/// not claim to.
+#define B3_EDGE_TOLERANCE_WIDE ( (int64_t)( B3_F_ONE / 20 ) * B3_F_ONE )
+#define B3_EDGE_TOLERANCE_SQ ( B3_EDGE_TOLERANCE_WIDE * B3_EDGE_TOLERANCE_WIDE )
+
+/// The squared length of a wide cross product, at Q48.
+///
+/// Each component is bounded by B3_F_ONE * B3_F_ONE for unit inputs, so the
+/// sum of three squares reaches 8.4e14 -- four orders below the int64 ceiling.
+static inline int64_t b3WideLengthSquared( const int64_t c[3] )
+{
+	return c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+}
+
+static b3SeparationFunction b3MakeSeparationFunction( const b3SimplexCache cache, const b3ShapeProxy* proxyA,
+													  const b3Sweep* sweepA, const b3ShapeProxy* proxyB, const b3Sweep* sweepB,
+													  b3Vec3 worldNormal, b3c t1 )
+{
+	B3_ASSERT( 1 <= cache.count && cache.count <= 3 );
+
+	b3SeparationFunction fcn = { 0 };
+	fcn.proxyA = proxyA;
+	fcn.proxyB = proxyB;
+	fcn.sweepA = *sweepA;
+	fcn.sweepB = *sweepB;
+	fcn.type = b3_separationUnknown;
+
+	int indexA[3] = { cache.indexA[0], cache.indexA[1], cache.indexA[2] };
+	int indexB[3] = { cache.indexB[0], cache.indexB[1], cache.indexB[2] };
+
+	int uniqueCountA = b3UniqueCount( cache.count, indexA );
+	int uniqueCountB = b3UniqueCount( cache.count, indexB );
+
+	b3Transform xfA1 = b3GetSweepTransform( sweepA, t1 );
+	b3Transform xfB1 = b3GetSweepTransform( sweepB, t1 );
+
+	b3Quat qA = xfA1.q;
+	b3Quat qB = xfB1.q;
+
+	// Difference the origins rather than the transformed points, so the terms
+	// that are about to be dotted together stay small.
+	b3Vec3 deltaP = b3Sub( xfB1.p, xfA1.p );
+
+	switch ( cache.count )
+	{
+		case 1:
+		{
+			// The witness is the world direction itself.
+			fcn.type = b3_separationVertices;
+			fcn.witness1 = worldNormal;
+		}
+		break;
+
+		case 2:
+		{
+			if ( uniqueCountA == 2 && uniqueCountB == 2 )
+			{
+				// Edge versus edge.
+				b3Vec3 vA1 = proxyA->points[indexA[0]];
+				b3Vec3 localEdgeA = b3Normalize( b3Sub( proxyA->points[indexA[1]], vA1 ) );
+				b3Vec3 edgeA = b3RotateVector( qA, localEdgeA );
+
+				b3Vec3 vB1 = proxyB->points[indexB[0]];
+				b3Vec3 localEdgeB = b3Normalize( b3Sub( proxyB->points[indexB[1]], vB1 ) );
+				b3Vec3 edgeB = b3RotateVector( qB, localEdgeB );
+
+				int64_t wide[3];
+				b3CrossWide( wide, edgeA, edgeB );
+
+				if ( b3WideLengthSquared( wide ) < B3_EDGE_TOLERANCE_SQ )
+				{
+					// Too near parallel to normalize: use a world axis.
+					fcn.type = b3_separationVertices;
+					fcn.witness1 = worldNormal;
+				}
+				else
+				{
+					b3Vec3 axis = b3DirectionFromWide( wide[0], wide[1], wide[2] );
+
+					b3Vec3 delta = b3Add( b3Sub( b3RotateVector( qB, vB1 ), b3RotateVector( qA, vA1 ) ), deltaP );
+					if ( b3Raw( b3Dot( delta, axis ) ) < 0 )
+					{
+						// Point the axis from A to B.
+						axis = b3Neg( axis );
+						localEdgeB = b3Neg( localEdgeB );
+					}
+
+					b3Transform xfA2 = b3GetFinalSweepTransform( sweepA );
+					b3Transform xfB2 = b3GetFinalSweepTransform( sweepB );
+					if ( b3CheckFastEdges( xfA2, localEdgeA, xfB2, localEdgeB, axis ) )
+					{
+						// The cross product flips before the sweep ends. Freeze
+						// the axis as it is now.
+						fcn.type = b3_separationVertices;
+						fcn.witness1 = b3Normalize( axis );
+					}
+					else
+					{
+						// Safe, and it converges faster than a fixed axis.
+						fcn.type = b3_separationEdges;
+						fcn.witness1 = localEdgeA;
+						fcn.witness2 = localEdgeB;
+					}
+				}
+			}
+			else
+			{
+				// Vertex versus edge: no local feature to track, use the world
+				// axis.
+				fcn.type = b3_separationVertices;
+				fcn.witness1 = worldNormal;
+			}
+		}
+		break;
+
+		case 3:
+		{
+			if ( uniqueCountA == 3 )
+			{
+				b3Vec3 vA1 = proxyA->points[indexA[0]];
+				b3Vec3 vA2 = proxyA->points[indexA[1]];
+				b3Vec3 vA3 = proxyA->points[indexA[2]];
+				b3Vec3 localAxisA = b3Normalize( b3CrossDirection( b3Sub( vA2, vA1 ), b3Sub( vA3, vA1 ) ) );
+				b3Vec3 axisA = b3RotateVector( qA, localAxisA );
+
+				// The face centroid. Divide by three once, on the sum.
+				b3Vec3 sumA = b3Add( b3Add( vA1, vA2 ), vA3 );
+				b3Vec3 localPointA = b3MulCV( b3cFromFrac( 1, 3 ), sumA );
+
+				b3Vec3 localPointB = proxyB->points[indexB[0]];
+				b3Vec3 delta = b3Add( b3Sub( b3RotateVector( qB, localPointB ), b3RotateVector( qA, localPointA ) ), deltaP );
+
+				if ( b3Raw( b3Dot( delta, axisA ) ) < 0 )
+				{
+					// Point the axis from A to B.
+					localAxisA = b3Neg( localAxisA );
+				}
+
+				fcn.type = b3_separationFaceA;
+				fcn.witness1 = localAxisA;
+				fcn.witness2 = localPointA;
+			}
+			else if ( uniqueCountB == 3 )
+			{
+				b3Vec3 vB1 = proxyB->points[indexB[0]];
+				b3Vec3 vB2 = proxyB->points[indexB[1]];
+				b3Vec3 vB3 = proxyB->points[indexB[2]];
+				b3Vec3 localAxisB = b3Normalize( b3CrossDirection( b3Sub( vB2, vB1 ), b3Sub( vB3, vB1 ) ) );
+				b3Vec3 axisB = b3RotateVector( qB, localAxisB );
+
+				b3Vec3 localPointA = proxyA->points[indexA[0]];
+				b3Vec3 sumB = b3Add( b3Add( vB1, vB2 ), vB3 );
+				b3Vec3 localPointB = b3MulCV( b3cFromFrac( 1, 3 ), sumB );
+
+				b3Vec3 delta = b3Sub( b3Sub( b3RotateVector( qA, localPointA ), b3RotateVector( qB, localPointB ) ), deltaP );
+
+				if ( b3Raw( b3Dot( delta, axisB ) ) < 0 )
+				{
+					// Point the axis from B to A.
+					localAxisB = b3Neg( localAxisB );
+				}
+
+				fcn.type = b3_separationFaceB;
+				fcn.witness1 = localAxisB;
+				fcn.witness2 = localPointB;
+			}
+			else
+			{
+				B3_ASSERT( uniqueCountA == 2 && uniqueCountB == 2 );
+
+				if ( indexA[0] == indexA[1] )
+				{
+					// Make the first two indices the distinct pair.
+					indexA[1] = indexA[2];
+					B3_ASSERT( indexA[0] != indexA[1] );
+				}
+
+				b3Vec3 vA1 = proxyA->points[indexA[0]];
+				b3Vec3 localEdgeA = b3Normalize( b3Sub( proxyA->points[indexA[1]], vA1 ) );
+				b3Vec3 edgeA = b3RotateVector( qA, localEdgeA );
+
+				if ( indexB[0] == indexB[1] )
+				{
+					indexB[1] = indexB[2];
+					B3_ASSERT( indexB[0] != indexB[1] );
+				}
+
+				b3Vec3 vB1 = proxyB->points[indexB[0]];
+				b3Vec3 localEdgeB = b3Normalize( b3Sub( proxyB->points[indexB[1]], vB1 ) );
+				b3Vec3 edgeB = b3RotateVector( qB, localEdgeB );
+
+				int64_t wide[3];
+				b3CrossWide( wide, edgeA, edgeB );
+
+				// See B3_EDGE_TOLERANCE_SQ: upstream's second threshold here is
+				// ten times tighter and Q12 cannot honour it.
+				if ( b3WideLengthSquared( wide ) < B3_EDGE_TOLERANCE_SQ )
+				{
+					fcn.type = b3_separationVertices;
+					fcn.witness1 = worldNormal;
+				}
+				else
+				{
+					b3Vec3 axis = b3DirectionFromWide( wide[0], wide[1], wide[2] );
+
+					b3Vec3 delta = b3Add( b3Sub( b3RotateVector( qB, vB1 ), b3RotateVector( qA, vA1 ) ), deltaP );
+					if ( b3Raw( b3Dot( delta, axis ) ) < 0 )
+					{
+						axis = b3Neg( axis );
+						localEdgeB = b3Neg( localEdgeB );
+					}
+
+					b3Transform xfA2 = b3GetFinalSweepTransform( sweepA );
+					b3Transform xfB2 = b3GetFinalSweepTransform( sweepB );
+					if ( b3CheckFastEdges( xfA2, localEdgeA, xfB2, localEdgeB, axis ) )
+					{
+						fcn.type = b3_separationVertices;
+						fcn.witness1 = b3Normalize( axis );
+					}
+					else
+					{
+						fcn.type = b3_separationEdges;
+						fcn.witness1 = localEdgeA;
+						fcn.witness2 = localEdgeB;
+					}
+				}
+			}
+		}
+		break;
+
+		default:
+			B3_ASSERT( !"Should never get here!" );
+			break;
+	}
+
+	return fcn;
+}
+
+/// The deepest separation along the current axis at time `t`, and the witness
+/// pair that achieves it.
+static b3f b3FindMinSeparation( b3SeparationFunction* fcn, int* indexA, int* indexB, b3c t )
+{
+	b3Transform xfA = b3GetSweepTransform( &fcn->sweepA, t );
+	b3Transform xfB = b3GetSweepTransform( &fcn->sweepB, t );
+
+	switch ( fcn->type )
+	{
+		case b3_separationVertices:
+		{
+			b3Vec3 axis = fcn->witness1;
+
+			b3Vec3 localAxisA = b3InvRotateVector( xfA.q, axis );
+			b3Vec3 localAxisB = b3InvRotateVector( xfB.q, b3Neg( axis ) );
+
+			*indexA = b3GetPointSupport( fcn->proxyA->points, fcn->proxyA->count, localAxisA );
+			*indexB = b3GetPointSupport( fcn->proxyB->points, fcn->proxyB->count, localAxisB );
+
+			b3Vec3 deltaP = b3Sub( xfB.p, xfA.p );
+			b3Vec3 localPointA = fcn->proxyA->points[*indexA];
+			b3Vec3 localPointB = fcn->proxyB->points[*indexB];
+			b3Vec3 delta = b3Add( b3Sub( b3RotateVector( xfB.q, localPointB ), b3RotateVector( xfA.q, localPointA ) ), deltaP );
+			return b3Dot( delta, axis );
+		}
+
+		case b3_separationEdges:
+		{
+			b3Vec3 edgeA = b3RotateVector( xfA.q, fcn->witness1 );
+			b3Vec3 edgeB = b3RotateVector( xfB.q, fcn->witness2 );
+
+			// b3MakeSeparationFunction only chose this type after the wide
+			// cross cleared B3_EDGE_TOLERANCE_SQ, so the direction exists.
+			b3Vec3 axis = b3Normalize( b3CrossDirection( edgeA, edgeB ) );
+			B3_ASSERT( b3Raw( axis.x ) != 0 || b3Raw( axis.y ) != 0 || b3Raw( axis.z ) != 0 );
+
+			b3Vec3 axisA = b3InvRotateVector( xfA.q, axis );
+			*indexA = b3GetPointSupport( fcn->proxyA->points, fcn->proxyA->count, axisA );
+
+			b3Vec3 axisB = b3InvRotateVector( xfB.q, axis );
+			*indexB = b3GetPointSupport( fcn->proxyB->points, fcn->proxyB->count, b3Neg( axisB ) );
+
+			b3Vec3 deltaP = b3Sub( xfB.p, xfA.p );
+			b3Vec3 localPointA = fcn->proxyA->points[*indexA];
+			b3Vec3 localPointB = fcn->proxyB->points[*indexB];
+			b3Vec3 delta = b3Add( b3Sub( b3RotateVector( xfB.q, localPointB ), b3RotateVector( xfA.q, localPointA ) ), deltaP );
+
+			return b3Dot( delta, axis );
+		}
+
+		case b3_separationFaceA:
+		{
+			b3Vec3 normal = b3RotateVector( xfA.q, fcn->witness1 );
+			*indexA = -1;
+			b3Vec3 pointA = b3TransformPoint( xfA, fcn->witness2 );
+
+			b3Vec3 axisB = b3InvRotateVector( xfB.q, normal );
+			*indexB = b3GetPointSupport( fcn->proxyB->points, fcn->proxyB->count, b3Neg( axisB ) );
+			b3Vec3 pointB = b3TransformPoint( xfB, fcn->proxyB->points[*indexB] );
+
+			return b3Dot( b3Sub( pointB, pointA ), normal );
+		}
+
+		case b3_separationFaceB:
+		{
+			b3Vec3 normal = b3RotateVector( xfB.q, fcn->witness1 );
+
+			b3Vec3 axisA = b3InvRotateVector( xfA.q, normal );
+			*indexA = b3GetPointSupport( fcn->proxyA->points, fcn->proxyA->count, b3Neg( axisA ) );
+			b3Vec3 pointA = b3TransformPoint( xfA, fcn->proxyA->points[*indexA] );
+
+			*indexB = -1;
+			b3Vec3 pointB = b3TransformPoint( xfB, fcn->witness2 );
+
+			return b3Dot( b3Sub( pointA, pointB ), normal );
+		}
+
+		default:
+			B3_ASSERT( !"Should never get here!" );
+			break;
+	}
+
+	return b3f_zero;
+}
+
+/// The separation of one *fixed* witness pair at time `beta`.
+///
+/// This is the function the root finder actually brackets. b3FindMinSeparation
+/// re-picks the witnesses and so is not continuous in t; this one holds them
+/// still, which is what makes a root meaningful.
+static b3f b3EvaluateSeparation( b3SeparationFunction* fcn, int index1, int index2, b3c beta )
+{
+	b3Transform transform1 = b3GetSweepTransform( &fcn->sweepA, beta );
+	b3Transform transform2 = b3GetSweepTransform( &fcn->sweepB, beta );
+
+	switch ( fcn->type )
+	{
+		case b3_separationVertices:
+		{
+			b3Vec3 axis = fcn->witness1;
+
+			b3Vec3 point1 = b3TransformPoint( transform1, fcn->proxyA->points[index1] );
+			b3Vec3 point2 = b3TransformPoint( transform2, fcn->proxyB->points[index2] );
+
+			return b3Dot( b3Sub( point2, point1 ), axis );
+		}
+
+		case b3_separationEdges:
+		{
+			b3Vec3 edge1 = b3RotateVector( transform1.q, fcn->witness1 );
+			b3Vec3 edge2 = b3RotateVector( transform2.q, fcn->witness2 );
+			b3Vec3 axis = b3Normalize( b3CrossDirection( edge1, edge2 ) );
+
+			b3Vec3 point1 = b3TransformPoint( transform1, fcn->proxyA->points[index1] );
+			b3Vec3 point2 = b3TransformPoint( transform2, fcn->proxyB->points[index2] );
+
+			return b3Dot( b3Sub( point2, point1 ), axis );
+		}
+
+		case b3_separationFaceA:
+		{
+			b3Vec3 axis = b3RotateVector( transform1.q, fcn->witness1 );
+
+			b3Vec3 point1 = b3TransformPoint( transform1, fcn->witness2 );
+			b3Vec3 point2 = b3TransformPoint( transform2, fcn->proxyB->points[index2] );
+
+			return b3Dot( b3Sub( point2, point1 ), axis );
+		}
+
+		case b3_separationFaceB:
+		{
+			b3Vec3 axis = b3RotateVector( transform2.q, fcn->witness1 );
+
+			b3Vec3 point1 = b3TransformPoint( transform1, fcn->proxyA->points[index1] );
+			b3Vec3 point2 = b3TransformPoint( transform2, fcn->witness2 );
+
+			return b3Dot( b3Sub( point1, point2 ), axis );
+		}
+
+		default:
+			B3_ASSERT( !"Should never get here!" );
+			break;
+	}
+
+	return b3f_zero;
+}
+
+/// Freeze an edge-edge axis at the pose it has at `beta`.
+///
+/// The escape hatch for the one case the root finder cannot converge on: an
+/// edge-edge axis that keeps moving under it. Evaluating the axis once and
+/// holding it turns the function into the vertex form, which is monotone
+/// enough to bracket.
+static void b3ForceFixedAxis( b3SeparationFunction* fcn, b3c beta )
+{
+	B3_ASSERT( fcn->type == b3_separationEdges );
+
+	b3Transform transform1 = b3GetSweepTransform( &fcn->sweepA, beta );
+	b3Transform transform2 = b3GetSweepTransform( &fcn->sweepB, beta );
+
+	b3Vec3 edge1 = b3RotateVector( transform1.q, fcn->witness1 );
+	b3Vec3 edge2 = b3RotateVector( transform2.q, fcn->witness2 );
+	b3Vec3 axis = b3Normalize( b3CrossDirection( edge1, edge2 ) );
+
+	fcn->type = b3_separationVertices;
+	fcn->witness1 = axis;
+	fcn->witness2 = b3Vec3_zero;
+}
+
+/// The smallest sweep fraction that still moves a witness point by a Q12
+/// quantum.
+///
+/// This is the port's, and it is what makes the root finder terminate for a
+/// stated reason instead of by exhausting its iteration count. Bisection on a
+/// Q30 bracket can halve about thirty times before the two endpoints are the
+/// same number, but the separations being compared are Q12: long before that,
+/// every t in the bracket gives the *same* separation, and each further
+/// iteration re-evaluates an unchanged function and re-takes the same branch.
+///
+/// The bound is the motion of the furthest point of either proxy across the
+/// whole sweep, measured as a Chebyshev norm because this is a floor and not a
+/// measurement -- underestimating motion only permits a few more iterations,
+/// while overestimating it would stop the search early.
+///
+///   translation   the centre displacement, per component
+///   rotation      extent * |dq|, since rotating a quaternion by dq moves a
+///                 point at radius `extent` by at most about 2*|dq|*extent
+///
+/// Returns one raw Q30 unit -- effectively no floor, leaving the iteration cap
+/// in charge -- when nothing moves at all.
+static b3c b3SweepMotionFloor( const b3ShapeProxy* proxy, const b3Sweep* sweep )
+{
+	int32_t travel = 0;
+
+	b3Vec3 delta = b3Sub( sweep->c2, sweep->c1 );
+	travel = b3MaxInt( travel, b3Raw( b3AbsF( delta.x ) ) );
+	travel = b3MaxInt( travel, b3Raw( b3AbsF( delta.y ) ) );
+	travel = b3MaxInt( travel, b3Raw( b3AbsF( delta.z ) ) );
+
+	// How far from the centre of rotation the geometry reaches.
+	int32_t extent = b3Raw( proxy->radius );
+	for ( int i = 0; i < proxy->count; ++i )
+	{
+		b3Vec3 p = b3Sub( proxy->points[i], sweep->localCenter );
+		extent = b3MaxInt( extent, b3Raw( b3AbsF( p.x ) ) + b3Raw( proxy->radius ) );
+		extent = b3MaxInt( extent, b3Raw( b3AbsF( p.y ) ) + b3Raw( proxy->radius ) );
+		extent = b3MaxInt( extent, b3Raw( b3AbsF( p.z ) ) + b3Raw( proxy->radius ) );
+	}
+
+	// |dq| at Q30, taken per component like the translation above. The factor
+	// of two that turns a quaternion difference into an arc length is folded
+	// in by not halving anywhere.
+	int32_t dq = 0;
+	dq = b3MaxInt( dq, b3Raw( b3AbsN( b3SubN( sweep->q2.v.x, sweep->q1.v.x ) ) ) );
+	dq = b3MaxInt( dq, b3Raw( b3AbsN( b3SubN( sweep->q2.v.y, sweep->q1.v.y ) ) ) );
+	dq = b3MaxInt( dq, b3Raw( b3AbsN( b3SubN( sweep->q2.v.z, sweep->q1.v.z ) ) ) );
+
+	// extent (Q12) * dq (Q30) -> Q12, exactly, in int64.
+	int64_t arc = ( (int64_t)extent * dq ) >> B3_N_SHIFT;
+	int64_t motion = (int64_t)travel + arc;
+
+	if ( motion <= 0 )
+	{
+		return b3Makeb3c( 1 );
+	}
+
+	// One raw Q12 quantum as a fraction of that motion.
+	b3c floorStep = b3DivWideToC( 1, motion );
+	return b3Raw( floorStep ) > 0 ? floorStep : b3Makeb3c( 1 );
+}
+
+b3TOIOutput b3TimeOfImpact( const b3TOIInput* input )
+{
+	b3TOIOutput output = { 0 };
+
+	// Invalid on purpose, so the exit asserts can tell that a branch set them.
+	output.state = b3_toiStateUnknown;
+	output.fraction = b3Makeb3c( -1 );
+
+	b3Sweep sweepA = input->sweepA;
+	b3Sweep sweepB = input->sweepB;
+
+	// Shift to the origin. Upstream does this for float round-off; in Q12 it
+	// buys range as well, and that is the binding constraint here. Afterwards
+	// every coordinate the separation function multiplies is an extent plus a
+	// sweep length rather than a world position, and those products are
+	// quadratic -- the same reason b3ShapeCastMesh works in vertex1-relative
+	// coordinates.
+	b3Vec3 origin = sweepA.c1;
+	sweepA.c1 = b3Vec3_zero;
+	sweepA.c2 = b3Sub( sweepA.c2, origin );
+	sweepB.c1 = b3Sub( sweepB.c1, origin );
+	sweepB.c2 = b3Sub( sweepB.c2, origin );
+
+	b3ShapeProxy proxyA = input->proxyA;
+	b3ShapeProxy proxyB = input->proxyB;
+
+	int maxPushBackIterations = proxyA.count + proxyB.count;
+	b3c tMax = input->maxFraction;
+
+	// Identical to b3ShapeCast above, and for the same reasons: the target is
+	// the touching distance pulled in by a slop, and a quarter of the slop is
+	// five raw quanta -- small, but never sub-quantum, which is the property
+	// that matters.
+	b3f linearSlop = B3_LINEAR_SLOP;
+	b3f totalRadius = b3AddF( proxyA.radius, proxyB.radius );
+	b3f target = b3MaxF( linearSlop, b3SubF( totalRadius, linearSlop ) );
+	b3f tolerance = b3Makeb3f( b3Raw( linearSlop ) / 4 );
+	B3_ASSERT( b3Raw( target ) > b3Raw( tolerance ) );
+
+	// The bracket floor. Taken over both sweeps, since either shape moving is
+	// enough to change the separation.
+	b3c minStep = b3MinC( b3SweepMotionFloor( &proxyA, &sweepA ), b3SweepMotionFloor( &proxyB, &sweepB ) );
+
+	b3c t1 = b3c_zero;
+	const int maxIterations = 25;
+	int distanceIterations = 0;
+
+	b3SimplexCache cache = { 0 };
+	b3DistanceInput distanceInput = { 0 };
+	distanceInput.proxyA = proxyA;
+	distanceInput.proxyB = proxyB;
+	distanceInput.useRadii = false;
+
+	// The outer loop derives a new separating axis each time it advances t1,
+	// and stops when it stops making progress.
+	for ( ;; )
+	{
+		b3Transform xfA = b3GetSweepTransform( &sweepA, t1 );
+		b3Transform xfB = b3GetSweepTransform( &sweepB, t1 );
+		distanceInput.transform = b3InvMulTransforms( xfA, xfB );
+		b3DistanceOutput distanceOutput = b3ShapeDistance( &distanceInput, &cache, NULL, 0 );
+		output.distance = distanceOutput.distance;
+
+		// The distance query runs in frame A, so its witness data comes back
+		// in frame A and goes to the shifted world through xfA.
+		b3Vec3 worldNormal = b3RotateVector( xfA.q, distanceOutput.normal );
+		b3Vec3 worldPointA = b3TransformPoint( xfA, distanceOutput.pointA );
+		b3Vec3 worldPointB = b3TransformPoint( xfA, distanceOutput.pointB );
+
+		output.distanceIterations += 1;
+		distanceIterations += 1;
+
+		if ( b3Raw( distanceOutput.distance ) <= 0 )
+		{
+			// Already overlapped. Continuous collision has nothing to say.
+			output.state = b3_toiStateOverlapped;
+			output.fraction = b3c_zero;
+			break;
+		}
+
+		if ( b3Raw( distanceOutput.distance ) <= b3Raw( b3AddF( target, tolerance ) ) )
+		{
+			output.state = b3_toiStateHit;
+
+			b3Vec3 pA = b3MulAdd( worldPointA, proxyA.radius, worldNormal );
+			b3Vec3 pB = b3MulSub( worldPointB, proxyB.radius, worldNormal );
+			output.point = b3Add( b3Lerp( pA, pB, b3cFromFrac( 1, 2 ) ), origin );
+			output.normal = worldNormal;
+			output.fraction = t1;
+			break;
+		}
+
+		if ( distanceIterations == maxIterations )
+		{
+			// Progress too slow -- a capsule rotating around a triangle vertex
+			// is the usual cause. t1 is the last time known separated, so
+			// stopping there is conservative rather than wrong.
+			output.state = b3_toiStateFailed;
+			output.fraction = t1;
+
+			b3Vec3 pA = b3MulAdd( worldPointA, proxyA.radius, worldNormal );
+			b3Vec3 pB = b3MulSub( worldPointB, proxyB.radius, worldNormal );
+			output.point = b3Add( b3Lerp( pA, pB, b3cFromFrac( 1, 2 ) ), origin );
+			output.normal = worldNormal;
+			break;
+		}
+
+		b3SeparationFunction function =
+			b3MakeSeparationFunction( cache, &proxyA, &sweepA, &proxyB, &sweepB, worldNormal, t1 );
+
+		// Resolve the deepest point, one witness pair at a time.
+		bool done = false;
+		b3c t2 = tMax;
+		int pushBackIterations = 0;
+		for ( ;; )
+		{
+			// Seeded with the sentinel the face cases use for "this side is
+			// the plane, not a point", so the unreachable default in
+			// b3FindMinSeparation cannot hand an index to a proxy lookup.
+			int indexA = B3_NULL_INDEX;
+			int indexB = B3_NULL_INDEX;
+			b3f s2 = b3FindMinSeparation( &function, &indexA, &indexB, t2 );
+
+			if ( b3Raw( b3SubF( s2, target ) ) > b3Raw( tolerance ) )
+			{
+				// Still apart at the end of the sweep.
+				output.state = b3_toiStateSeparated;
+				output.fraction = input->maxFraction;
+				done = true;
+				break;
+			}
+
+			if ( b3Raw( s2 ) >= b3Raw( b3SubF( target, tolerance ) ) )
+			{
+				// Close enough at t2: advance and re-derive the axis.
+				t1 = t2;
+				break;
+			}
+
+			b3f s1 = b3EvaluateSeparation( &function, indexA, indexB, t1 );
+
+			if ( b3Raw( s1 ) < b3Raw( b3SubF( target, tolerance ) ) )
+			{
+				// The bracket is already violated at t1. Only reachable if the
+				// root finder below ran out of iterations on a previous pass.
+				output.state = b3_toiStateFailed;
+				output.fraction = t1;
+				done = true;
+				break;
+			}
+
+			if ( b3Raw( s1 ) <= b3Raw( b3AddF( target, tolerance ) ) )
+			{
+				// t1 is the time of impact, and it may well be zero.
+				output.state = b3_toiStateHit;
+				output.fraction = t1;
+				done = true;
+				break;
+			}
+
+			// Root of f(t) = separation(t) - target, on [t1, t2].
+			int rootIterationCount = 0;
+			const int maxRootIterations = 50;
+			b3c a1 = t1;
+			b3c a2 = t2;
+			for ( ;; )
+			{
+				b3c t;
+				if ( rootIterationCount & 1 )
+				{
+					// False position, for convergence. The quotient is a ratio
+					// of two Q12 lengths, so it is dimensionless and lands in
+					// Q30 -- and b3DivWideToC's saturation is unreachable here
+					// rather than merely unlikely: the bracket invariant is
+					// s1 > target > s2, so numerator and denominator are both
+					// negative and |num| <= |den|, putting the quotient in
+					// [0, 1] by construction.
+					b3c fraction = b3DivWideToC( b3Raw( b3SubF( target, s1 ) ), b3Raw( b3SubF( s2, s1 ) ) );
+					t = b3AddC( a1, b3MulCC( b3SubC( a2, a1 ), fraction ) );
+				}
+				else
+				{
+					// Bisection, for guaranteed progress. Exact in Q30: a
+					// halving is a shift, and it rounds nothing.
+					t = b3Makeb3c( ( b3Raw( a1 ) + b3Raw( a2 ) ) >> 1 );
+				}
+
+				output.rootIterations += 1;
+				rootIterationCount += 1;
+
+				b3f s = b3EvaluateSeparation( &function, indexA, indexB, t );
+
+				if ( b3Raw( b3AbsF( b3SubF( s, target ) ) ) <= b3Raw( tolerance ) )
+				{
+					// t2 carries a tentative t1 back out.
+					t2 = t;
+					break;
+				}
+
+				// Keep bracketing the root.
+				if ( b3Raw( s ) > b3Raw( target ) )
+				{
+					a1 = t;
+					s1 = s;
+				}
+				else
+				{
+					a2 = t;
+					s2 = s;
+				}
+
+				if ( b3Raw( b3SubC( a2, a1 ) ) <= b3Raw( minStep ) )
+				{
+					// The bracket is below the point where the Q12 separation
+					// can tell its two ends apart, so there is nothing left to
+					// find. Take a2 -- the end that is *not* known separated --
+					// which stops the body at or before the true impact.
+					t2 = a2;
+					break;
+				}
+
+				if ( rootIterationCount == maxRootIterations )
+				{
+					break;
+				}
+			}
+
+			// One failing edge case gets a second chance on a frozen axis.
+			if ( rootIterationCount == maxRootIterations - 1 && function.type == b3_separationEdges )
+			{
+				rootIterationCount = 0;
+				t2 = input->maxFraction;
+				b3ForceFixedAxis( &function, t1 );
+				B3_ASSERT( function.type != b3_separationEdges );
+			}
+
+			output.pushBackIterations += 1;
+			pushBackIterations += 1;
+
+			if ( pushBackIterations == maxPushBackIterations )
+			{
+				break;
+			}
+		}
+
+		if ( done )
+		{
+			b3Vec3 pA = b3MulAdd( worldPointA, proxyA.radius, worldNormal );
+			b3Vec3 pB = b3MulSub( worldPointB, proxyB.radius, worldNormal );
+			output.point = b3Add( b3Lerp( pA, pB, b3cFromFrac( 1, 2 ) ), origin );
+			output.normal = worldNormal;
+			break;
+		}
+	}
+
+	// Every exit above sets both.
+	B3_ASSERT( output.state != b3_toiStateUnknown );
+	B3_ASSERT( b3Raw( output.fraction ) >= 0 );
+
 	return output;
 }

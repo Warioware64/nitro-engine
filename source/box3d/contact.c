@@ -246,6 +246,10 @@ void b3CreateContact( b3World* world, b3Shape* shapeA, b3Shape* shapeB, int chil
 		contact->flags |= b3_contactStaticFlag;
 	}
 
+	// Unreachable rather than merely untrue: b3PairQueryCallback drops any pair
+	// with a sensor in it before a contact is ever asked for, which is what
+	// keeps the rest of this file, the contact graph and the solver free of
+	// sensor cases.
 	B3_ASSERT( shapeA->sensorIndex == B3_NULL_INDEX && shapeB->sensorIndex == B3_NULL_INDEX );
 
 	if ( ( shapeA->flags & b3_enableContactEvents ) || ( shapeB->flags & b3_enableContactEvents ) )

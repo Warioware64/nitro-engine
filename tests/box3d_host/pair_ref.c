@@ -118,6 +118,42 @@ static void refShapeCast( const pdProxy* a, const pdProxy* b, const pdTransform*
 	out->normal = fromV( o.normal );
 }
 
+static b3Sweep toSweep( const pdSweep* s )
+{
+	b3Sweep out;
+	out.localCenter = toV( s->localCenter );
+	out.c1 = toV( s->c1 );
+	out.c2 = toV( s->c2 );
+	out.q1 = ( b3Quat ){ { (float)s->q1x, (float)s->q1y, (float)s->q1z }, (float)s->q1w };
+	out.q2 = ( b3Quat ){ { (float)s->q2x, (float)s->q2y, (float)s->q2z }, (float)s->q2w };
+	return out;
+}
+
+static void refTimeOfImpact( const pdProxy* a, const pdProxy* b, const pdSweep* sweepA, const pdSweep* sweepB,
+							 double maxFraction, pdTOIOut* out )
+{
+	b3Vec3 sa[PD_MAX_POINTS], sb[PD_MAX_POINTS];
+
+	b3TOIInput input;
+	input.proxyA = toProxy( a, sa );
+	input.proxyB = toProxy( b, sb );
+	input.sweepA = toSweep( sweepA );
+	input.sweepB = toSweep( sweepB );
+	input.maxFraction = (float)maxFraction;
+
+	b3TOIOutput o = b3TimeOfImpact( &input );
+
+	memset( out, 0, sizeof( *out ) );
+	out->state = (int)o.state;
+	out->fraction = o.fraction;
+	out->distance = o.distance;
+	out->point = fromV( o.point );
+	out->normal = fromV( o.normal );
+	out->distanceIterations = o.distanceIterations;
+	out->pushBackIterations = o.pushBackIterations;
+	out->rootIterations = o.rootIterations;
+}
+
 // Both libraries pack a feature pair into a warm-starting id the same way;
 // spelling it out here avoids pulling either one's internal manifold.h in.
 static unsigned packFeatureId( b3FeaturePair pair )
@@ -1103,6 +1139,55 @@ static int refCompareSceneContacts( const void* a, const void* b )
 	return 0;
 }
 
+/// Sensor transitions in a canonical order, so the comparison is of the *set*
+/// each library produced rather than of its publishing order.
+static int refCompareSensorEvents( const void* a, const void* b )
+{
+	const pdSensorEvent* ea = (const pdSensorEvent*)a;
+	const pdSensorEvent* eb = (const pdSensorEvent*)b;
+	if ( ea->sensorShape != eb->sensorShape )
+	{
+		return ea->sensorShape < eb->sensorShape ? -1 : 1;
+	}
+	if ( ea->visitorShape != eb->visitorShape )
+	{
+		return ea->visitorShape < eb->visitorShape ? -1 : 1;
+	}
+	return 0;
+}
+
+/// Append this step's sensor transitions to the pass.
+///
+/// Called after *every* step of a pass rather than once at the end, and that is
+/// not a detail: both libraries clear the begin-event array at the top of each
+/// step, so a twenty-step pass read once would report only whatever happened on
+/// the twentieth -- which for a visitor crossing a trigger volume is nothing at
+/// all. The first version of the sensors scenario did exactly that and showed
+/// occupancy changing with zero events to explain it.
+///
+/// The contact counts alongside keep the read-once behaviour every scenario
+/// before this one was written against; only the sensor arrays accumulate.
+static void refCollectSensorEvents( b3WorldId worldId, const b3ShapeId* shapeIds, int shapeCount, pdScenePassOut* po )
+{
+	b3SensorEvents events = b3World_GetSensorEvents( worldId );
+
+	for ( int i = 0; i < events.beginCount && po->sensorBeginCount < PD_MAX_SCENE_SENSOR_EVENTS; ++i )
+	{
+		pdSensorEvent* se = po->sensorBegins + po->sensorBeginCount;
+		po->sensorBeginCount += 1;
+		se->sensorShape = refSceneShapeIndex( shapeIds, shapeCount, events.beginEvents[i].sensorShapeId.index1 - 1 );
+		se->visitorShape = refSceneShapeIndex( shapeIds, shapeCount, events.beginEvents[i].visitorShapeId.index1 - 1 );
+	}
+
+	for ( int i = 0; i < events.endCount && po->sensorEndCount < PD_MAX_SCENE_SENSOR_EVENTS; ++i )
+	{
+		pdSensorEvent* se = po->sensorEnds + po->sensorEndCount;
+		po->sensorEndCount += 1;
+		se->sensorShape = refSceneShapeIndex( shapeIds, shapeCount, events.endEvents[i].sensorShapeId.index1 - 1 );
+		se->visitorShape = refSceneShapeIndex( shapeIds, shapeCount, events.endEvents[i].visitorShapeId.index1 - 1 );
+	}
+}
+
 static void refWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hullCount, const pdMesh* meshes, int meshCount,
 						   pdSceneOut* out )
 {
@@ -1140,6 +1225,8 @@ static void refWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hul
 			b3ShapeDef shapeDef = b3DefaultShapeDef();
 			shapeDef.density = (float)s->density;
 			shapeDef.enableContactEvents = true;
+			shapeDef.isSensor = s->isSensor;
+			shapeDef.enableSensorEvents = s->enableSensorEvents;
 
 			switch ( s->kind )
 			{
@@ -1430,19 +1517,21 @@ static void refWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hul
 		// argument at all -- dt is B3_NEA_STEP_HZ, fixed at compile time -- so
 		// this literal is the one place the two sides' notion of a step has to
 		// be kept in agreement by hand.
+		pdScenePassOut* po = out->passes + p;
+
 		if ( pass->stepCount <= 0 )
 		{
 			b3World_Step( worldId, 0.0f, 1 );
+			refCollectSensorEvents( worldId, shapeIds, shapeCount, po );
 		}
 		else
 		{
 			for ( int s = 0; s < pass->stepCount; ++s )
 			{
 				b3World_Step( worldId, 1.0f / 60.0f, subStepCount );
+				refCollectSensorEvents( worldId, shapeIds, shapeCount, po );
 			}
 		}
-
-		pdScenePassOut* po = out->passes + p;
 
 		for ( int i = 0; i < world->contacts.count && po->contactCount < PD_MAX_SCENE_CONTACTS; ++i )
 		{
@@ -1481,6 +1570,14 @@ static void refWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hul
 		b3ContactEvents events = b3World_GetContactEvents( worldId );
 		po->beginCount = events.beginCount;
 		po->endCount = events.endCount;
+
+		qsort( po->sensorBegins, (size_t)po->sensorBeginCount, sizeof( pdSensorEvent ), refCompareSensorEvents );
+		qsort( po->sensorEnds, (size_t)po->sensorEndCount, sizeof( pdSensorEvent ), refCompareSensorEvents );
+
+		for ( int i = 0; i < shapeCount; ++i )
+		{
+			po->sensorOccupancy[i] = b3Shape_IsSensor( shapeIds[i] ) ? b3Shape_GetSensorCapacity( shapeIds[i] ) : -1;
+		}
 
 		po->bodyCount = desc->bodyCount < PD_MAX_SCENE_BODIES ? desc->bodyCount : PD_MAX_SCENE_BODIES;
 		for ( int b = 0; b < po->bodyCount; ++b )
@@ -1552,6 +1649,7 @@ const pdBackend pdRefBackend = {
 	.name = "float",
 	.distance = refDistance,
 	.shapeCast = refShapeCast,
+	.timeOfImpact = refTimeOfImpact,
 	.sphereSphere = refSphereSphere,
 	.capsuleSphere = refCapsuleSphere,
 	.capsuleCapsule = refCapsuleCapsule,

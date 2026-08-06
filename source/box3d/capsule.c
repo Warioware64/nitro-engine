@@ -7,8 +7,9 @@
 //
 // This file is part of Nitro Engine Advanced
 
-// NOTE: b3CollideMoverAndCapsule is not converted. It belongs to the character
-// controller, which is Phase 7, and depends on nothing else in this file.
+// NOTE: b3CollideMoverAndCapsule arrived with the character controller in
+// Phase 7 Stage 4. It sits at the end of this file and depends on nothing else
+// in it -- b3SegmentDistance is math_fixed's, not the capsule's.
 
 #include "box3d/collision.h"
 #include "box3d/constants.h"
@@ -455,6 +456,38 @@ b3CastOutput b3RayCastCapsule( const b3Capsule* shape, const b3RayCastInput* inp
 
 	output.hit = true;
 	return output;
+}
+
+int b3CollideMoverAndCapsule( b3PlaneResult* result, const b3Capsule* shape, const b3Capsule* mover )
+{
+	b3f totalRadius = b3AddF( mover->radius, shape->radius );
+
+	b3SegmentDistanceResult approach =
+		b3SegmentDistance( shape->center1, shape->center2, mover->center1, mover->center2 );
+
+	// The normal points from the shape toward the mover.
+	b3f distance;
+	b3Vec3 normal = b3GetLengthAndNormalize( &distance, b3Sub( approach.point2, approach.point1 ) );
+
+	if ( b3Raw( distance ) > b3Raw( totalRadius ) )
+	{
+		return 0;
+	}
+
+	if ( b3Raw( distance ) < b3Raw( B3_LINEAR_SLOP ) )
+	{
+		// Deep overlap: the core segments intersect, so pick an arbitrary
+		// direction perpendicular to the mover axis. b3Perp and not
+		// b3ArbitraryPerp, for the reason given in b3CollideMoverAndSphere.
+		b3f moverLength;
+		b3Vec3 moverAxis = b3GetLengthAndNormalize( &moverLength, b3Sub( mover->center2, mover->center1 ) );
+		normal = b3Raw( moverLength ) > b3Raw( B3_LINEAR_SLOP ) ? b3Perp( moverAxis ) : b3Vec3_axisY;
+		distance = b3f_zero;
+	}
+
+	b3Plane plane = { normal, b3SubF( totalRadius, distance ) };
+	*result = ( b3PlaneResult ){ plane, approach.point1 };
+	return 1;
 }
 
 b3CastOutput b3ShapeCastCapsule( const b3Capsule* capsule, const b3ShapeCastInput* input )

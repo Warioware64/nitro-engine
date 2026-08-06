@@ -61,7 +61,7 @@ endif
 
 # Sources of the port that have been converted so far. Files are added here as
 # each phase lands, so this list doubles as a record of conversion progress.
-PORT_OBJS := b3fixed.o b3hot.o core.o bitset.o id_pool.o table.o arena_allocator.o block_allocator.o aabb.o math_fixed.o sphere.o capsule.o distance.o manifold.o convex_manifold.o dynamic_tree.o broad_phase.o hull.o types.o shape.o body.o joint.o distance_joint.o revolute_joint.o spherical_joint.o weld_joint.o motor_joint.o prismatic_joint.o parallel_joint.o wheel_joint.o contact.o mesh.o mesh_contact.o triangle_manifold.o solver_set.o island.o constraint_graph.o physics_world.o solver.o contact_solver.o
+PORT_OBJS := b3fixed.o b3hot.o core.o bitset.o id_pool.o table.o arena_allocator.o block_allocator.o aabb.o math_fixed.o sphere.o capsule.o distance.o manifold.o convex_manifold.o dynamic_tree.o broad_phase.o hull.o types.o shape.o body.o joint.o distance_joint.o revolute_joint.o spherical_joint.o weld_joint.o motor_joint.o prismatic_joint.o parallel_joint.o wheel_joint.o contact.o mesh.o mesh_contact.o triangle_manifold.o solver_set.o island.o constraint_graph.o physics_world.o solver.o contact_solver.o sensor.o mover.o
 
 TESTS     := test_fixed test_math test_support test_collision test_world
 
@@ -280,7 +280,14 @@ BAKEREF_CFLAGS := -std=gnu11 -g -O2 -Wall -Wextra -Wno-unused-parameter \
 
 # b3IsValidMesh pulls in the rest of mesh.c, which is why mesh.o is here and
 # dynamic_tree.o is not.
-BAKEREF_PORT_OBJS := b3fixed.o b3hot.o core.o aabb.o math_fixed.o mesh.o
+#
+# distance.o joined in Phase 7, when mesh.c gained its query half: b3OverlapMesh
+# and b3ShapeCastMesh call b3ShapeDistance and b3ShapeCast, and the two proxy
+# helpers they also need moved out of shape.c and into distance.c for exactly
+# this reason. distance.o needs nothing outside the objects already listed here;
+# shape.o would have brought the body list, the broad phase and the contact
+# graph into a command-line mesh baker.
+BAKEREF_PORT_OBJS := b3fixed.o b3hot.o core.o aabb.o math_fixed.o mesh.o distance.o
 BAKEREF_OBJS := bakeref_bake_ref.o bakeref_mesh_bake.o $(addprefix bakeref_,$(BAKEREF_PORT_OBJS))
 
 bakeref_%.o: %.c

@@ -1165,7 +1165,8 @@ static inline b3f b3DivFFCollect( void )
 ///
 /// Routed through the 64-bit hardware path so that the intermediate a<<12
 /// cannot overflow -- which is exactly the failure NEA_Vec3LengthSq in
-/// NEACollision.h has today for large vectors.
+/// NEACollision.h had for large vectors, until Phase 7 gave it the same
+/// treatment.
 static inline b3f b3SqrtF( b3f a )
 {
 	if ( b3Raw( a ) <= 0 )

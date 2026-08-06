@@ -591,6 +591,338 @@ void NEA_Phys3DBodySetAwake(NEA_Phys3DBody *body, bool awake);
 int NEA_Phys3DWorldGetAwakeBodyCount(void);
 
 // =========================================================================
+// Queries
+// =========================================================================
+//
+// Two of Box3D's five world queries, wrapped in this module's conventions:
+// f32 arguments, an `I` suffix and a float macro, and the world implied rather
+// than passed. These are the two a game reaches for -- "what am I pointing at"
+// and "what is near me".
+//
+// The other three (b3World_CastRay with a callback, b3World_OverlapShape,
+// b3World_CastShape) are deliberately *not* wrapped. They take a b3-typed
+// callback whose fixed-point arguments a wrapper cannot usefully convert
+// without also inventing a second callback type, and a project that needs them
+// is already including box3d.h for b3CreateWheelJoint and friends -- every
+// physics example here does. Wrapping them would add surface without removing
+// a dependency.
+
+/// What a ray hit. Distances and points are f32, as everything else here.
+typedef struct
+{
+    /// Did the ray hit anything?
+    bool hit;
+
+    /// The world point of the hit (f32).
+    int32_t x, y, z;
+
+    /// The unit surface normal there (f32).
+    int32_t nx, ny, nz;
+
+    /// How far along the ray, as an f32 fraction in [0, 1]. Multiply by the
+    /// ray's own length for a distance.
+    int32_t fraction;
+
+    /// The user material id at the hit point, from the shape's material.
+    uint64_t userMaterialId;
+
+    /// Which triangle, for a mesh shape. -1 for every other shape type.
+    int triangleIndex;
+
+    /// BVH nodes and leaves the query touched. Diagnostic: on a DS this is
+    /// what tells you whether a per-frame ray is affordable.
+    int nodeVisits, leafVisits;
+} NEA_Phys3DRayHit;
+
+/// Cast a ray from `origin` along `direction` and report the nearest hit.
+///
+/// `direction` is **not** normalized: its length is the length of the ray, and
+/// `out->fraction` is relative to it. Firing (0, -100, 0) from the camera and
+/// reading back a fraction of 0.03 means the ground is 3 units down.
+///
+/// Costs one BVH descent per body type. Safe to call every frame; check
+/// `out->nodeVisits` if you want to know what it actually cost.
+///
+/// @return true if something was hit, which is also `out->hit`.
+bool NEA_Phys3DRayCastI(int32_t ox, int32_t oy, int32_t oz,
+                        int32_t dx, int32_t dy, int32_t dz,
+                        NEA_Phys3DRayHit *out);
+
+/// Cast a ray (float).
+#define NEA_Phys3DRayCast(ox, oy, oz, dx, dy, dz, out) \
+    NEA_Phys3DRayCastI(floattof32(ox), floattof32(oy), floattof32(oz), \
+                       floattof32(dx), floattof32(dy), floattof32(dz), out)
+
+/// Called once per body found by NEA_Phys3DOverlapBoxI.
+///
+/// Return false to stop the query early.
+typedef bool (*NEA_Phys3DOverlapFn)(NEA_Phys3DBody *body, void *context);
+
+/// Visit every body with a shape whose bounds overlap the given box.
+///
+/// Bounds, not exact shapes -- this is the broad-phase answer, so it can report
+/// a body whose shape does not quite reach into the box. That is the right
+/// trade for the things a box query is for (what is near the player, what is in
+/// the blast radius); use `b3World_OverlapShape` directly when it is not.
+///
+/// A body with several shapes in the box is reported once per shape.
+///
+/// @return the number of times the callback was invoked.
+int NEA_Phys3DOverlapBoxI(int32_t lx, int32_t ly, int32_t lz,
+                          int32_t ux, int32_t uy, int32_t uz,
+                          NEA_Phys3DOverlapFn fn, void *context);
+
+/// Overlap a box (float).
+#define NEA_Phys3DOverlapBox(lx, ly, lz, ux, uy, uz, fn, context) \
+    NEA_Phys3DOverlapBoxI(floattof32(lx), floattof32(ly), floattof32(lz), \
+                          floattof32(ux), floattof32(uy), floattof32(uz), \
+                          fn, context)
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// A kinematic character controller: a capsule that is **not** a rigid body,
+// moved by depenetration and shape casting rather than by the solver.
+//
+// A player made of a dynamic body has to fight the solver for every step,
+// slope and ledge, and loses -- it slides down ramps, tips over, bounces off
+// crates and picks up spin, and no amount of friction and damping fixes it,
+// because the solver is doing exactly what it is supposed to. This does none
+// of that: it decides where the capsule goes and then puts it there.
+//
+// It touches the world in three directions. It is **blocked** by every shape
+// its filter accepts. It **pushes** dynamic bodies it walks into. It is pushed
+// by nothing -- being pushed is your job, through
+// NEA_Phys3DMoverSetVelocityI().
+//
+// A mover is a value you own, not a world resource: there is no pool and
+// nothing to destroy. Put one in your player struct.
+//
+// This is Erin Catto's own mover sample (samples/mover.cpp) in this module's
+// conventions, and it is the one piece of Stage 4 that has no counterpart in
+// raw Box3D -- b3World_CollideMover and b3World_CastMover are queries, and the
+// loop that turns them into a character is the caller's. Here it is written
+// out. Everything below is f32, as everything else in this header.
+
+/// Shapes one mover may be told to pass through.
+#define NEA_PHYS3D_MOVER_MAX_IGNORE 4
+
+/// Tuning for a mover. Get one from NEA_Phys3DDefaultMoverDef() and adjust.
+typedef struct NEA_Phys3DMoverDef {
+    /// Capsule radius (f32). Default 0.3.
+    int32_t radius;
+
+    /// Half the distance between the two cap centres (f32). Default 0.5, so
+    /// the capsule is 1.6 units tall overall.
+    int32_t halfHeight;
+
+    /// Ground speed cap (f32, units/s). Default 6.
+    int32_t maxSpeed;
+
+    /// Below this, horizontal velocity is zeroed outright (f32). Default 0.01.
+    /// Without it a mover creeps forever on the last bit of a stick deflection.
+    int32_t minSpeed;
+
+    /// Friction floor (f32). Friction removes `max(speed, stopSpeed) *
+    /// friction * dt` per step, so this is what stops a slow mover promptly
+    /// instead of asymptotically. Default 1.
+    int32_t stopSpeed;
+
+    /// Acceleration (f32, 1/s). Default 30.
+    int32_t accelerate;
+
+    /// Ground friction (f32, 1/s). Default 4.
+    int32_t friction;
+
+    /// Downward acceleration (f32, units/s^2). Default 15 -- higher than
+    /// gravity, because a character that falls at 9.8 feels floaty.
+    int32_t gravity;
+
+    /// Upward velocity NEA_Phys3DMoverJump() applies (f32). Default 5.
+    int32_t jumpSpeed;
+
+    /// Run the ground probe. Default true.
+    ///
+    /// The probe is one downward ray per frame driving a soft spring, and it is
+    /// what rides stairs and slopes with no step-up hack and no walkable-slope
+    /// threshold. It also keeps the capsule *off* the floor, which matters more
+    /// here than upstream: without it the floor contributes a plane every
+    /// frame, the solver pushes out by B3_LINEAR_SLOP, and in Q12 that is a
+    /// real 0.0049 units of upward motion injected 60 times a second.
+    ///
+    /// Turn it off for a flying or swimming character, where the ray is waste.
+    bool pogo;
+
+    /// Derive the post-move velocity by clipping against the collision planes
+    /// rather than from the distance actually travelled. Default true.
+    ///
+    /// True is almost always right: it stops the mover inheriting the
+    /// depenetration push as velocity and launching off whatever it was
+    /// resting against.
+    bool clipVelocity;
+
+    /// Query filter for the depenetration pass, the sweep and the ground probe.
+    /// Defaults to b3DefaultQueryFilter()'s bits.
+    uint64_t categoryBits, maskBits;
+
+    /// Vertical offset from the capsule centre to the bound model's origin
+    /// (f32). Default -(halfHeight + radius), which puts a model whose origin
+    /// is between its feet on the ground.
+    int32_t modelOffsetY;
+} NEA_Phys3DMoverDef;
+
+/// A character mover.
+///
+/// The fields above the line are yours: read them every frame, and write them
+/// when you mean it. Everything below is internal and will move.
+typedef struct NEA_Phys3DMover {
+    /// Capsule centre in world space (f32). Read every frame to place a camera.
+    int32_t x, y, z;
+
+    /// Velocity (f32). Read it, and write it to launch or knock back --
+    /// an explosion is `v += impulse`, not a force.
+    int32_t vx, vy, vz;
+
+    /// Was the ground probe in contact after the last step?
+    bool onGround;
+
+    /// Facing, in brad (32768 per circle). Set by NEA_Phys3DMoverStepYawI()
+    /// and used to orient the bound model.
+    int16_t yaw;
+
+    /// Planes the last step depenetrated against. Diagnostic.
+    int planeCount;
+
+    /// Gauss-Seidel iterations summed over the slide loop. Diagnostic.
+    int solverIterations;
+
+    /// Slide-loop iterations actually run, 1 to 5. Diagnostic, and worth
+    /// putting on screen: pinned at 5 means the mover never reached its target,
+    /// which is what a jammed character looks like from the outside.
+    int castIterations;
+
+    /// Model to drive, or NULL. See NEA_Phys3DMoverSetModel().
+    NEA_Model *model;
+
+    /// Yours. Untouched by this module.
+    void *userData;
+
+    // --- internal ---
+    NEA_Phys3DMoverDef def;
+    int32_t pogoVelocity;
+    b3CollisionPlane planes[B3_NEA_MAX_MOVER_PLANES];
+    b3ShapeId planeShapes[B3_NEA_MAX_MOVER_PLANES];
+    b3Vec3 planePoints[B3_NEA_MAX_MOVER_PLANES];
+    b3ShapeId ignore[NEA_PHYS3D_MOVER_MAX_IGNORE];
+    int ignoreCount;
+} NEA_Phys3DMover;
+
+/// Default tuning. Never zero-initialize a NEA_Phys3DMoverDef -- a zero radius
+/// is not a mover.
+NEA_Phys3DMoverDef NEA_Phys3DDefaultMoverDef(void);
+
+/// Set a mover up at a world position. Zeroes its velocity and its state.
+void NEA_Phys3DMoverInitI(NEA_Phys3DMover *mover, const NEA_Phys3DMoverDef *def,
+                          int32_t x, int32_t y, int32_t z);
+
+/// Set a mover up (float).
+#define NEA_Phys3DMoverInit(mover, def, x, y, z) \
+    NEA_Phys3DMoverInitI(mover, def, floattof32(x), floattof32(y), floattof32(z))
+
+/// Advance a mover by one step, steering by a heading.
+///
+/// `yaw` is a brad angle; forward and right come from the libnds sine table, so
+/// no basis is built, nothing is normalized and nothing is divided. The mover
+/// keeps the yaw and orients its bound model with it.
+///
+/// `forwardThrottle` and `strafeThrottle` are f32 in [-1, 1] -- what a d-pad or
+/// a stick gives.
+///
+/// Call **after** NEA_Phys3DUpdate(): the mover queries the world, and it wants
+/// the world the step just produced.
+void NEA_Phys3DMoverStepYawI(NEA_Phys3DMover *mover, int yaw,
+                             int32_t forwardThrottle, int32_t strafeThrottle);
+
+/// Advance a mover, steering by a heading (float throttles).
+#define NEA_Phys3DMoverStepYaw(mover, yaw, fwd, strafe) \
+    NEA_Phys3DMoverStepYawI(mover, yaw, floattof32(fwd), floattof32(strafe))
+
+/// Advance a mover along an explicit basis. What NEA_Phys3DMoverStepYawI()
+/// calls.
+///
+/// `forward` and `right` are world directions (f32); neither has to be unit
+/// length or perpendicular to the other, and the vertical component of each is
+/// ignored -- a camera-relative basis can be passed straight in.
+void NEA_Phys3DMoverStepI(NEA_Phys3DMover *mover,
+                          int32_t fx, int32_t fy, int32_t fz,
+                          int32_t rx, int32_t ry, int32_t rz,
+                          int32_t forwardThrottle, int32_t strafeThrottle);
+
+/// Jump, if the mover is on the ground.
+/// @return false if it was not, in which case nothing happened.
+bool NEA_Phys3DMoverJump(NEA_Phys3DMover *mover);
+
+/// Move a mover without sweeping. Clears onGround and the ground spring, so
+/// the next step re-probes rather than assuming the old contact.
+void NEA_Phys3DMoverSetPositionI(NEA_Phys3DMover *mover, int32_t x, int32_t y, int32_t z);
+
+/// Move a mover without sweeping (float).
+#define NEA_Phys3DMoverSetPosition(mover, x, y, z) \
+    NEA_Phys3DMoverSetPositionI(mover, floattof32(x), floattof32(y), floattof32(z))
+
+/// Set a mover's velocity outright.
+void NEA_Phys3DMoverSetVelocityI(NEA_Phys3DMover *mover, int32_t x, int32_t y, int32_t z);
+
+/// Set a mover's velocity (float).
+#define NEA_Phys3DMoverSetVelocity(mover, x, y, z) \
+    NEA_Phys3DMoverSetVelocityI(mover, floattof32(x), floattof32(y), floattof32(z))
+
+/// Bind a model to a mover, or NULL to unbind.
+///
+/// The mover writes the model's matrix itself, at the end of each step.
+/// NEA_Phys3DSyncModels() cannot do it: that walks the step's move events, and
+/// a mover has no body and produces none.
+void NEA_Phys3DMoverSetModel(NEA_Phys3DMover *mover, NEA_Model *model);
+
+/// Make a mover pass through one shape -- a platform it is riding, a door being
+/// opened, its own trigger volume.
+///
+/// Up to NEA_PHYS3D_MOVER_MAX_IGNORE of them; further calls are ignored.
+void NEA_Phys3DMoverIgnoreShape(NEA_Phys3DMover *mover, b3ShapeId shapeId);
+
+/// Forget every ignored shape.
+void NEA_Phys3DMoverClearIgnored(NEA_Phys3DMover *mover);
+
+/// Shapes whose plane batch filled B3_NEA_MAX_MOVER_PLANES **in the last
+/// b3World_CollideMover call**.
+///
+/// Not a running total, and not cleared by the mover: b3Collide zeroes it at
+/// the top of the next step, so read it right after stepping your movers.
+///
+/// A non-zero reading means a shape had more collision planes than the port
+/// preallocates and the rest were never computed. Unlike a dropped contact,
+/// which is a body settling slowly into a crease, a dropped mover plane is a
+/// surface the character is never pushed away from -- so the symptom is walking
+/// through a wall, at the one moment the geometry was busiest. Zero in steady
+/// state is the thing to check when bringing a level up.
+int NEA_Phys3DWorldGetMoverPlaneDropCount(void);
+
+/// Calls to b3Body_SetTransform over the life of the world.
+///
+/// **Cumulative**, unlike every other counter here, because a teleport is a
+/// rare event and the question is whether it happened at all.
+///
+/// It is here because a teleport is not free and nothing else says so: the
+/// body's shapes re-enter the broad phase, re-pair on the next step, form
+/// contacts and re-form their island, and in a world sized from a settled scene
+/// that is where a mid-step allocation comes from. A rising
+/// NEA_Phys3DWorldGetLateAllocCount() next to a non-zero reading here is
+/// explained rather than a leak -- the memory is reused. Without this the two
+/// look identical.
+int NEA_Phys3DWorldGetTeleportCount(void);
+
+// =========================================================================
 // Engine integration
 // =========================================================================
 

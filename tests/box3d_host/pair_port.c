@@ -113,6 +113,44 @@ static void portShapeCast( const pdProxy* a, const pdProxy* b, const pdTransform
 	out->normal = fromV( o.normal );
 }
 
+static b3Sweep toSweep( const pdSweep* s )
+{
+	b3Sweep out;
+	out.localCenter = toV( s->localCenter );
+	out.c1 = toV( s->c1 );
+	out.c2 = toV( s->c2 );
+	out.q1.v = b3MakeDir3( b3nFromDouble( s->q1x ), b3nFromDouble( s->q1y ), b3nFromDouble( s->q1z ) );
+	out.q1.s = b3nFromDouble( s->q1w );
+	out.q2.v = b3MakeDir3( b3nFromDouble( s->q2x ), b3nFromDouble( s->q2y ), b3nFromDouble( s->q2z ) );
+	out.q2.s = b3nFromDouble( s->q2w );
+	return out;
+}
+
+static void portTimeOfImpact( const pdProxy* a, const pdProxy* b, const pdSweep* sweepA, const pdSweep* sweepB,
+							  double maxFraction, pdTOIOut* out )
+{
+	b3Vec3 sa[PD_MAX_POINTS], sb[PD_MAX_POINTS];
+
+	b3TOIInput input;
+	input.proxyA = toProxy( a, sa );
+	input.proxyB = toProxy( b, sb );
+	input.sweepA = toSweep( sweepA );
+	input.sweepB = toSweep( sweepB );
+	input.maxFraction = b3Makeb3c( (int32_t)( maxFraction * (double)B3_C_ONE ) );
+
+	b3TOIOutput o = b3TimeOfImpact( &input );
+
+	memset( out, 0, sizeof( *out ) );
+	out->state = (int)o.state;
+	out->fraction = b3cToDouble( o.fraction );
+	out->distance = b3fToDouble( o.distance );
+	out->point = fromV( o.point );
+	out->normal = fromV( o.normal );
+	out->distanceIterations = o.distanceIterations;
+	out->pushBackIterations = o.pushBackIterations;
+	out->rootIterations = o.rootIterations;
+}
+
 // Both libraries pack a feature pair into a warm-starting id the same way;
 // spelling it out here avoids pulling either one's internal manifold.h in.
 static unsigned packFeatureId( b3FeaturePair pair )
@@ -838,6 +876,55 @@ static int compareSceneContacts( const void* a, const void* b )
 	return 0;
 }
 
+/// Sensor transitions in a canonical order, so the comparison is of the *set*
+/// each library produced rather than of its publishing order.
+static int compareSensorEvents( const void* a, const void* b )
+{
+	const pdSensorEvent* ea = (const pdSensorEvent*)a;
+	const pdSensorEvent* eb = (const pdSensorEvent*)b;
+	if ( ea->sensorShape != eb->sensorShape )
+	{
+		return ea->sensorShape < eb->sensorShape ? -1 : 1;
+	}
+	if ( ea->visitorShape != eb->visitorShape )
+	{
+		return ea->visitorShape < eb->visitorShape ? -1 : 1;
+	}
+	return 0;
+}
+
+/// Append this step's sensor transitions to the pass.
+///
+/// Called after *every* step of a pass rather than once at the end, and that is
+/// not a detail: both libraries clear the begin-event array at the top of each
+/// step, so a twenty-step pass read once would report only whatever happened on
+/// the twentieth -- which for a visitor crossing a trigger volume is nothing at
+/// all. The first version of the sensors scenario did exactly that and showed
+/// occupancy changing with zero events to explain it.
+///
+/// The contact counts alongside keep the read-once behaviour every scenario
+/// before this one was written against; only the sensor arrays accumulate.
+static void collectSensorEvents( b3WorldId worldId, const b3ShapeId* shapeIds, int shapeCount, pdScenePassOut* po )
+{
+	b3SensorEvents events = b3World_GetSensorEvents( worldId );
+
+	for ( int i = 0; i < events.beginCount && po->sensorBeginCount < PD_MAX_SCENE_SENSOR_EVENTS; ++i )
+	{
+		pdSensorEvent* se = po->sensorBegins + po->sensorBeginCount;
+		po->sensorBeginCount += 1;
+		se->sensorShape = sceneShapeIndex( shapeIds, shapeCount, events.beginEvents[i].sensorShapeId.index1 - 1 );
+		se->visitorShape = sceneShapeIndex( shapeIds, shapeCount, events.beginEvents[i].visitorShapeId.index1 - 1 );
+	}
+
+	for ( int i = 0; i < events.endCount && po->sensorEndCount < PD_MAX_SCENE_SENSOR_EVENTS; ++i )
+	{
+		pdSensorEvent* se = po->sensorEnds + po->sensorEndCount;
+		po->sensorEndCount += 1;
+		se->sensorShape = sceneShapeIndex( shapeIds, shapeCount, events.endEvents[i].sensorShapeId.index1 - 1 );
+		se->visitorShape = sceneShapeIndex( shapeIds, shapeCount, events.endEvents[i].visitorShapeId.index1 - 1 );
+	}
+}
+
 static void portWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hullCount, const pdMesh* meshes, int meshCount,
 							pdSceneOut* out )
 {
@@ -862,6 +949,10 @@ static void portWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hu
 	worldDef.capacity.contactCount = PD_MAX_SCENE_CONTACTS;
 	worldDef.capacity.meshContactCount = meshCount > 0 ? PD_MAX_SCENE_CONTACTS : 0;
 	worldDef.capacity.jointCount = PD_MAX_SCENE_JOINTS;
+
+	// Every shape in the scene could be a sensor; the reference grows its
+	// array on demand and this is what standing in for that costs.
+	worldDef.capacity.sensorCount = PD_MAX_SCENE_BODIES * PD_MAX_BODY_SHAPES;
 
 	b3WorldId worldId = b3CreateWorld( &worldDef );
 	b3World* world = b3GetWorldFromId( worldId );
@@ -892,6 +983,8 @@ static void portWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hu
 			b3ShapeDef shapeDef = b3DefaultShapeDef();
 			shapeDef.density = b3fFromDouble( s->density );
 			shapeDef.enableContactEvents = true;
+			shapeDef.isSensor = s->isSensor;
+			shapeDef.enableSensorEvents = s->enableSensorEvents;
 
 			switch ( s->kind )
 			{
@@ -1181,20 +1274,22 @@ static void portWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hu
 		//
 		// The one-sub-step spelling is deliberate for that case: with nothing
 		// to integrate, more sub-steps only cost time, and it is the count the
+		pdScenePassOut* po = out->passes + p;
+
 		// reference's zero-dt call uses.
 		if ( pass->stepCount <= 0 )
 		{
 			b3World_Step( worldId, 1 );
+			collectSensorEvents( worldId, shapeIds, shapeCount, po );
 		}
 		else
 		{
 			for ( int s = 0; s < pass->stepCount; ++s )
 			{
 				b3World_Step( worldId, subStepCount );
+				collectSensorEvents( worldId, shapeIds, shapeCount, po );
 			}
 		}
-
-		pdScenePassOut* po = out->passes + p;
 
 		for ( int i = 0; i < world->contacts.count && po->contactCount < PD_MAX_SCENE_CONTACTS; ++i )
 		{
@@ -1233,6 +1328,14 @@ static void portWorldScene( const pdSceneDesc* desc, const pdHull* hulls, int hu
 		b3ContactEvents events = b3World_GetContactEvents( worldId );
 		po->beginCount = events.beginCount;
 		po->endCount = events.endCount;
+
+		qsort( po->sensorBegins, (size_t)po->sensorBeginCount, sizeof( pdSensorEvent ), compareSensorEvents );
+		qsort( po->sensorEnds, (size_t)po->sensorEndCount, sizeof( pdSensorEvent ), compareSensorEvents );
+
+		for ( int i = 0; i < shapeCount; ++i )
+		{
+			po->sensorOccupancy[i] = b3Shape_IsSensor( shapeIds[i] ) ? b3Shape_GetSensorCapacity( shapeIds[i] ) : -1;
+		}
 
 		po->bodyCount = desc->bodyCount < PD_MAX_SCENE_BODIES ? desc->bodyCount : PD_MAX_SCENE_BODIES;
 		for ( int b = 0; b < po->bodyCount; ++b )
@@ -1296,6 +1399,7 @@ const pdBackend pdPortBackend = {
 	.name = "fixed",
 	.distance = portDistance,
 	.shapeCast = portShapeCast,
+	.timeOfImpact = portTimeOfImpact,
 	.sphereSphere = portSphereSphere,
 	.capsuleSphere = portCapsuleSphere,
 	.capsuleCapsule = portCapsuleCapsule,

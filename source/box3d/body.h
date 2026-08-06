@@ -38,8 +38,12 @@
 /// @section absent What is not here
 ///
 /// b3Body_CastRay, b3Body_CastShape, b3Body_OverlapShape, b3Body_CollideMover
-/// and b3Body_GetClosestPoint are Phase 7 (they need the mover and the world
-/// query layer). b3Body_SetTargetTransform is a kinematic-target helper that
+/// and b3Body_GetClosestPoint are still absent, and by now deliberately: every
+/// one is a thin wrapper over machinery that has existed since Phase 7 Stage 1,
+/// and none has ever had a caller. Four stages have declined them on that
+/// ground -- adding an entry point with no caller is how `forceThreshold` sat
+/// dead from Stage 1 to Stage 5 of Phase 6. b3World_CollideMover covers what a
+/// mover actually needs. b3Body_SetTargetTransform is a kinematic-target helper that
 /// needs a quaternion log; NEA_Phys3D can add it if a game wants it.
 /// b3Body_SetName/GetName follow B3_NEA_NO_NAMES. b3Body_ApplyWind went with
 /// the rest of the wind code.

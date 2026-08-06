@@ -9335,6 +9335,1063 @@ static void test_move_events_and_proxies( void )
 	b3DestroyWorld( worldId );
 }
 
+// =========================================================================
+// World queries -- Phase 7, Stage 1b
+// =========================================================================
+
+typedef struct
+{
+	b3ShapeId ids[8];
+	int count;
+} queryHits;
+
+static bool collectOverlap( b3ShapeId shapeId, void* context )
+{
+	queryHits* hits = context;
+	if ( hits->count < 8 )
+	{
+		hits->ids[hits->count++] = shapeId;
+	}
+	return true;
+}
+
+typedef struct
+{
+	int count;
+	b3ShapeId lastId;
+	b3Vec3 lastPoint;
+	b3Vec3 lastNormal;
+	b3c lastFraction;
+	/// What to hand back to the cast, so the tests can drive every branch of
+	/// b3CastResultFcn's contract.
+	b3c reply;
+} castHits;
+
+static b3c collectCast( b3ShapeId shapeId, b3Vec3 point, b3Vec3 normal, b3c fraction, uint64_t userMaterialId,
+						int triangleIndex, int childIndex, void* context )
+{
+	B3_UNUSED( userMaterialId, triangleIndex, childIndex );
+
+	castHits* hits = context;
+	hits->count += 1;
+	hits->lastId = shapeId;
+	hits->lastPoint = point;
+	hits->lastNormal = normal;
+	hits->lastFraction = fraction;
+	return hits->reply;
+}
+
+/// The five b3World_* queries, against closed forms.
+///
+/// Not compared against upstream, and deliberately: the port's signatures drop
+/// the `b3Pos origin` argument, so there is no call that means the same thing
+/// on both sides to compare. What is checkable is the geometry, and a sphere of
+/// known radius at a known place has an answer that does not need a reference
+/// implementation to state.
+static void test_world_queries( void )
+{
+	printf( "world overlap and cast queries\n" );
+
+	b3WorldId worldId = makeStepWorld( V( 0, 0, 0 ) );
+	b3World* world = b3GetWorldFromId( worldId );
+
+	// Three unit spheres in a row on the x axis, at x = 0, 4 and 8. Static, so
+	// nothing moves under the queries and every answer stays a closed form.
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_staticBody;
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3Sphere unit = { V( 0, 0, 0 ), b3fFromDouble( 1.0 ) };
+
+	b3ShapeId shapes[3];
+	for ( int i = 0; i < 3; ++i )
+	{
+		bodyDef.position = V( 4.0 * i, 0, 0 );
+		b3BodyId bodyId = b3CreateBody( worldId, &bodyDef );
+		shapes[i] = b3CreateSphereShape( bodyId, &shapeDef, &unit );
+	}
+
+	validate( world );
+
+	b3QueryFilter any = b3DefaultQueryFilter();
+
+	// --- b3World_OverlapAABB ---
+	{
+		queryHits hits = { 0 };
+		b3World_OverlapAABB( worldId, b3MakeAABB( V( -2, -2, -2 ), V( 10, 2, 2 ) ), any, collectOverlap, &hits );
+		checkInt( "a box over all three spheres finds three", hits.count, 3 );
+
+		hits.count = 0;
+		b3World_OverlapAABB( worldId, b3MakeAABB( V( -2, -2, -2 ), V( 2, 2, 2 ) ), any, collectOverlap, &hits );
+		checkInt( "a box over the first finds one", hits.count, 1 );
+		check( "and names it", B3_ID_EQUALS( hits.ids[0], shapes[0] ) );
+
+		hits.count = 0;
+		b3World_OverlapAABB( worldId, b3MakeAABB( V( 0, 20, 0 ), V( 1, 21, 1 ) ), any, collectOverlap, &hits );
+		checkInt( "a box nowhere near them finds none", hits.count, 0 );
+	}
+
+	// --- the filter ---
+	{
+		// A mask that matches nothing must reject every shape, and it is the
+		// callback that must not fire rather than the tree that must not look.
+		b3QueryFilter none = b3DefaultQueryFilter();
+		none.maskBits = 0;
+
+		queryHits hits = { 0 };
+		b3World_OverlapAABB( worldId, b3MakeAABB( V( -2, -2, -2 ), V( 10, 2, 2 ) ), none, collectOverlap, &hits );
+		checkInt( "a filter matching nothing reports nothing", hits.count, 0 );
+	}
+
+	// --- b3World_OverlapShape, which is the exact test the AABB one is not ---
+	{
+		// The corner of a sphere's bounding box is the cheapest place to see
+		// the difference between the two forms. The unit sphere at the origin
+		// has AABB [-1, 1] cubed, and (0.9, 0.9, 0.9) sits inside that box but
+		// 1.559 from the centre -- well outside the sphere itself.
+		b3Vec3 corner = V( 0.9, 0.9, 0.9 );
+		b3ShapeProxy cornerProxy = { &corner, 1, b3fFromDouble( 0.05 ) };
+
+		queryHits exact = { 0 };
+		b3World_OverlapShape( worldId, &cornerProxy, any, collectOverlap, &exact );
+		checkInt( "a probe in a bounding box corner touches nothing", exact.count, 0 );
+
+		queryHits bounds = { 0 };
+		b3World_OverlapAABB( worldId, b3MakeAABB( V( 0.85, 0.85, 0.85 ), V( 0.95, 0.95, 0.95 ) ), any, collectOverlap, &bounds );
+		checkInt( "where the AABB form, testing bounds only, reports it", bounds.count, 1 );
+
+		// Move the probe onto the sphere and the exact test agrees with the
+		// bounds one again -- which is what says the miss above is the exact
+		// test working, not the query failing to find anything at all.
+		b3Vec3 probe = V( 1.25, 0, 0 );
+		b3ShapeProxy proxy = { &probe, 1, b3fFromDouble( 0.5 ) };
+
+		queryHits hits = { 0 };
+		b3World_OverlapShape( worldId, &proxy, any, collectOverlap, &hits );
+		checkInt( "a probe overlapping a sphere finds it", hits.count, 1 );
+		check( "and names the right one", B3_ID_EQUALS( hits.ids[0], shapes[0] ) );
+
+		// And clear of it in the gap between two spheres.
+		probe = V( 2, 0, 0 );
+		hits.count = 0;
+		b3World_OverlapShape( worldId, &proxy, any, collectOverlap, &hits );
+		checkInt( "a probe in the gap between two touches neither", hits.count, 0 );
+	}
+
+	// --- b3World_CastRay ---
+	{
+		// Along +x from x = -4, length 16: crosses all three spheres.
+		b3Vec3 origin = V( -4, 0, 0 );
+		b3Vec3 translation = V( 16, 0, 0 );
+
+		// reply = 1 keeps the full length, so every shape reports.
+		castHits all = { .reply = b3c_one };
+		b3World_CastRay( worldId, origin, translation, any, collectCast, &all );
+		checkInt( "a ray returning 1 sees every shape on it", all.count, 3 );
+
+		// reply = 0 terminates at the first.
+		castHits first = { .reply = b3c_zero };
+		b3World_CastRay( worldId, origin, translation, any, collectCast, &first );
+		checkInt( "a ray returning 0 stops at the first", first.count, 1 );
+
+		// A negative reply means "skip this shape and keep the full ray", so
+		// the count is unchanged from the reply = 1 case. This is the branch
+		// that must NOT clip, and it is the one an off-by-one would break.
+		castHits skipped = { .reply = b3Makeb3c( -B3_C_ONE ) };
+		b3World_CastRay( worldId, origin, translation, any, collectCast, &skipped );
+		checkInt( "a ray returning -1 skips without clipping", skipped.count, 3 );
+	}
+
+	// --- b3World_CastRayClosest ---
+	{
+		// From x = -4 along +x. The first sphere is centred at 0 with radius 1,
+		// so the surface is at x = -1: three of the sixteen units.
+		b3RayResult hit = b3World_CastRayClosest( worldId, V( -4, 0, 0 ), V( 16, 0, 0 ), any );
+
+		check( "a ray down the row hits", hit.hit );
+		check( "the nearest sphere", B3_ID_EQUALS( hit.shapeId, shapes[0] ) );
+		expect( "at three sixteenths of the way", b3cToDouble( hit.fraction ), 3.0 / 16.0, 1e-3 );
+		expect( "on that sphere's surface", F( hit.point.x ), -1.0, 0.02 );
+		expect( "with the normal facing back down the ray", F( hit.normal.x ), -1.0, 0.02 );
+		check( "and reports what the traversal cost", hit.nodeVisits > 0 );
+
+		// Fired the other way from the far side, the *last* sphere is nearest.
+		b3RayResult reverse = b3World_CastRayClosest( worldId, V( 12, 0, 0 ), V( -16, 0, 0 ), any );
+		check( "a ray from the far side hits", reverse.hit );
+		check( "the sphere nearest that end", B3_ID_EQUALS( reverse.shapeId, shapes[2] ) );
+		expect( "with the normal facing back down that ray", F( reverse.normal.x ), 1.0, 0.02 );
+
+		// Parallel to the row but two units off it.
+		b3RayResult miss = b3World_CastRayClosest( worldId, V( -4, 3, 0 ), V( 16, 0, 0 ), any );
+		check( "a ray passing above them misses", miss.hit == false );
+		checkInt( "and a miss leaves triangleIndex null", miss.triangleIndex, B3_NULL_INDEX );
+
+		// A *hit* on a convex shape must report no triangle either, and this is
+		// the one that was wrong. The primitives build their b3CastOutput from
+		// { 0 }, so triangleIndex read back as 0 -- which is a real triangle
+		// index, and left a caller unable to tell a sphere hit from a hit on a
+		// mesh's first triangle. Caught on device by box3d_pick, which reported
+		// `hit level, tri 0` for a ray landing on the top face of a box.
+		checkInt( "a hit on a sphere reports no triangle", hit.triangleIndex, B3_NULL_INDEX );
+	}
+
+	// --- b3World_CastShape ---
+	{
+		// A sphere of radius 0.5 swept along +x from x = -4. It meets the first
+		// sphere when the centres are 1.5 apart, i.e. at x = -1.5, which is
+		// 2.5 of the 16 units.
+		b3Vec3 center = V( -4, 0, 0 );
+		b3ShapeProxy proxy = { &center, 1, b3fFromDouble( 0.5 ) };
+
+		castHits hits = { .reply = b3c_zero };
+		b3World_CastShape( worldId, &proxy, V( 16, 0, 0 ), any, collectCast, &hits );
+
+		checkInt( "a swept sphere meets the first one", hits.count, 1 );
+		check( "and names it", B3_ID_EQUALS( hits.lastId, shapes[0] ) );
+		expect( "at the fraction the two radii give", b3cToDouble( hits.lastFraction ), 2.5 / 16.0, 4e-3 );
+
+		// Swept along a line that clears them.
+		b3Vec3 high = V( -4, 3, 0 );
+		b3ShapeProxy highProxy = { &high, 1, b3fFromDouble( 0.5 ) };
+		castHits none = { .reply = b3c_zero };
+		b3World_CastShape( worldId, &highProxy, V( 16, 0, 0 ), any, collectCast, &none );
+		checkInt( "and a sweep that clears them meets nothing", none.count, 0 );
+	}
+
+	validate( world );
+	b3DestroyWorld( worldId );
+}
+
+// =========================================================================
+// Continuous collision -- Phase 7, Stage 2
+// =========================================================================
+
+/// Fire one small sphere at one thin static slab, in a single step.
+///
+/// Returns where the sphere ended up, and fills in the world's per-step CCD
+/// counters. `useMesh` picks which of the two b3ShapeTimeOfImpact paths is
+/// exercised: a hull slab goes through b3TimeOfImpact directly, a baked mesh
+/// goes through the triangle traversal.
+typedef struct
+{
+	double endY;
+	int toiEvents;
+	int distanceIterations;
+	int pushBackIterations;
+	int rootIterations;
+	bool hadTimeOfImpact;
+} continuousResult;
+
+static continuousResult fireAtSlab( bool continuous, bool useMesh, bool bullet, double speed )
+{
+	b3WorldDef def = b3DefaultWorldDef();
+	def.capacity.staticBodyCount = 8;
+	def.capacity.dynamicBodyCount = 8;
+	def.capacity.staticShapeCount = 8;
+	def.capacity.dynamicShapeCount = 8;
+	def.capacity.contactCount = 16;
+	def.capacity.meshContactCount = 4;
+
+	// No gravity: the only motion is the velocity set below, so the distance
+	// travelled in one step is exactly speed * dt and every expectation is a
+	// closed form.
+	def.gravity = V( 0, 0, 0 );
+	def.enableContinuous = continuous;
+
+	b3WorldId worldId = b3CreateWorld( &def );
+	b3World* world = b3GetWorldFromId( worldId );
+
+	b3BodyDef groundDef = b3DefaultBodyDef();
+	groundDef.type = b3_staticBody;
+	b3BodyId groundId = b3CreateBody( worldId, &groundDef );
+	b3ShapeDef groundShape = b3DefaultShapeDef();
+
+	static gridBlob s_blob;
+	static b3BoxHull s_slab;
+
+	if ( useMesh )
+	{
+		// A flat grid in the y = 0 plane: two triangles thick in the only
+		// sense that matters, which is none at all.
+		const b3MeshData* mesh = buildGrid( &s_blob, 4, 4.0, NULL );
+		b3CreateMeshShape( groundId, &groundShape, mesh, V( 1, 1, 1 ) );
+	}
+	else
+	{
+		// A tenth of a unit thick, centred on y = 0.
+		s_slab = b3MakeBoxHull( b3fFromDouble( 4.0 ), b3fFromDouble( 0.05 ), b3fFromDouble( 4.0 ) );
+		b3CreateHullShape( groundId, &groundShape, &s_slab.base );
+	}
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_dynamicBody;
+	bodyDef.position = V( 0, 2, 0 );
+	bodyDef.enableSleep = false;
+	bodyDef.isBullet = bullet;
+	b3BodyId ballId = b3CreateBody( worldId, &bodyDef );
+
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+	b3Sphere sphere = { V( 0, 0, 0 ), b3fFromDouble( 0.1 ) };
+	b3CreateSphereShape( ballId, &shapeDef, &sphere );
+
+	b3Body_SetLinearVelocity( ballId, V( 0, -speed, 0 ) );
+
+	validate( world );
+	b3World_Step( worldId, 4 );
+	validate( world );
+
+	// Read off the sim rather than the b3Body. Finalize harvests the transient
+	// flags into the b3Body *before* it calls the continuous pass, so the
+	// b3Body's copy of b3_hadTimeOfImpact is always one step behind the sim's.
+	// That is upstream's ordering as well, and worth pinning here so a later
+	// change to it is a test failure rather than a surprise.
+	b3Body* ball = b3GetBodyFullId( world, ballId );
+
+	continuousResult result = {
+		.endY = b3fToDouble( b3Body_GetPosition( ballId ).y ),
+		.toiEvents = world->toiEventCount,
+		.distanceIterations = world->toiDistanceIterations,
+		.pushBackIterations = world->toiPushBackIterations,
+		.rootIterations = world->toiRootIterations,
+		.hadTimeOfImpact = ( b3GetBodySim( world, ball )->flags & b3_hadTimeOfImpact ) != 0,
+	};
+
+	b3DestroyWorld( worldId );
+	return result;
+}
+
+static void test_continuous( void )
+{
+	printf( "continuous collision\n" );
+
+	const double quantum = 1.0 / 4096.0;
+
+	// 300 m/s over a 1/60 s step is 5 units of travel, against a slab a tenth
+	// of a unit thick. There is no sub-step small enough to catch that: the
+	// solver integrates 4 sub-steps of 1.25 units each, and the slab is
+	// nowhere near any of the five poses. Only a sweep sees it.
+	const double speed = 300.0;
+
+	// --- the hull slab, which is b3TimeOfImpact directly ---
+	{
+		continuousResult off = fireAtSlab( false, false, false, speed );
+		check( "without continuous collision a fast sphere ends up under the slab", off.endY < -1.0 );
+		checkInt( "having reported no time of impact", off.toiEvents, 0 );
+
+		continuousResult on = fireAtSlab( true, false, false, speed );
+		check( "with it, the same sphere stops above the slab", on.endY > 0.0 );
+		// The query stops when the *core* distance reaches
+		// max( slop, radiusA + radiusB - slop ). Here that is the sphere's own
+		// radius less a slop, so the centre comes to rest a slop nearer the
+		// slab than a surface-to-surface touch would put it.
+		expect( "a radius less a slop clear of the surface", on.endY, 0.05 + 0.1 - b3fToDouble( B3_LINEAR_SLOP ),
+				8 * quantum );
+		checkInt( "and one time of impact was recorded", on.toiEvents, 1 );
+		check( "the body carries the flag that says so", on.hadTimeOfImpact );
+
+		// The caps are meant to be a safety net, not the thing that stops the
+		// search. If a scene this ordinary reaches them, they are load bearing
+		// and the numbers below are what would say so. The port is integer
+		// code, so these counts are the counts the hardware runs.
+		printf( "  hull slab at %.0f m/s: %d distance, %d push back, %d root iterations\n", speed, on.distanceIterations,
+				on.pushBackIterations, on.rootIterations );
+		check( "the distance loop stays well inside its cap", on.distanceIterations < 25 );
+		check( "and so does the root finder", on.rootIterations < 50 );
+	}
+
+	// --- the baked mesh, which is the triangle traversal ---
+	{
+		continuousResult off = fireAtSlab( false, true, false, speed );
+		check( "without continuous collision a fast sphere passes through a mesh", off.endY < -1.0 );
+
+		continuousResult on = fireAtSlab( true, true, false, speed );
+		check( "with it, the same sphere stops above the mesh", on.endY > 0.0 );
+		expect( "a radius less a slop clear of the triangles", on.endY, 0.1 - b3fToDouble( B3_LINEAR_SLOP ), 8 * quantum );
+		checkInt( "and one time of impact was recorded", on.toiEvents, 1 );
+
+		printf( "  mesh at %.0f m/s: %d distance, %d push back, %d root iterations\n", speed, on.distanceIterations,
+				on.pushBackIterations, on.rootIterations );
+		check( "the traversal's worst triangle stays inside the caps", on.distanceIterations < 25 && on.rootIterations < 50 );
+	}
+
+	// --- a bullet, which takes the second pass rather than the first ---
+	{
+		// Against static geometry a bullet must reach the same answer as an
+		// ordinary fast body. The difference between the two passes is which
+		// trees they query, and the static tree is in both -- so this is the
+		// check that the deferred pass runs at all, and that deferring it did
+		// not lose the body.
+		continuousResult plain = fireAtSlab( true, false, false, speed );
+		continuousResult shot = fireAtSlab( true, false, true, speed );
+
+		check( "a bullet is stopped by the slab too", shot.endY > 0.0 );
+		expect( "at the same place an ordinary fast body stops", shot.endY, plain.endY, 1e-9 );
+		checkInt( "through the deferred second pass", shot.toiEvents, 1 );
+	}
+
+	// --- and the pass does not fire when it is not needed ---
+	{
+		// A tenth of the speed still crosses the slab in one step, but the
+		// body is no longer fast relative to its own extent, so nothing sweeps
+		// and the narrow phase handles it. The point is that the flag is a
+		// threshold and not a synonym for "moving".
+		continuousResult slow = fireAtSlab( true, false, false, 1.0 );
+		checkInt( "a slow body triggers no time of impact", slow.toiEvents, 0 );
+		check( "and does not carry the flag", slow.hadTimeOfImpact == false );
+	}
+}
+
+// =========================================================================
+// Sensors
+// =========================================================================
+
+/// A 2-unit static box sensor at the origin plus one dynamic sphere visitor.
+///
+/// No gravity, so the only motion is what each test sets -- every position in
+/// this section is then a closed form rather than a settling result.
+typedef struct sensorScene
+{
+	b3WorldId worldId;
+	b3World* world;
+	b3BodyId triggerBodyId;
+	b3ShapeId sensorId;
+	b3BodyId visitorBodyId;
+	b3ShapeId visitorId;
+} sensorScene;
+
+static b3BoxHull s_triggerHull;
+
+static sensorScene makeSensorScene( double startX, double halfExtent, bool bulletVisitor )
+{
+	b3WorldDef def = b3DefaultWorldDef();
+	def.capacity.staticBodyCount = 8;
+	def.capacity.dynamicBodyCount = 24;
+	def.capacity.staticShapeCount = 8;
+	def.capacity.dynamicShapeCount = 24;
+	def.capacity.contactCount = 32;
+	def.capacity.sensorCount = 2;
+	def.gravity = V( 0, 0, 0 );
+
+	sensorScene scene = { 0 };
+	scene.worldId = b3CreateWorld( &def );
+	scene.world = b3GetWorldFromId( scene.worldId );
+
+	b3BodyDef triggerBody = b3DefaultBodyDef();
+	triggerBody.type = b3_staticBody;
+	scene.triggerBodyId = b3CreateBody( scene.worldId, &triggerBody );
+
+	s_triggerHull = b3MakeBoxHull( b3fFromDouble( 1.0 ), b3fFromDouble( halfExtent ), b3fFromDouble( 1.0 ) );
+
+	// Both ends have to opt in: the sensor to report, the visitor to be seen.
+	b3ShapeDef sensorDef = b3DefaultShapeDef();
+	sensorDef.isSensor = true;
+	sensorDef.enableSensorEvents = true;
+	scene.sensorId = b3CreateHullShape( scene.triggerBodyId, &sensorDef, &s_triggerHull.base );
+
+	b3BodyDef visitorBody = b3DefaultBodyDef();
+	visitorBody.type = b3_dynamicBody;
+	visitorBody.position = V( startX, 0, 0 );
+	visitorBody.enableSleep = false;
+	visitorBody.isBullet = bulletVisitor;
+	scene.visitorBodyId = b3CreateBody( scene.worldId, &visitorBody );
+
+	b3ShapeDef visitorDef = b3DefaultShapeDef();
+	visitorDef.enableSensorEvents = true;
+	b3Sphere sphere = { V( 0, 0, 0 ), b3fFromDouble( 0.25 ) };
+	scene.visitorId = b3CreateSphereShape( scene.visitorBodyId, &visitorDef, &sphere );
+
+	validate( scene.world );
+	return scene;
+}
+
+/// True when `events` names exactly this sensor and this visitor once.
+static bool namesPair( b3ShapeId got, b3ShapeId want )
+{
+	return got.index1 == want.index1 && got.world0 == want.world0 && got.generation == want.generation;
+}
+
+static void test_sensors( void )
+{
+	printf( "sensors\n" );
+
+	// --- one traverse: in, stay, out ---
+	{
+		// From x = -3.03125 at 3.75 units/s, which is 1/16 of a unit per step.
+		// The 0.25-radius sphere overlaps the 1-unit box while |x| <= 1.25, so
+		// with x_i = -3.03125 + (i + 1)/16 it is inside for i = 28 through 67:
+		// **forty** steps, with each boundary falling half a step away from a
+		// transition. That offset is the point of the odd start: b3OverlapSphere
+		// compares against B3_OVERLAP_SLOP, two raw quanta, so a boundary landing
+		// on a step edge would be decided by accumulated rounding rather than by
+		// geometry.
+		sensorScene scene = makeSensorScene( -3.03125, 1.0, false );
+
+		check( "a shape created with isSensor is one", b3Shape_IsSensor( scene.sensorId ) );
+		check( "an ordinary shape is not", b3Shape_IsSensor( scene.visitorId ) == false );
+		check( "sensor events are on for the sensor", b3Shape_AreSensorEventsEnabled( scene.sensorId ) );
+
+		b3Body_SetLinearVelocity( scene.visitorBodyId, V( 3.75, 0, 0 ) );
+
+		int beginTotal = 0;
+		int endTotal = 0;
+		int stepsInside = 0;
+		int peakContacts = 0;
+		bool beginNamedTheVisitor = false;
+		bool endNamedTheVisitor = false;
+
+		for ( int i = 0; i < 100; ++i )
+		{
+			b3World_Step( scene.worldId, 4 );
+			validate( scene.world );
+
+			b3SensorEvents events = b3World_GetSensorEvents( scene.worldId );
+			for ( int e = 0; e < events.beginCount; ++e )
+			{
+				beginNamedTheVisitor = namesPair( events.beginEvents[e].sensorShapeId, scene.sensorId ) &&
+									   namesPair( events.beginEvents[e].visitorShapeId, scene.visitorId );
+			}
+			for ( int e = 0; e < events.endCount; ++e )
+			{
+				endNamedTheVisitor = namesPair( events.endEvents[e].sensorShapeId, scene.sensorId ) &&
+									 namesPair( events.endEvents[e].visitorShapeId, scene.visitorId );
+			}
+
+			beginTotal += events.beginCount;
+			endTotal += events.endCount;
+
+			if ( b3Shape_GetSensorCapacity( scene.sensorId ) > 0 )
+			{
+				stepsInside += 1;
+			}
+
+			if ( scene.world->contacts.count > peakContacts )
+			{
+				peakContacts = scene.world->contacts.count;
+			}
+		}
+
+		checkInt( "crossing a sensor produces one begin event", beginTotal, 1 );
+		checkInt( "and one end event", endTotal, 1 );
+		check( "the begin event named the sensor and the visitor", beginNamedTheVisitor );
+		check( "so did the end event", endNamedTheVisitor );
+
+		// The interesting half of "one begin": the shape was inside for forty
+		// steps and reported nothing on thirty-nine of them. A sensor reports
+		// transitions, not presence.
+		checkInt( "reporting nothing on the steps in between", stepsInside, 40 );
+
+		// A sensor is skipped in b3PairQueryCallback, so nothing downstream of
+		// the broad phase ever hears about it.
+		checkInt( "and creating no contacts at all", peakContacts, 0 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- what is inside, right now ---
+	{
+		sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+
+		checkInt( "a sensor holding one shape says so", b3Shape_GetSensorCapacity( scene.sensorId ), 1 );
+
+		b3ShapeId visitors[4] = { 0 };
+		int count = b3Shape_GetSensorData( scene.sensorId, visitors, 4 );
+		checkInt( "and hands it back", count, 1 );
+		check( "naming the visitor", namesPair( visitors[0], scene.visitorId ) );
+
+		// The capacity argument is a bound, not a request.
+		checkInt( "a zero-capacity read writes nothing", b3Shape_GetSensorData( scene.sensorId, visitors, 0 ), 0 );
+
+		// A shape that is not a sensor has no overlap set rather than an empty
+		// one, and both queries have to say so without reaching for an index
+		// that is B3_NULL_INDEX.
+		checkInt( "an ordinary shape holds nothing", b3Shape_GetSensorCapacity( scene.visitorId ), 0 );
+		checkInt( "and hands back nothing", b3Shape_GetSensorData( scene.visitorId, visitors, 4 ), 0 );
+
+		// Nothing pushed it: a sensor has no collision response.
+		b3World_Step( scene.worldId, 4 );
+		expect( "and a body resting inside one is not pushed out", F( b3Body_GetPosition( scene.visitorBodyId ).x ), 0.0,
+				1e-9 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- an overlap can end without anything moving ---
+	{
+		// Three ways to leave a sensor while standing still, and each one has
+		// to produce the same end event as walking out would.
+		const char* what[3] = {
+			"muting the visitor ends the overlap",
+			"muting the sensor ends the overlap",
+			"disabling the sensor's body ends the overlap",
+		};
+
+		for ( int variant = 0; variant < 3; ++variant )
+		{
+			sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+
+			b3World_Step( scene.worldId, 4 );
+			checkInt( "the visitor is inside to start with", b3Shape_GetSensorCapacity( scene.sensorId ), 1 );
+
+			if ( variant == 0 )
+			{
+				b3Shape_EnableSensorEvents( scene.visitorId, false );
+			}
+			else if ( variant == 1 )
+			{
+				b3Shape_EnableSensorEvents( scene.sensorId, false );
+			}
+			else
+			{
+				b3Body_Disable( scene.triggerBodyId );
+			}
+
+			// Not immediate: the overlap set is rebuilt once per step, and that
+			// is where the change turns into an event.
+			b3World_Step( scene.worldId, 4 );
+			validate( scene.world );
+
+			b3SensorEvents events = b3World_GetSensorEvents( scene.worldId );
+			checkInt( what[variant], events.endCount, 1 );
+			checkInt( "  and reports nothing beginning", events.beginCount, 0 );
+			checkInt( "  leaving the sensor empty", b3Shape_GetSensorCapacity( scene.sensorId ), 0 );
+
+			b3DestroyWorld( scene.worldId );
+		}
+	}
+
+	// --- destroying the sensor while something is inside it ---
+	{
+		sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+		b3World_Step( scene.worldId, 4 );
+		checkInt( "the visitor is inside to start with", b3Shape_GetSensorCapacity( scene.sensorId ), 1 );
+
+		b3DestroyShape( scene.sensorId, true );
+		validate( scene.world );
+
+		// b3DestroySensor writes into the buffer the *next* step publishes,
+		// which is the whole point of double buffering the end events: the
+		// caller still hears about an overlap ended by a destroy.
+		b3SensorEvents immediate = b3World_GetSensorEvents( scene.worldId );
+		checkInt( "a destroy is not published before the next step", immediate.endCount, 0 );
+
+		b3World_Step( scene.worldId, 4 );
+		b3SensorEvents events = b3World_GetSensorEvents( scene.worldId );
+		checkInt( "destroying a sensor ends its overlaps", events.endCount, 1 );
+		check( "naming the visitor that was inside", namesPair( events.endEvents[0].visitorShapeId, scene.visitorId ) );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- two sensors, so the swap in b3DestroySensor is exercised ---
+	{
+		sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+
+		// A second sensor, well clear of the first, on its own static body.
+		b3BodyDef otherBody = b3DefaultBodyDef();
+		otherBody.type = b3_staticBody;
+		otherBody.position = V( 10, 0, 0 );
+		b3BodyId otherBodyId = b3CreateBody( scene.worldId, &otherBody );
+
+		b3ShapeDef otherDef = b3DefaultShapeDef();
+		otherDef.isSensor = true;
+		otherDef.enableSensorEvents = true;
+		b3ShapeId otherSensorId = b3CreateHullShape( otherBodyId, &otherDef, &s_triggerHull.base );
+
+		b3World_Step( scene.worldId, 4 );
+		checkInt( "the first sensor holds the visitor", b3Shape_GetSensorCapacity( scene.sensorId ), 1 );
+		checkInt( "the second holds nothing", b3Shape_GetSensorCapacity( otherSensorId ), 0 );
+
+		// Destroying the *first* moves the second down into its slot, and the
+		// second's shape has to be told. If the fixup were missing, the query
+		// below would read the wrong sensor -- or an index past the end.
+		b3DestroyShape( scene.sensorId, true );
+		validate( scene.world );
+
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+		checkInt( "the surviving sensor still answers after a swap", b3Shape_GetSensorCapacity( otherSensorId ), 0 );
+		check( "and is still a sensor", b3Shape_IsSensor( otherSensorId ) );
+
+		// It still works, which is the real test of the index fixup: put
+		// something in it.
+		b3Body_SetTransform( scene.visitorBodyId, V( 10, 0, 0 ), b3Quat_identity );
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+		checkInt( "and reports what enters it", b3Shape_GetSensorCapacity( otherSensorId ), 1 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- the continuous path: a body that crosses a sensor within one step ---
+	{
+		// This is the seam Stage 2 left open. 300 units/s over a 1/60 s step
+		// is five units of travel against a sensor a tenth of a unit thick:
+		// the end-of-step overlap query is looking at a body two units past
+		// it, so without the sweep the trigger never fires at all.
+		sensorScene scene = makeSensorScene( 0.0, 0.05, false );
+		b3Body_SetTransform( scene.visitorBodyId, V( 0, 2, 0 ), b3Quat_identity );
+		b3Body_SetLinearVelocity( scene.visitorBodyId, V( 0, -300, 0 ) );
+
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+
+		check( "the body ends the step well past the sensor", F( b3Body_GetPosition( scene.visitorBodyId ).y ) < -2.0 );
+
+		b3SensorEvents crossed = b3World_GetSensorEvents( scene.worldId );
+		checkInt( "a body sweeping through a sensor still trips it", crossed.beginCount, 1 );
+		check( "naming the visitor", namesPair( crossed.beginEvents[0].visitorShapeId, scene.visitorId ) );
+
+		// And having tripped it, it is no longer in it -- the hit is folded
+		// into this step's overlap set, so the set empties on the next one.
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+		b3SensorEvents after = b3World_GetSensorEvents( scene.worldId );
+		checkInt( "and leaves it on the following step", after.endCount, 1 );
+		checkInt( "the sensor is empty afterwards", b3Shape_GetSensorCapacity( scene.sensorId ), 0 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- a sensor the visitor cannot see ---
+	{
+		sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+
+		// Same geometry, same overlap, one flag off.
+		b3Shape_EnableSensorEvents( scene.visitorId, false );
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+
+		b3SensorEvents events = b3World_GetSensorEvents( scene.worldId );
+		checkInt( "a shape with sensor events off trips nothing", events.beginCount, 0 );
+		checkInt( "and does not appear in the sensor", b3Shape_GetSensorCapacity( scene.sensorId ), 0 );
+
+		// Turning it back on is a begin event, not a silent appearance.
+		b3Shape_EnableSensorEvents( scene.visitorId, true );
+		b3World_Step( scene.worldId, 4 );
+		checkInt( "turning it back on is a begin event", b3World_GetSensorEvents( scene.worldId ).beginCount, 1 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+
+	// --- the cap, and the counter that says when it binds ---
+	{
+		sensorScene scene = makeSensorScene( 0.0, 1.0, false );
+
+		checkInt( "a sized scene drops no visitors", scene.world->sensorOverlapDropCount, 0 );
+
+		// One visitor already exists at the origin. Add enough to exceed the
+		// cap, all inside the sensor at once, each on its own body so none is
+		// skipped as a same-body shape.
+		//
+		// On a lattice rather than in a heap: coincident bodies are pushed
+		// apart hard enough in one step to become fast, and then they reach the
+		// sensor through the *continuous* path, whose separate cap
+		// (B3_NEA_MAX_CONTINUOUS_SENSOR_HITS) feeds the same counter -- so the
+		// first version of this check was measuring two caps at once and
+		// neither of them cleanly. 0.3 apart with a 0.05 radius, so nothing
+		// touches anything and nothing moves.
+		const int extra = B3_NEA_MAX_SENSOR_VISITORS;
+		for ( int i = 0; i < extra; ++i )
+		{
+			double x = -0.6 + 0.3 * ( i % 5 );
+			double y = -0.6 + 0.3 * ( i / 5 );
+
+			b3BodyDef bodyDef = b3DefaultBodyDef();
+			bodyDef.type = b3_dynamicBody;
+			bodyDef.position = V( x, y, 0.5 );
+			bodyDef.enableSleep = false;
+			b3BodyId id = b3CreateBody( scene.worldId, &bodyDef );
+
+			b3ShapeDef shapeDef = b3DefaultShapeDef();
+			shapeDef.enableSensorEvents = true;
+			b3Sphere sphere = { V( 0, 0, 0 ), b3fFromDouble( 0.05 ) };
+			b3CreateSphereShape( id, &shapeDef, &sphere );
+		}
+
+		b3World_Step( scene.worldId, 4 );
+		validate( scene.world );
+
+		checkInt( "the overlap set stops at the cap", b3Shape_GetSensorCapacity( scene.sensorId ),
+				  B3_NEA_MAX_SENSOR_VISITORS );
+		checkInt( "and the world counts what it refused", scene.world->sensorOverlapDropCount, 1 );
+
+		b3DestroyWorld( scene.worldId );
+	}
+}
+
+// =========================================================================
+// Character mover -- Phase 7, Stage 4
+// =========================================================================
+
+/// What b3World_CollideMover handed back, flattened.
+typedef struct
+{
+	b3ShapeId shapes[16];
+	b3Vec3 normals[16];
+	b3f offsets[16];
+	int planeCount;
+	int batchCount;
+	bool stop;
+} moverHits;
+
+/// Implements b3PlaneResultFcn.
+static bool collectMoverPlanes( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* context )
+{
+	moverHits* hits = context;
+	hits->batchCount += 1;
+
+	for ( int i = 0; i < planeCount && hits->planeCount < 16; ++i )
+	{
+		hits->shapes[hits->planeCount] = shapeId;
+		hits->normals[hits->planeCount] = planes[i].plane.normal;
+		hits->offsets[hits->planeCount] = planes[i].plane.offset;
+		hits->planeCount += 1;
+	}
+
+	return hits->stop == false;
+}
+
+/// Implements b3MoverFilterFcn: refuse everything.
+static bool refuseEveryShape( b3ShapeId shapeId, void* context )
+{
+	B3_UNUSED( shapeId, context );
+	return false;
+}
+
+/// b3World_CollideMover and b3World_CastMover against a floor and a wall.
+///
+/// The scene is static and gravity-free, so every answer is a closed form
+/// rather than a settling result.
+static void test_mover_world( void )
+{
+	printf( "character mover world queries\n" );
+
+	b3WorldDef def = b3DefaultWorldDef();
+	def.capacity.staticBodyCount = 8;
+	def.capacity.dynamicBodyCount = 8;
+	def.capacity.staticShapeCount = 8;
+	def.capacity.dynamicShapeCount = 8;
+	def.capacity.contactCount = 16;
+	def.gravity = V( 0, 0, 0 );
+
+	b3WorldId worldId = b3CreateWorld( &def );
+	b3World* world = b3GetWorldFromId( worldId );
+
+	// A floor whose top face is y = 0, and a wall whose face is x = 1.
+	static b3BoxHull s_floor;
+	static b3BoxHull s_wall;
+	s_floor = b3MakeBoxHull( b3fFromDouble( 4.0 ), b3fFromDouble( 0.5 ), b3fFromDouble( 4.0 ) );
+	s_wall = b3MakeBoxHull( b3fFromDouble( 0.5 ), b3fFromDouble( 2.0 ), b3fFromDouble( 4.0 ) );
+
+	b3BodyDef bodyDef = b3DefaultBodyDef();
+	bodyDef.type = b3_staticBody;
+	b3ShapeDef shapeDef = b3DefaultShapeDef();
+
+	bodyDef.position = V( 0, -0.5, 0 );
+	b3BodyId floorBody = b3CreateBody( worldId, &bodyDef );
+	b3ShapeId floorShape = b3CreateHullShape( floorBody, &shapeDef, &s_floor.base );
+
+	bodyDef.position = V( 1.5, 2, 0 );
+	b3BodyId wallBody = b3CreateBody( worldId, &bodyDef );
+	b3ShapeId wallShape = b3CreateHullShape( wallBody, &shapeDef, &s_wall.base );
+
+	validate( world );
+	b3QueryFilter any = b3DefaultQueryFilter();
+
+	// A capsule of radius 0.3 whose lower cap centre sits 0.2 above the floor.
+	b3Capsule standing = { V( 0, 0.2, 0 ), V( 0, 1.2, 0 ), b3fFromDouble( 0.3 ) };
+
+	// --- standing on the floor, clear of the wall ---
+	{
+		moverHits hits = { 0 };
+		b3World_CollideMover( worldId, &standing, any, collectMoverPlanes, &hits );
+
+		checkInt( "a mover on the floor gets one batch", hits.batchCount, 1 );
+		checkInt( "of one plane", hits.planeCount, 1 );
+		check( "from the floor", hits.shapes[0].index1 == floorShape.index1 );
+		check( "pointing up", b3fToDouble( hits.normals[0].y ) > 0.99 );
+
+		// The core segment is 0.2 above a face the radius reaches 0.3 past.
+		expect( "at the overlap depth", b3fToDouble( hits.offsets[0] ), 0.1, 4.0 / 4096.0 );
+	}
+
+	// --- in the corner, touching both ---
+	{
+		// 0.2 clear of the wall face at x = 1, so the 0.3 radius reaches 0.1
+		// into it. The core segment has to stay *outside* the wall: put it
+		// inside and b3CollideMoverAndHull declines the whole shape as a deep
+		// overlap and this reads as one batch, not two.
+		b3Capsule cornered = { V( 0.8, 0.2, 0 ), V( 0.8, 1.2, 0 ), b3fFromDouble( 0.3 ) };
+
+		moverHits hits = { 0 };
+		b3World_CollideMover( worldId, &cornered, any, collectMoverPlanes, &hits );
+
+		checkInt( "a mover in the corner gets two batches", hits.batchCount, 2 );
+		checkInt( "of one plane each", hits.planeCount, 2 );
+
+		bool sawFloor = false;
+		bool sawWall = false;
+		for ( int i = 0; i < hits.planeCount; ++i )
+		{
+			sawFloor = sawFloor || hits.shapes[i].index1 == floorShape.index1;
+			sawWall = sawWall || hits.shapes[i].index1 == wallShape.index1;
+		}
+		check( "naming the floor", sawFloor );
+		check( "and the wall", sawWall );
+	}
+
+	// --- in free space ---
+	{
+		b3Capsule floating = { V( 0, 8, 0 ), V( 0, 9, 0 ), b3fFromDouble( 0.3 ) };
+
+		moverHits hits = { 0 };
+		b3World_CollideMover( worldId, &floating, any, collectMoverPlanes, &hits );
+
+		checkInt( "a mover in free space is never called back", hits.batchCount, 0 );
+		checkInt( "and gets no planes", hits.planeCount, 0 );
+	}
+
+	// --- the filter ---
+	{
+		b3Capsule cornered = { V( 0.8, 0.2, 0 ), V( 0.8, 1.2, 0 ), b3fFromDouble( 0.3 ) };
+
+		// Move the wall out of the query's mask, leaving only the floor.
+		b3Filter wallFilter = b3Shape_GetFilter( wallShape );
+		wallFilter.categoryBits = 2;
+		b3Shape_SetFilter( wallShape, wallFilter, false );
+
+		b3QueryFilter floorOnly = b3DefaultQueryFilter();
+		floorOnly.maskBits = ~(uint64_t)2;
+
+		moverHits hits = { 0 };
+		b3World_CollideMover( worldId, &cornered, floorOnly, collectMoverPlanes, &hits );
+
+		checkInt( "a filter that excludes the wall leaves one batch", hits.batchCount, 1 );
+		check( "and it is the floor", hits.shapes[0].index1 == floorShape.index1 );
+
+		wallFilter.categoryBits = 1;
+		b3Shape_SetFilter( wallShape, wallFilter, false );
+	}
+
+	// --- returning false stops the query ---
+	{
+		b3Capsule cornered = { V( 0.8, 0.2, 0 ), V( 0.8, 1.2, 0 ), b3fFromDouble( 0.3 ) };
+
+		moverHits hits = { 0 };
+		hits.stop = true;
+		b3World_CollideMover( worldId, &cornered, any, collectMoverPlanes, &hits );
+
+		checkInt( "a callback that returns false is called once", hits.batchCount, 1 );
+	}
+
+	// --- b3World_CastMover straight down at the floor ---
+	{
+		// Start a unit up and sweep two down. The lower cap centre is at
+		// y = 1.2 and it stops with its 0.3 radius on the face at y = 0, so it
+		// travels 0.9 of the 2.0 available.
+		b3Capsule high = { V( 0, 1.2, 0 ), V( 0, 2.2, 0 ), b3fFromDouble( 0.3 ) };
+		b3c fraction = b3World_CastMover( worldId, &high, V( 0, -2, 0 ), any, NULL, NULL );
+
+		expect( "a mover dropped at the floor stops on it", b3cToDouble( fraction ), 0.9 / 2.0, 0.01 );
+	}
+
+	// --- and into open air ---
+	{
+		b3Capsule high = { V( 0, 8, 0 ), V( 0, 9, 0 ), b3fFromDouble( 0.3 ) };
+		b3c fraction = b3World_CastMover( worldId, &high, V( 0, 0, 3 ), any, NULL, NULL );
+
+		checkInt( "a sweep that hits nothing returns the whole length", b3Raw( fraction ), B3_C_ONE );
+	}
+
+	// --- the mover filter ---
+	{
+		b3Capsule high = { V( 0, 1.2, 0 ), V( 0, 2.2, 0 ), b3fFromDouble( 0.3 ) };
+		b3c fraction = b3World_CastMover( worldId, &high, V( 0, -2, 0 ), any, refuseEveryShape, NULL );
+
+		checkInt( "a filter that refuses everything lets it through", b3Raw( fraction ), B3_C_ONE );
+	}
+
+	// --- canEncroach, which is the one that matters ---
+	{
+		// This mover is already resting on the floor: it overlaps it by the
+		// slop, exactly as one does on every frame of every game. Sweeping it
+		// *sideways* must be allowed.
+		//
+		// Without canEncroach the shape cast reports an initial overlap, the
+		// callback reads fraction 0, and a character standing on the ground can
+		// never walk. Nothing else in this suite exercises that branch --
+		// b3World_CastShape sets canEncroach false.
+		b3c fraction = b3World_CastMover( worldId, &standing, V( 0.5, 0, 0 ), any, NULL, NULL );
+
+		check( "a mover resting on the floor can still slide along it", b3Raw( fraction ) > 0 );
+		checkInt( "for the whole distance asked for", b3Raw( fraction ), B3_C_ONE );
+	}
+
+	// --- and it still stops at a wall it is walking into ---
+	{
+		b3Capsule approaching = { V( 0, 0.2, 0 ), V( 0, 1.2, 0 ), b3fFromDouble( 0.3 ) };
+		b3c fraction = b3World_CastMover( worldId, &approaching, V( 2, 0, 0 ), any, NULL, NULL );
+
+		check( "walking into a wall stops short of it", b3Raw( fraction ) < B3_C_ONE );
+		check( "but not at zero", b3Raw( fraction ) > 0 );
+	}
+
+	// --- the plane cap, and the counter that says it bound ---
+	{
+		checkInt( "a scene inside the cap drops nothing", world->moverPlaneDropCount, 0 );
+
+		// A mesh is the only backend that can produce more than one plane per
+		// shape, so it is the only way to reach the cap. The mode mesh is a
+		// grid, so a wide capsule lying across it touches many triangles.
+		b3BodyDef meshBodyDef = b3DefaultBodyDef();
+		meshBodyDef.type = b3_staticBody;
+		meshBodyDef.position = V( 0, 20, 0 );
+		b3BodyId meshBody = b3CreateBody( worldId, &meshBodyDef );
+
+		static gridBlob s_grid;
+		const b3MeshData* grid = buildGrid( &s_grid, 8, 4.0, NULL );
+
+		b3ShapeDef meshShapeDef = b3DefaultShapeDef();
+		b3CreateMeshShape( meshBody, &meshShapeDef, grid, V( 1, 1, 1 ) );
+		validate( world );
+
+		// Long enough to lie across a good stretch of the grid, and fat enough
+		// to reach every triangle under it.
+		b3Capsule sprawled = { V( -2, 20.1, 0 ), V( 2, 20.1, 0 ), b3fFromDouble( 0.6 ) };
+
+		moverHits hits = { 0 };
+		b3World_CollideMover( worldId, &sprawled, any, collectMoverPlanes, &hits );
+
+		printf( "  sprawled on the grid: %d batches, %d planes, %d dropped\n", hits.batchCount, hits.planeCount,
+				world->moverPlaneDropCount );
+
+		checkInt( "a saturated batch stops at the cap", hits.planeCount, B3_NEA_MAX_MOVER_PLANES );
+		checkInt( "and the world counts that it did", world->moverPlaneDropCount, 1 );
+	}
+
+	// --- the teleport counter ---
+	{
+		checkInt( "nothing has teleported yet", world->teleportCount, 0 );
+
+		b3Body_SetTransform( wallBody, V( 1.5, 2, 0 ), b3Quat_identity );
+		checkInt( "one b3Body_SetTransform is one teleport", world->teleportCount, 1 );
+
+		b3Body_SetTransform( wallBody, V( 1.5, 2, 0 ), b3Quat_identity );
+		b3World_Step( worldId, 4 );
+		validate( world );
+
+		// Cumulative, unlike every other counter here: a step does not clear
+		// it, which is the whole point -- a respawn on frame 400 is still
+		// visible on frame 4000.
+		checkInt( "and a step does not clear the count", world->teleportCount, 2 );
+	}
+
+	validate( world );
+	b3DestroyWorld( worldId );
+}
+
 int main( void )
 {
 	b3TestInstallAssertTrap();
@@ -9367,6 +10424,10 @@ int main( void )
 	test_motion_locks_integration();
 	test_sleeping_by_step_count();
 	test_move_events_and_proxies();
+	test_world_queries();
+	test_continuous();
+	test_sensors();
+	test_mover_world();
 
 	test_box_on_ground();
 	test_warm_starting();

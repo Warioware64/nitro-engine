@@ -13,8 +13,8 @@
 ///
 /// The half of upstream's physics_world.c that does not integrate. Absent,
 /// each with a phase: `b3World_Draw` and every debug-draw
-/// callback, the ray/shape/mover casts and overlap queries (Phase 7 with the
-/// mover), `b3World_Explode`, recording, and `b3World_DumpMemoryStats`.
+/// callback, `b3World_Explode`, recording, and `b3World_DumpMemoryStats`. The
+/// ray, shape and mover casts and the overlap queries all arrived with Phase 7.
 ///
 /// @section validators Why the validators are the point of this file
 ///
@@ -190,6 +190,10 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	// a world with no mesh shapes must pay nothing for the mesh pools.
 	int meshContactCapacity = b3MaxInt( 0, def->capacity.meshContactCount );
 
+	// No floor, same argument as jointCapacity: most worlds have no sensors,
+	// and each one declared costs its own overlap arrays on top of the slot.
+	int sensorCapacity = b3MaxInt( 0, def->capacity.sensorCount );
+
 	// Peak per-step scratch, from the capacities rather than from a round
 	// number and hope.
 	//
@@ -327,6 +331,12 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->islandIdPool = b3CreateIdPool();
 	b3Array_Reserve( world->islands, dynamicBodyCapacity );
 
+	// No id pool: b3Shape::sensorIndex is the only reference to a sensor, and
+	// b3DestroySensor keeps it correct by swapping rather than by recycling.
+	// Each sensor reserves its own overlap arrays when its shape is created --
+	// see b3CreateSensor.
+	b3Array_Reserve( world->sensors, sensorCapacity );
+
 	// The event arrays, sized from the scene rather than from 4.
 	//
 	// Every one of these is pushed to *during* the step, so a reserve that is
@@ -338,12 +348,25 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	//   begin/end      bounded by the contact count
 	//   hit events     a subset of begin events
 	//   joint events   at most one per joint, so the joint capacity
+	//   sensor events  every visitor of every sensor could change at once
 	b3Array_Reserve( world->bodyMoveEvents, dynamicBodyCapacity );
 	b3Array_Reserve( world->contactBeginEvents, contactCapacity );
 	b3Array_Reserve( world->contactEndEvents[0], contactCapacity );
 	b3Array_Reserve( world->contactEndEvents[1], contactCapacity );
 	b3Array_Reserve( world->contactHitEvents, contactCapacity );
 	b3Array_Reserve( world->jointEvents, jointCapacity );
+
+	// The worst case is every sensor's whole overlap set turning over in one
+	// step -- every visitor leaving and a full set of new ones arriving -- so
+	// each direction is bounded by the same product. It is only the bound: a
+	// sensor that nothing enters costs the reserve and nothing more.
+	{
+		int sensorEventCapacity = sensorCapacity * B3_NEA_MAX_SENSOR_VISITORS;
+		b3Array_Reserve( world->sensorBeginEvents, sensorEventCapacity );
+		b3Array_Reserve( world->sensorEndEvents[0], sensorEventCapacity );
+		b3Array_Reserve( world->sensorEndEvents[1], sensorEventCapacity );
+	}
+
 	world->endEventArrayIndex = 0;
 
 	// The per-step scratch that upstream keeps per worker.
@@ -359,6 +382,7 @@ b3WorldId b3CreateWorld( const b3WorldDef* def )
 	world->hasHitEvents = false;
 	world->jointStateBitSet = b3CreateBitSet( (uint32_t)jointCapacity );
 	world->hasJointEvents = false;
+	world->sensorEventBitSet = b3CreateBitSet( (uint32_t)sensorCapacity );
 	world->enlargedSimBitSet = b3CreateBitSet( (uint32_t)shapeCapacity );
 	world->awakeIslandBitSet = b3CreateBitSet( (uint32_t)dynamicBodyCapacity );
 
@@ -404,6 +428,7 @@ void b3DestroyWorld( b3WorldId worldId )
 	b3DestroyBitSet( &world->contactStateBitSet );
 	b3DestroyBitSet( &world->hitEventBitSet );
 	b3DestroyBitSet( &world->jointStateBitSet );
+	b3DestroyBitSet( &world->sensorEventBitSet );
 	b3DestroyBitSet( &world->enlargedSimBitSet );
 	b3DestroyBitSet( &world->awakeIslandBitSet );
 
@@ -413,6 +438,21 @@ void b3DestroyWorld( b3WorldId worldId )
 	b3Array_Destroy( world->contactEndEvents[1] );
 	b3Array_Destroy( world->contactHitEvents );
 	b3Array_Destroy( world->jointEvents );
+	b3Array_Destroy( world->sensorBeginEvents );
+	b3Array_Destroy( world->sensorEndEvents[0] );
+	b3Array_Destroy( world->sensorEndEvents[1] );
+
+	// A sensor owns three arrays of its own. Freed here rather than through
+	// b3DestroySensor, which also pushes end-touch events -- pointless for a
+	// world nobody will read events from again.
+	for ( int i = 0; i < world->sensors.count; ++i )
+	{
+		b3Sensor* sensor = world->sensors.data + i;
+		b3Array_Destroy( sensor->hits );
+		b3Array_Destroy( sensor->overlaps1 );
+		b3Array_Destroy( sensor->overlaps2 );
+	}
+	b3Array_Destroy( world->sensors );
 
 	b3Array_Destroy( world->bodies );
 
@@ -918,6 +958,7 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	b3Array_Clear( world->contactBeginEvents );
 	b3Array_Clear( world->contactHitEvents );
 	b3Array_Clear( world->jointEvents );
+	b3Array_Clear( world->sensorBeginEvents );
 
 	// The capacities the world actually reached, for reporting. Upstream also
 	// uses these to size the next world; the port treats b3Capacity as the size
@@ -985,6 +1026,14 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	// Integrate, solve, integrate, finalize.
 	b3Solve( world, &context );
 
+	// Rebuild every sensor's overlap set and publish its transitions.
+	//
+	// After the solve, so the poses queried are the ones the step ended at, and
+	// so the continuous pass has already deposited the hits of anything that
+	// crossed a sensor without ending inside it. Before the buffer swap below,
+	// so those events are the ones this step publishes.
+	b3OverlapSensors( world );
+
 	// Every stack allocation made this step must have been freed.
 	B3_ASSERT( b3GetStackAllocation( &world->stack ) == 0 );
 	b3GrowStack( &world->stack );
@@ -992,9 +1041,11 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	// Publish this step's end-touch events and hand the other buffer to the
 	// next step. The double buffering is what lets a contact destroyed
 	// *between* steps still report its end touch: the destroy writes into the
-	// buffer the next step will publish.
+	// buffer the next step will publish. Sensor end events share the index for
+	// the same reason and get the same treatment.
 	world->endEventArrayIndex = 1 - world->endEventArrayIndex;
 	b3Array_Clear( world->contactEndEvents[world->endEventArrayIndex] );
+	b3Array_Clear( world->sensorEndEvents[world->endEventArrayIndex] );
 
 	world->locked = false;
 }
@@ -1036,6 +1087,28 @@ b3ContactEvents b3World_GetContactEvents( b3WorldId worldId )
 		.beginCount = world->contactBeginEvents.count,
 		.endCount = world->contactEndEvents[endEventArrayIndex].count,
 		.hitCount = world->contactHitEvents.count,
+	};
+	return events;
+}
+
+b3SensorEvents b3World_GetSensorEvents( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	B3_ASSERT( world->locked == false );
+	if ( world->locked )
+	{
+		return ( b3SensorEvents ){ 0 };
+	}
+
+	// Same double buffering, same index, and for the same reason as the contact
+	// end events above.
+	int endEventArrayIndex = 1 - world->endEventArrayIndex;
+
+	b3SensorEvents events = {
+		.beginEvents = world->sensorBeginEvents.data,
+		.endEvents = world->sensorEndEvents[endEventArrayIndex].data,
+		.beginCount = world->sensorBeginEvents.count,
+		.endCount = world->sensorEndEvents[endEventArrayIndex].count,
 	};
 	return events;
 }
@@ -1365,7 +1438,17 @@ void b3Collide( b3World* world )
 {
 	world->recycledContactCount = 0;
 	world->meshManifoldDropCount = 0;
+	world->sensorOverlapDropCount = 0;
+
+	// Cleared here rather than by b3World_CollideMover, which is why the mover
+	// must be read straight after it runs. teleportCount is deliberately not
+	// in this list -- see its note in physics_world.h.
+	world->moverPlaneDropCount = 0;
 	world->parkedBodyCount = 0;
+	world->toiEventCount = 0;
+	world->toiDistanceIterations = 0;
+	world->toiPushBackIterations = 0;
+	world->toiRootIterations = 0;
 
 	// Phase 3B had this pass clear the begin/hit events and swap the end-event
 	// buffers, because there was no step to own them. b3World_Step exists as of
@@ -1991,7 +2074,630 @@ void b3ValidateContacts( b3World* world )
 	B3_ASSERT( allocatedContactCount == contactIdCount );
 }
 
-#else
+#endif
+
+// =========================================================================
+// World queries
+// =========================================================================
+//
+// Phase 7. Five entry points, all the same shape: resolve the world, hand a
+// context to the matching b3DynamicTree_* over each of the three trees, and in
+// the callback resolve the proxy's userData to a b3Shape, filter it, take it
+// into the shape's own frame and run the per-shape function that Phase 2 wrote
+// and Stage 1a extended to meshes.
+//
+// Three things upstream has here are gone:
+//
+//   * the `b3Pos origin` argument and the b3ToRelativeTransform round trip it
+//     drives -- see the note in types.h above b3RayResult
+//   * the recording trampolines, with the recorder itself (Phase 3)
+//   * b3World_CollideMover and b3World_CastMover, which need the mover
+//
+// The per-shape functions all take a transform, so nothing here has to know
+// which kind of shape it found.
+
+typedef struct
+{
+	b3World* world;
+	b3OverlapResultFcn* fcn;
+	b3QueryFilter filter;
+	void* userContext;
+} b3WorldQueryContext;
+
+/// Resolve a proxy's userData to a shape and apply the query filter.
+/// @return NULL when the shape should be skipped.
+static b3Shape* b3ResolveQueryShape( b3World* world, uint64_t userData, b3QueryFilter filter )
+{
+	int shapeId = (int)userData;
+	b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+	b3Filter shapeFilter = shape->filter;
+	if ( b3ShouldQueryCollide( &shapeFilter, &filter ) == false )
+	{
+		return NULL;
+	}
+
+	return shape;
+}
+
+/// The shape's transform, which is its body's.
+static b3Transform b3GetQueryShapeTransform( b3World* world, const b3Shape* shape )
+{
+	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+	return b3GetBodyTransformQuick( world, body );
+}
+
+static b3ShapeId b3MakeQueryShapeId( b3World* world, const b3Shape* shape )
+{
+	return ( b3ShapeId ){ shape->id + 1, world->worldId, shape->generation };
+}
+
+/// The material a cast output landed on.
+///
+/// b3CastOutput::materialIndex selects a triangle's material on a multi-material
+/// mesh, and every shape in this port carries exactly one -- so the clamp is
+/// what makes a per-triangle index from a blob harmless here. When the API grows
+/// multi-material meshes this is the line that stops being a clamp.
+static uint64_t b3GetQueryMaterialId( const b3Shape* shape, b3CastOutput output )
+{
+	int materialIndex = b3ClampInt( output.materialIndex, 0, shape->materialCount - 1 );
+	return b3GetShapeMaterials( shape )[materialIndex].userMaterialId;
+}
+
+static bool b3TreeQueryCallback( int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldQueryContext* queryContext = context;
+	b3World* world = queryContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, queryContext->filter );
+	if ( shape == NULL )
+	{
+		return true;
+	}
+
+	return queryContext->fcn( b3MakeQueryShapeId( world, shape ), queryContext->userContext );
+}
+
+b3TreeStats b3World_OverlapAABB( b3WorldId worldId, b3AABB aabb, b3QueryFilter filter, b3OverlapResultFcn* fcn, void* context )
+{
+	b3TreeStats treeStats = { 0 };
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return treeStats;
+	}
+
+	B3_ASSERT( b3IsValidAABB( aabb ) );
+
+	b3WorldQueryContext queryContext = { world, fcn, filter, context };
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3TreeStats treeResult =
+			b3DynamicTree_Query( world->broadPhase.trees + i, aabb, filter.maskBits, false, b3TreeQueryCallback, &queryContext );
+
+		treeStats.nodeVisits += treeResult.nodeVisits;
+		treeStats.leafVisits += treeResult.leafVisits;
+	}
+
+	return treeStats;
+}
+
+typedef struct
+{
+	b3World* world;
+	b3OverlapResultFcn* fcn;
+	b3QueryFilter filter;
+	b3ShapeProxy proxy;
+	void* userContext;
+} b3WorldOverlapContext;
+
+static bool b3TreeOverlapCallback( int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldOverlapContext* overlapContext = context;
+	b3World* world = overlapContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, overlapContext->filter );
+	if ( shape == NULL )
+	{
+		return true;
+	}
+
+	// The tree only said the fat AABBs overlap. This is the exact test.
+	b3Transform transform = b3GetQueryShapeTransform( world, shape );
+	if ( b3OverlapShape( shape, transform, &overlapContext->proxy ) == false )
+	{
+		return true;
+	}
+
+	return overlapContext->fcn( b3MakeQueryShapeId( world, shape ), overlapContext->userContext );
+}
+
+b3TreeStats b3World_OverlapShape( b3WorldId worldId, const b3ShapeProxy* proxy, b3QueryFilter filter, b3OverlapResultFcn* fcn,
+								  void* context )
+{
+	b3TreeStats treeStats = { 0 };
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return treeStats;
+	}
+
+	B3_ASSERT( proxy != NULL && proxy->count > 0 );
+
+	b3AABB aabb = b3ComputeProxyAABB( proxy );
+	b3WorldOverlapContext overlapContext = { world, fcn, filter, *proxy, context };
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3TreeStats treeResult = b3DynamicTree_Query( world->broadPhase.trees + i, aabb, filter.maskBits, false,
+													  b3TreeOverlapCallback, &overlapContext );
+
+		treeStats.nodeVisits += treeResult.nodeVisits;
+		treeStats.leafVisits += treeResult.leafVisits;
+	}
+
+	return treeStats;
+}
+
+typedef struct
+{
+	b3World* world;
+	b3CastResultFcn* fcn;
+	b3QueryFilter filter;
+	b3c fraction;
+	void* userContext;
+} b3WorldRayCastContext;
+
+static b3c b3WorldRayCastCallback( const b3RayCastInput* input, int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldRayCastContext* rayContext = context;
+	b3World* world = rayContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, rayContext->filter );
+	if ( shape == NULL )
+	{
+		return input->maxFraction;
+	}
+
+	b3Transform transform = b3GetQueryShapeTransform( world, shape );
+	b3CastOutput output = b3RayCastShape( shape, transform, input );
+
+	if ( output.hit == false )
+	{
+		return input->maxFraction;
+	}
+
+	B3_ASSERT( b3Raw( output.fraction ) <= b3Raw( input->maxFraction ) );
+
+	b3c fraction = rayContext->fcn( b3MakeQueryShapeId( world, shape ), output.point, output.normal, output.fraction,
+									b3GetQueryMaterialId( shape, output ), output.triangleIndex, output.childIndex,
+									rayContext->userContext );
+
+	// A negative return means "skip this shape", and must not shorten the ray.
+	// Upstream's guard is the same, and the asymmetry is deliberate: the tree
+	// gets told what the caller returned either way, so returning -1 there is
+	// what keeps the traversal going at full length.
+	if ( 0 <= b3Raw( fraction ) && b3Raw( fraction ) <= b3Raw( b3c_one ) )
+	{
+		rayContext->fraction = fraction;
+	}
+
+	return fraction;
+}
+
+b3TreeStats b3World_CastRay( b3WorldId worldId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter, b3CastResultFcn* fcn,
+							 void* context )
+{
+	b3TreeStats treeStats = { 0 };
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return treeStats;
+	}
+
+	b3RayCastInput input = { origin, translation, b3c_one };
+	b3WorldRayCastContext rayContext = {
+		.world = world,
+		.fcn = fcn,
+		.filter = filter,
+		.fraction = b3c_one,
+		.userContext = context,
+	};
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3TreeStats treeResult = b3DynamicTree_RayCast( world->broadPhase.trees + i, &input, filter.maskBits, false,
+														b3WorldRayCastCallback, &rayContext );
+
+		treeStats.nodeVisits += treeResult.nodeVisits;
+		treeStats.leafVisits += treeResult.leafVisits;
+
+		if ( b3Raw( rayContext.fraction ) == 0 )
+		{
+			// The caller terminated the cast. Carrying that across the tree
+			// boundary is what makes "stop now" mean it.
+			break;
+		}
+
+		// Whatever the last tree clipped the ray to, the next one starts from.
+		input.maxFraction = rayContext.fraction;
+	}
+
+	return treeStats;
+}
+
+static b3c b3RayCastClosestFcn( b3ShapeId shapeId, b3Vec3 point, b3Vec3 normal, b3c fraction, uint64_t userMaterialId,
+								int triangleIndex, int childIndex, void* context )
+{
+	b3RayResult* result = context;
+
+	result->shapeId = shapeId;
+	result->point = point;
+	result->normal = normal;
+	result->fraction = fraction;
+	result->userMaterialId = userMaterialId;
+	result->triangleIndex = triangleIndex;
+	result->childIndex = childIndex;
+	result->hit = true;
+
+	// Returning the fraction clips the ray, so the next shape only reports if
+	// it is nearer. That is the whole of "closest".
+	return fraction;
+}
+
+b3RayResult b3World_CastRayClosest( b3WorldId worldId, b3Vec3 origin, b3Vec3 translation, b3QueryFilter filter )
+{
+	b3RayResult result = { 0 };
+	result.triangleIndex = B3_NULL_INDEX;
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return result;
+	}
+
+	b3RayCastInput input = { origin, translation, b3c_one };
+	b3WorldRayCastContext rayContext = {
+		.world = world,
+		.fcn = b3RayCastClosestFcn,
+		.filter = filter,
+		.fraction = b3c_one,
+		.userContext = &result,
+	};
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3TreeStats treeResult = b3DynamicTree_RayCast( world->broadPhase.trees + i, &input, filter.maskBits, false,
+														b3WorldRayCastCallback, &rayContext );
+
+		result.nodeVisits += treeResult.nodeVisits;
+		result.leafVisits += treeResult.leafVisits;
+
+		if ( b3Raw( rayContext.fraction ) == 0 )
+		{
+			break;
+		}
+
+		input.maxFraction = rayContext.fraction;
+	}
+
+	return result;
+}
+
+typedef struct
+{
+	b3World* world;
+	b3CastResultFcn* fcn;
+	b3QueryFilter filter;
+	b3c fraction;
+	b3ShapeCastInput input;
+	void* userContext;
+} b3WorldShapeCastContext;
+
+static b3c b3WorldShapeCastCallback( const b3BoxCastInput* input, int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldShapeCastContext* castContext = context;
+	b3World* world = castContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, castContext->filter );
+	if ( shape == NULL )
+	{
+		return input->maxFraction;
+	}
+
+	// The tree sweeps a box and this sweeps the real proxy, so the tree's
+	// fraction is only a bound. Take it and rebuild the true input around it.
+	b3ShapeCastInput localInput = castContext->input;
+	localInput.maxFraction = input->maxFraction;
+
+	b3Transform transform = b3GetQueryShapeTransform( world, shape );
+	b3CastOutput output = b3ShapeCastShape( shape, transform, &localInput );
+
+	if ( output.hit == false )
+	{
+		return input->maxFraction;
+	}
+
+	b3c fraction = castContext->fcn( b3MakeQueryShapeId( world, shape ), output.point, output.normal, output.fraction,
+									 b3GetQueryMaterialId( shape, output ), output.triangleIndex, output.childIndex,
+									 castContext->userContext );
+
+	if ( 0 <= b3Raw( fraction ) && b3Raw( fraction ) <= b3Raw( b3c_one ) )
+	{
+		castContext->fraction = fraction;
+	}
+
+	return fraction;
+}
+
+b3TreeStats b3World_CastShape( b3WorldId worldId, const b3ShapeProxy* proxy, b3Vec3 translation, b3QueryFilter filter,
+							   b3CastResultFcn* fcn, void* context )
+{
+	b3TreeStats treeStats = { 0 };
+
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return treeStats;
+	}
+
+	B3_ASSERT( proxy != NULL && proxy->count > 0 );
+
+	b3WorldShapeCastContext castContext = { 0 };
+	castContext.world = world;
+	castContext.fcn = fcn;
+	castContext.filter = filter;
+	castContext.fraction = b3c_one;
+	castContext.input.proxy = *proxy;
+	castContext.input.translation = translation;
+	castContext.input.maxFraction = b3c_one;
+	castContext.input.canEncroach = false;
+	castContext.userContext = context;
+
+	b3BoxCastInput treeInput = { b3ComputeProxyAABB( proxy ), translation, b3c_one };
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3TreeStats treeResult = b3DynamicTree_BoxCast( world->broadPhase.trees + i, &treeInput, filter.maskBits, false,
+														b3WorldShapeCastCallback, &castContext );
+
+		treeStats.nodeVisits += treeResult.nodeVisits;
+		treeStats.leafVisits += treeResult.leafVisits;
+
+		if ( b3Raw( castContext.fraction ) == 0 )
+		{
+			break;
+		}
+
+		treeInput.maxFraction = castContext.fraction;
+	}
+
+	return treeStats;
+}
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// Two more entry points in the same shape as the five above, and they close
+// Phase 7. b3World_CollideMover asks "what am I inside" and b3World_CastMover
+// asks "how far can I go"; a controller alternates them, which is why upstream
+// puts them in different halves of physics_world.c and the port does not.
+//
+// Neither takes upstream's `b3Pos origin`, the same subtraction every query
+// here made -- and it is *safe* here for a reason worth stating, because a
+// plane looks like the one thing that would care. A b3CollisionPlane's offset
+// is a penetration depth measured from where the mover is, not a
+// dot( normal, point ), so there is no absolute position in the result for an
+// origin to make more accurate.
+
+typedef struct
+{
+	b3World* world;
+	b3PlaneResultFcn* fcn;
+	b3QueryFilter filter;
+	b3Capsule mover;
+	void* userContext;
+} b3WorldMoverContext;
+
+/// Implements b3TreeQueryCallbackFcn.
+static bool b3WorldCollideMoverCallback( int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldMoverContext* moverContext = context;
+	b3World* world = moverContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, moverContext->filter );
+	if ( shape == NULL )
+	{
+		return true;
+	}
+
+	// Upstream puts 64 planes on the stack here. That is 1792 bytes claimed
+	// underneath a tree traversal on a machine with 16 KB of DTCM, to hold a
+	// number of planes no caller has ever collected. See
+	// B3_NEA_MAX_MOVER_PLANES for the whole argument and for what a dropped
+	// plane costs.
+	b3PlaneResult buffer[B3_NEA_MAX_MOVER_PLANES];
+	b3Transform transform = b3GetQueryShapeTransform( world, shape );
+	int count = b3CollideMover( buffer, B3_NEA_MAX_MOVER_PLANES, shape, transform, &moverContext->mover );
+
+	if ( count == B3_NEA_MAX_MOVER_PLANES )
+	{
+		// The batch saturated, so b3CollideMoverAndMesh stopped its traversal
+		// and triangles past this point were never tested. Counted rather than
+		// silently accepted -- a bound the port invents is a bound it has to be
+		// able to see bind.
+		world->moverPlaneDropCount += 1;
+	}
+
+	if ( count > 0 )
+	{
+		return moverContext->fcn( b3MakeQueryShapeId( world, shape ), buffer, count, moverContext->userContext );
+	}
+
+	return true;
+}
+
+void b3World_CollideMover( b3WorldId worldId, const b3Capsule* mover, b3QueryFilter filter, b3PlaneResultFcn* fcn,
+						   void* context )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	B3_ASSERT( mover != NULL && fcn != NULL );
+	B3_ASSERT( b3IsValidVec3( mover->center1 ) && b3IsValidVec3( mover->center2 ) );
+
+	b3Vec3 r = b3MakeVec3( mover->radius, mover->radius, mover->radius );
+	b3AABB aabb;
+	aabb.lowerBound = b3Sub( b3Min( mover->center1, mover->center2 ), r );
+	aabb.upperBound = b3Add( b3Max( mover->center1, mover->center2 ), r );
+
+	b3WorldMoverContext moverContext = { 0 };
+	moverContext.world = world;
+	moverContext.fcn = fcn;
+	moverContext.filter = filter;
+	moverContext.mover = *mover;
+	moverContext.userContext = context;
+
+	// No early-out and no clip carry, unlike the casts: every tree has to be
+	// asked, because a mover wants *all* the planes rather than the nearest
+	// one. The caller's fcn can still stop it by returning false.
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3DynamicTree_Query( world->broadPhase.trees + i, aabb, filter.maskBits, false, b3WorldCollideMoverCallback,
+							 &moverContext );
+	}
+}
+
+typedef struct
+{
+	b3World* world;
+	b3MoverFilterFcn* fcn;
+	b3QueryFilter filter;
+	b3c fraction;
+	b3ShapeCastInput input;
+	void* userContext;
+} b3WorldMoverCastContext;
+
+/// Implements b3TreeBoxCastCallbackFcn.
+static b3c b3WorldCastMoverCallback( const b3BoxCastInput* input, int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	b3WorldMoverCastContext* castContext = context;
+	b3World* world = castContext->world;
+
+	b3Shape* shape = b3ResolveQueryShape( world, userData, castContext->filter );
+	if ( shape == NULL )
+	{
+		return castContext->fraction;
+	}
+
+	if ( castContext->fcn != NULL && castContext->fcn( b3MakeQueryShapeId( world, shape ), castContext->userContext ) == false )
+	{
+		return castContext->fraction;
+	}
+
+	// The tree sweeps a box and this sweeps the real capsule, so the tree's
+	// fraction is only a bound -- same as b3World_CastShape above.
+	b3ShapeCastInput localInput = castContext->input;
+	localInput.maxFraction = input->maxFraction;
+
+	b3Transform transform = b3GetQueryShapeTransform( world, shape );
+	b3CastOutput output = b3ShapeCastShape( shape, transform, &localInput );
+
+	if ( b3Raw( output.fraction ) == 0 )
+	{
+		// Already overlapping. Ignored rather than reported as a stop, because
+		// a mover resting against a wall overlaps it by the slop every frame
+		// and must still be able to slide along it. This is the other half of
+		// canEncroach below.
+		return castContext->fraction;
+	}
+
+	if ( output.hit == false )
+	{
+		return castContext->fraction;
+	}
+
+	castContext->fraction = output.fraction;
+	return output.fraction;
+}
+
+b3c b3World_CastMover( b3WorldId worldId, const b3Capsule* mover, b3Vec3 translation, b3QueryFilter filter,
+					   b3MoverFilterFcn* fcn, void* context )
+{
+	b3World* world = b3GetUnlockedWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		return b3c_one;
+	}
+
+	B3_ASSERT( mover != NULL );
+	B3_ASSERT( b3IsValidVec3( mover->center1 ) && b3IsValidVec3( mover->center2 ) );
+	B3_ASSERT( b3IsValidVec3( translation ) );
+
+	b3WorldMoverCastContext castContext = { 0 };
+	castContext.world = world;
+	castContext.fcn = fcn;
+	castContext.filter = filter;
+	castContext.fraction = b3c_one;
+	castContext.input.proxy = ( b3ShapeProxy ){ &mover->center1, 2, mover->radius };
+	castContext.input.translation = translation;
+	castContext.input.maxFraction = b3c_one;
+
+	// Load bearing, and the one line here that is not shared with
+	// b3World_CastShape (which sets it false). Encroachment lets a proxy that
+	// is *already touching* advance to within a slop of what it touches instead
+	// of reporting an initial overlap. Without it a mover resting on the floor
+	// or against a wall reports fraction 0 on every frame and never moves
+	// again. See the branch in b3ShapeCast.
+	castContext.input.canEncroach = b3Raw( mover->radius ) > 0;
+	castContext.userContext = context;
+
+	b3Vec3 centers[2] = { mover->center1, mover->center2 };
+	b3BoxCastInput treeInput = { b3MakeAABB( b3Min( centers[0], centers[1] ), b3Max( centers[0], centers[1] ) ), translation,
+								 b3c_one };
+	treeInput.box = b3AABB_Inflate( treeInput.box, mover->radius );
+
+	for ( int i = 0; i < b3_bodyTypeCount; ++i )
+	{
+		b3DynamicTree_BoxCast( world->broadPhase.trees + i, &treeInput, filter.maskBits, false, b3WorldCastMoverCallback,
+							   &castContext );
+
+		if ( b3Raw( castContext.fraction ) == 0 )
+		{
+			break;
+		}
+
+		treeInput.maxFraction = castContext.fraction;
+	}
+
+	return castContext.fraction;
+}
+
+// The no-op halves of the three validators above. B3_ENABLE_VALIDATION is
+// always *defined* and carries 0 or 1, so this must test its value -- a
+// defined() test here compiles the stubs into neither configuration and the
+// release link fails on every call site.
+#if B3_ENABLE_VALIDATION == 0
 
 void b3ValidateConnectivity( b3World* world )
 {

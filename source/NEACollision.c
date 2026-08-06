@@ -273,6 +273,10 @@ static inline NEA_Vec3 ne_vec3_rotate(NEA_Vec3 v, const m4x3 *mat)
     return r;
 }
 
+// ARM mode, like the NEA_ColTest* family below. 36 __aeabi_lmul calls in Thumb,
+// the most of any function in the core archive -- it transforms every vertex and
+// re-derives every plane.
+ARM_CODE
 void NEA_ColMeshUpdateTransform(NEA_ColMesh *mesh, const m4x3 *matrix)
 {
     NEA_AssertPointer(mesh, "NULL mesh pointer");

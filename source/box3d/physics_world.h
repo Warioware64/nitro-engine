@@ -21,9 +21,11 @@
 ///     `workerCount` go with them.
 ///   - **The hull database.** Hulls are baked on the host and live in ROM, so
 ///     a shape keeps the caller's pointer. See shape.c.
-///   - **Sensors** (Phase 7), **recording** and **world snapshots**
-///     (B3_NEA_NO_RECORDING), **name caches** (B3_NEA_NO_NAMES), and the four
-///     **debug draw bitsets** with their shape callbacks.
+///   - **Recording** and **world snapshots** (B3_NEA_NO_RECORDING), **name
+///     caches** (B3_NEA_NO_NAMES), and the four **debug draw bitsets** with
+///     their shape callbacks. Sensors arrived in Phase 7 Stage 3 and are here;
+///     their per-worker b3SensorTaskContext folded into sensorEventBitSet by
+///     the first rule above.
 ///   - **`b3Profile` and the counters.** Millisecond timers on a machine
 ///     without a millisecond clock. NEA measures in scanlines.
 ///   - **`inv_dt`.** The time step is a compile-time constant here
@@ -45,6 +47,7 @@
 #include "container.h"
 #include "core.h"
 #include "id_pool.h"
+#include "sensor.h"
 
 #include "box3d/box3d.h"
 #include "box3d/id.h"
@@ -71,6 +74,8 @@ b3DeclareArray( b3ContactBeginTouchEvent );
 b3DeclareArray( b3ContactEndTouchEvent );
 b3DeclareArray( b3ContactHitEvent );
 b3DeclareArray( b3JointEvent );
+b3DeclareArray( b3SensorBeginTouchEvent );
+b3DeclareArray( b3SensorEndTouchEvent );
 
 /// The three fixed solver sets, and where the sleeping ones start.
 enum b3SetType
@@ -132,6 +137,12 @@ typedef struct b3World
 	b3IdPool shapeIdPool;
 	b3Array( b3Shape ) shapes;
 
+	/// The sensors, dense and unordered -- b3Shape::sensorIndex is the map into
+	/// it, and b3DestroySensor keeps that map correct by swapping the last
+	/// sensor into the hole. There is no id pool, because nothing outside the
+	/// shape refers to a sensor by index.
+	b3Array( b3Sensor ) sensors;
+
 	// -------------------------------------------------------------------
 	// Per-step scratch, one worker
 	// -------------------------------------------------------------------
@@ -160,6 +171,17 @@ typedef struct b3World
 	/// The hasHitEvents counterpart, and the same optimization.
 	bool hasJointEvents;
 
+	/// Aligns with world->sensors; a set bit means that sensor's overlap set
+	/// differs from last step's and owes begin or end events.
+	///
+	/// Upstream keeps one of these per worker in a b3SensorTaskContext and
+	/// unions them before publishing. One worker, one bitset. It is still a
+	/// bitset rather than a flag on b3Sensor because the publish pass walks it
+	/// by trailing-zero count, which skips whole 64-sensor words of unchanged
+	/// sensors -- the common case, since a settled trigger volume changes
+	/// nothing from step to step.
+	b3BitSet sensorEventBitSet;
+
 	/// How many contacts the last collide pass answered from the recycling
 	/// fast path instead of re-running the narrow phase.
 	///
@@ -174,6 +196,21 @@ typedef struct b3World
 	/// Diagnostic, and reset with the other per-step counters in b3Collide.
 	int parkedBodyCount;
 
+	/// Fast bodies the continuous pass pulled back to a time of impact this
+	/// step, and the worst iteration counts b3TimeOfImpact reported while doing
+	/// it.
+	///
+	/// The iteration counts are the reason b3TOIOutput carries them at all.
+	/// Upstream sets its caps -- 25 outer, 50 root -- from float experience,
+	/// and whether they are right for a Q12 separation function paired with a
+	/// Q30 bracket is a question only measurement answers. Because the port is
+	/// deterministic integer code, what the host tests read here is exactly
+	/// what the hardware runs.
+	int toiEventCount;
+	int toiDistanceIterations;
+	int toiPushBackIterations;
+	int toiRootIterations;
+
 	/// Normal clusters the last collide pass threw away because a mesh contact
 	/// produced more than B3_NEA_MAX_MESH_MANIFOLDS of them.
 	///
@@ -183,6 +220,45 @@ typedef struct b3World
 	/// looks any different. See B3_NEA_MAX_MESH_MANIFOLDS for the retention
 	/// rule.
 	int meshManifoldDropCount;
+
+	/// Visitors the last sensor pass threw away because a sensor already held
+	/// B3_NEA_MAX_SENSOR_VISITORS of them.
+	///
+	/// Same rule and same reason as meshManifoldDropCount above: the cap is the
+	/// port's and has no upstream counterpart, and what it costs when it binds
+	/// is invisible from anywhere else -- a begin event that never fires, and
+	/// then an end event that never fires either, because a set that was never
+	/// entered cannot be left.
+	int sensorOverlapDropCount;
+
+	/// Shapes whose plane batch filled B3_NEA_MAX_MOVER_PLANES during the last
+	/// b3World_CollideMover call.
+	///
+	/// Batches, not planes -- counting planes exactly means finishing a mesh
+	/// traversal past the cap, which is a GJK call per remaining triangle and
+	/// exactly the cost the cap exists to avoid. See B3_NEA_MAX_MOVER_PLANES.
+	///
+	/// Unlike the two above, this one is not produced by the step: a mover runs
+	/// between steps, and b3Collide clears this at the top of the next one. So
+	/// read it straight after the mover, not at the end of the frame.
+	int moverPlaneDropCount;
+
+	/// Calls to b3Body_SetTransform over the life of the world.
+	///
+	/// The odd one out here: **cumulative, never reset**. A teleport is a rare
+	/// event -- a respawn, a level warp, a camera target snapping -- and the
+	/// question worth asking is "did this happen at all", which a per-step
+	/// reading answers with 1 for the single frame that did it and 0 for the
+	/// hundred either side.
+	///
+	/// It is here because a teleport is not free and nothing else says so. The
+	/// body's shapes re-enter the move buffer, re-pair on the next step, form
+	/// contacts and re-form their island; in a world whose capacity was sized
+	/// from the settled scene, that is where a mid-step allocation comes from.
+	/// A rising lateAllocCount with no visible cause, next to a non-zero
+	/// reading here, is the explanation -- and it is not a leak, because the
+	/// memory is reused. Without this counter the two are indistinguishable.
+	int teleportCount;
 
 	/// Bodies whose shapes have enlarged AABBs. A bitset rather than a flag
 	/// walk, because a world can hold thousands of static shapes that never
@@ -212,6 +288,13 @@ typedef struct b3World
 	b3Array( b3ContactHitEvent ) contactHitEvents;
 
 	b3Array( b3JointEvent ) jointEvents;
+
+	b3Array( b3SensorBeginTouchEvent ) sensorBeginEvents;
+
+	/// Double buffered for the reason the contact end events are, and sharing
+	/// their endEventArrayIndex: a sensor or a visitor destroyed *between*
+	/// steps writes its end touch into the buffer the next step will publish.
+	b3Array( b3SensorEndTouchEvent ) sensorEndEvents[2];
 
 	// -------------------------------------------------------------------
 	// Tuning

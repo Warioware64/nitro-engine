@@ -54,6 +54,17 @@ Features:
 - **Per-bone collision** for animated models: attach collision primitives
   (sphere, capsule, AABB) to skeleton bones. Shapes follow the animation in
   real time for accurate hit detection on animated characters.
+- **3D rigid body physics (Box3D)**: a fixed-point port of Erin Catto's
+  `Box3D <https://github.com/erincatto/box3d>`_, with no floating point anywhere
+  in the simulation. Spheres, capsules, convex hulls and baked triangle-mesh
+  levels; persistent contacts with warm starting, islands and sleeping; nine
+  joint types (distance, revolute, spherical, weld, motor, prismatic, parallel,
+  wheel and a non-solving filter joint) with springs, motors and limits;
+  continuous collision for fast-moving bodies; sensors; world ray casts, shape
+  casts and overlap queries; and a **kinematic character mover** that walks a
+  capsule up stairs and slopes without fighting the solver. Ships as a separate
+  archive (``-lNEA_box3d``) so a project that does not want it pays nothing.
+  See ``examples/physics/box3d_*``.
 - **Sound system** (optional, powered by `Maxmod <https://maxmod.devkitpro.org/>`_):
   spatial 3D sound with distance attenuation and stereo panning, background music
   with volume/tempo/pitch control, non-spatial SFX, and WAV streaming. Spatial
@@ -178,11 +189,16 @@ step. Check the **error_handling** example to see how to use the debug mode.
 3D rigid body physics (Box3D)
 -----------------------------
 
-The Box3D-based 3D physics engine — convex hulls, triangle mesh levels,
-persistent contacts, islands and sleeping — ships in a **separate archive**,
-because it is roughly three times the code size of the rest of the engine
-(250 KB of ARM9 ``.text`` against 90 KB). ``libNEA.a`` is Nitro Engine Advanced
-*without* it, so a project that does not want physics pays nothing for it.
+A fixed-point port of Erin Catto's `Box3D <https://github.com/erincatto/box3d>`_.
+There is **no floating point anywhere in the simulation** — every length,
+velocity, mass and impulse is a fixed-point integer in a format chosen for what
+it holds, so the engine runs on an ARM9 that has no FPU without ever trapping
+into a software float routine.
+
+It ships in a **separate archive**, because it is roughly four times the code
+size of the rest of the engine (about 340 KB of ARM9 ``.text`` against 90 KB).
+``libNEA.a`` is Nitro Engine Advanced *without* it, so a project that does not
+want physics pays nothing for it.
 
 To use it, name it in your Makefile **before** including ``Makefile.example``
 (the template sets ``LIBS`` with ``?=`` and yields to a value already set)::
@@ -190,15 +206,90 @@ To use it, name it in your Makefile **before** including ``Makefile.example``
     LIBS := -lNEA_box3d -lNEA -lnds9 -lc
 
 and include ``<NEAPhysics3D.h>``. The debug build is ``-lNEA_box3d_debug``.
-See the **physics/box3d_basic** and **physics/box3d_level** examples.
-``NEAPhysics3D.h`` wraps the common path; the full Box3D API is in
-``<box3d/box3d.h>`` and the two can be mixed.
+``NEAPhysics3D.h`` wraps the common path in NEA's conventions — f32 arguments,
+``NEA_Model`` binding, a pool allocator that reports any allocation made after
+the world starts running. The full Box3D API is in ``<box3d/box3d.h>``, the two
+share all state, and they can be mixed freely.
+
+What is there
+~~~~~~~~~~~~~
+
+- **Shapes**: spheres, capsules, convex hulls and baked triangle meshes, in any
+  combination.
+- **Joints**, nine of them: distance, revolute (hinge), spherical (ball),
+  weld, motor, prismatic (slider), parallel (upright-keeper), wheel, and a
+  filter joint that solves nothing and only stops two bodies colliding. Each
+  with the springs, motors and limits its type allows.
+- **Contacts** that persist across steps with warm starting, gathered into
+  islands that fall asleep when they settle.
+- **Continuous collision**, so a bullet does not tunnel through a wall. Set
+  ``b3Body_SetBullet()`` on the fast body.
+- **Sensors**: shapes that report what overlaps them and resolve nothing. Set
+  ``b3ShapeDef::isSensor`` and read ``b3World_GetSensorEvents()``.
+- **World queries**: ``NEA_Phys3DRayCast()`` and ``NEA_Phys3DOverlapBox()``, or
+  ``b3World_CastRay``, ``b3World_CastShape``, ``b3World_OverlapShape`` and
+  friends for the full versions.
+- **A character mover**: ``NEA_Phys3DMover``, a kinematic capsule that is *not*
+  a rigid body. A player made of a dynamic body has to fight the solver for
+  every step, slope and ledge and loses — it slides down ramps, tips over and
+  picks up spin. This one decides where it goes and puts it there, with
+  friction, acceleration, jumping, a ground probe that climbs stairs with no
+  step-up hack, and crates it can shove. See **physics/box3d_character**.
+
+The time step is fixed at 60 Hz so that the solver's coefficients fold into
+constants instead of costing a hardware divide per body per sub-step;
+``NEA_Phys3DWorldStep()`` takes a sub-step count, not a duration. If your game
+runs at 30 fps, step twice.
+
+Levels are baked offline
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 A level is a triangle mesh baked offline: run ``obj2dl --collision-b3`` to get
 the ``.b3mesh`` that ``NEA_Phys3DBodyAddMesh()`` takes. There is no run-time
-mesh builder — building a bounding volume hierarchy on a 67 MHz ARM9 is work
-for the asset pipeline. An animated model can carry per-bone hitbox shapes the
-same way, with ``md5_to_dsma --collision-b3``.
+mesh builder, and none for convex hulls either — building a bounding volume
+hierarchy or running quickhull on a 67 MHz ARM9 is work for the asset pipeline.
+An animated model can carry per-bone hitbox shapes the same way, with
+``md5_to_dsma --collision-b3``.
+
+Sizing a world
+~~~~~~~~~~~~~~
+
+``NEA_Phys3DWorldDef::box3d.capacity`` is **not a hint**. Every pool is reserved
+from it before the first step, and the world seals itself on that step: anything
+allocated afterwards is counted by ``NEA_Phys3DWorldGetLateAllocCount()`` and,
+under ``NEA_DEBUG``, asserts. Build your scene, print
+``NEA_Phys3DWorldGetMemoryUsage()`` once, and size ``poolBytes`` from that plus
+headroom. The one field that is not just a count is
+``capacity.meshContactCount`` — a mesh contact costs several times what a convex
+one does, and leaving it at zero in a scene with a mesh level is the sizing
+mistake that shows up as a mid-frame allocation rather than a slightly small
+pool.
+
+The examples all print these counters on the bottom screen, which is the
+quickest way to see what a scene of your own costs.
+
+Examples
+~~~~~~~~
+
+Under ``examples/physics/``. Each one is a single feature with a readout, and
+each ``main.c`` opens with a note on what to watch and why:
+
+======================= ======================================================
+Example                 Shows
+======================= ======================================================
+``box3d_basic``         Bodies, shapes, contacts and sleeping
+``box3d_level``         A baked triangle mesh level
+``box3d_character``     The character mover: stairs, walls and crates
+``box3d_pick``          Ray casts and box overlap queries
+``box3d_bullet``        Continuous collision — a fast sphere at a wall
+``box3d_sensor``        A trigger volume over a level
+``box3d_rope``          Distance joints
+``box3d_hinge``         A revolute joint
+``box3d_slider``        A prismatic joint
+``box3d_motor``         Weld and motor joints
+``box3d_ragdoll``       Spherical joints
+``box3d_car``           Wheel joints — a car on terrain
+======================= ======================================================
 
 Choosing what goes in ITCM
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -227,7 +318,7 @@ Group                              Bytes    Default
 ``NEA_BOX3D_ITCM_MESH``            8,496   off
 ``NEA_BOX3D_ITCM_SPHERICAL``       7,456   off
 ``NEA_BOX3D_ITCM_REVOLUTE``        7,376   off
-``NEA_BOX3D_ITCM_CORE``            7,200   off
+``NEA_BOX3D_ITCM_CORE``            7,264   off
 ``NEA_BOX3D_ITCM_DISTANCE``        6,516   off
 ``NEA_BOX3D_ITCM_MOTOR``           5,976   off
 ``NEA_BOX3D_ITCM_WELD``            4,600   off

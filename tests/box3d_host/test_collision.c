@@ -19,6 +19,7 @@
 #include "core.h"
 #include "manifold.h"
 #include "mesh.h"
+#include "shape.h"
 
 #include "box3d/base.h"
 #include "box3d/collision.h"
@@ -3137,6 +3138,166 @@ static void test_mesh_blob( void )
 	}
 }
 
+/// The three Phase 7 mesh queries, against the same hand-built blob.
+///
+/// Closed forms throughout rather than a comparison against upstream. Two of
+/// these disagree with upstream *by construction* -- the front-to-back descent
+/// and the one-sided plane test resolve ties differently from a left-first
+/// float traversal -- so a reference comparison would report a divergence every
+/// run that the port would then have to defend. What is checkable is what the
+/// geometry says, and the geometry here is two unit quads in the y = 0 plane
+/// with their normals pointing at +y.
+static void test_mesh_queries( void )
+{
+	printf( "mesh ray casts, shape casts and overlap\n" );
+
+	static meshBlob blob;
+	buildTestMesh( &blob );
+
+	b3Mesh mesh = { &blob.header, V( 1, 1, 1 ) };
+
+	// --- ray casts ---
+	{
+		// Straight down through the middle of the left quad. Starting 2 above
+		// a floor at y = 0 means the crossing is at exactly half the ray.
+		b3RayCastInput down = { V( 0.25, 2, 0.25 ), V( 0, -4, 0 ), b3c_one };
+		b3CastOutput hit = b3RayCastMesh( &mesh, &down );
+
+		check( "a ray fired down at the floor hits it", hit.hit );
+		expect( "at half of a ray twice as long as the drop", b3cToDouble( hit.fraction ), 0.5, 4 * Q12 );
+		expectVec( "on the floor plane", hit.point, 0.25, 0, 0.25, 4 * Q12 );
+		expectVec( "with the floor's own normal", hit.normal, 0, 1, 0, 8 * Q12 );
+		checkInt2( "reporting the triangle it crossed", hit.triangleIndex, 0 );
+
+		// The same ray from below. The mesh is one-sided, as upstream, so this
+		// is a miss rather than a hit on the back face.
+		b3RayCastInput up = { V( 0.25, -2, 0.25 ), V( 0, 4, 0 ), b3c_one };
+		check( "and the same ray from underneath is culled", b3RayCastMesh( &mesh, &up ).hit == false );
+
+		// Past the far edge of the right quad in x.
+		b3RayCastInput beside = { V( 2.5, 2, 0.5 ), V( 0, -4, 0 ), b3c_one };
+		check( "a ray beside the mesh misses", b3RayCastMesh( &mesh, &beside ).hit == false );
+
+		// Aimed at the floor but stopping short: maxFraction cuts the segment
+		// at y = 1, half a unit above it.
+		b3RayCastInput brief = { V( 0.25, 2, 0.25 ), V( 0, -4, 0 ), b3cFromFrac( 1, 4 ) };
+		check( "a ray that stops short of the floor misses", b3RayCastMesh( &mesh, &brief ).hit == false );
+
+		// Into the right quad, which lives in the *other* leaf. This is the
+		// check that the descent visits both children rather than stopping at
+		// the near one.
+		b3RayCastInput right = { V( 1.75, 1, 0.25 ), V( 0, -2, 0 ), b3c_one };
+		b3CastOutput rightHit = b3RayCastMesh( &mesh, &right );
+		check( "a ray into the far leaf hits", rightHit.hit );
+		check( "and reports a triangle from that leaf", rightHit.triangleIndex >= 2 );
+
+		// A slanted ray: down 1 and across 1 from (0.25, 1, 0.25) reaches
+		// y = 0 at x = 1.25, which is inside the right quad. Nothing about the
+		// answer depends on the traversal order, but everything about *finding*
+		// it depends on both leaves being reachable.
+		b3RayCastInput slant = { V( 0.25, 1, 0.25 ), V( 2, -2, 0 ), b3c_one };
+		b3CastOutput slantHit = b3RayCastMesh( &mesh, &slant );
+		check( "a slanted ray hits", slantHit.hit );
+		expect( "at the fraction the slope gives", b3cToDouble( slantHit.fraction ), 0.5, 8 * Q12 );
+		expectVec( "landing where the slope says", slantHit.point, 1.25, 0, 0.25, 8 * Q12 );
+	}
+
+	// --- the far end of the segment is exclusive ---
+	{
+		// From (0.5, 1, 0.5) along (1, -1, 0), y reaches 0 at exactly
+		// fraction 1: the ray *ends* on the floor rather than crossing it.
+		//
+		// That is a miss, and deliberately. b3RayCastMesh keeps a hit only when
+		// its fraction is strictly below the best so far, which starts at
+		// maxFraction -- so a crossing at exactly maxFraction never displaces
+		// it. Upstream's `alpha < bestOutput.fraction` says the same thing.
+		// Pinned because the alternative is an arbitrary choice that would
+		// otherwise drift.
+		b3RayCastInput grazing = { V( 0.5, 1, 0.5 ), V( 1, -1, 0 ), b3c_one };
+		check( "a ray ending exactly on the surface does not hit", b3RayCastMesh( &mesh, &grazing ).hit == false );
+
+		// One percent longer and it crosses, which is what says the miss above
+		// is a boundary and not a blind spot.
+		b3RayCastInput past = { V( 0.5, 1, 0.5 ), V( 1.01, -1.01, 0 ), b3c_one };
+		check( "and a fractionally longer one does", b3RayCastMesh( &mesh, &past ).hit );
+	}
+
+	// --- shape casts ---
+	{
+		// A sphere of radius 0.25 dropped from y = 2 stops when its *surface*
+		// touches the floor, so its centre is at 0.25 and the fraction is
+		// (2 - 0.25) / 4.
+		b3Vec3 center = V( 0.5, 2, 0.5 );
+		b3ShapeCastInput drop = { { &center, 1, b3fFromDouble( 0.25 ) }, V( 0, -4, 0 ), b3c_one, false };
+
+		b3CastOutput hit = b3ShapeCastMesh( &mesh, &drop );
+		check( "a sphere swept down at the floor lands", hit.hit );
+		expect( "stopping a radius above it", b3cToDouble( hit.fraction ), 1.75 / 4.0, 16 * Q12 );
+		expectVec( "with the floor's normal", hit.normal, 0, 1, 0, 16 * Q12 );
+		check( "reporting which triangle stopped it", hit.triangleIndex != B3_NULL_INDEX );
+
+		// The same sphere swept sideways well above the floor never meets it.
+		b3Vec3 high = V( 0.5, 2, 0.5 );
+		b3ShapeCastInput across = { { &high, 1, b3fFromDouble( 0.25 ) }, V( 1.5, 0, 0 ), b3c_one, false };
+		check( "and a sweep that stays above misses", b3ShapeCastMesh( &mesh, &across ).hit == false );
+	}
+
+	// --- overlap ---
+	{
+		// A sphere straddling the floor plane.
+		b3Vec3 touching = V( 0.5, 0, 0.5 );
+		b3ShapeProxy proxy = { &touching, 1, b3fFromDouble( 0.25 ) };
+		check( "a sphere on the floor overlaps it", b3OverlapMesh( &mesh, b3Transform_identity, &proxy ) );
+
+		// Clear of it in y.
+		b3Vec3 above = V( 0.5, 1, 0.5 );
+		b3ShapeProxy aboveProxy = { &above, 1, b3fFromDouble( 0.25 ) };
+		check( "a sphere well above it does not", b3OverlapMesh( &mesh, b3Transform_identity, &aboveProxy ) == false );
+
+		// Clear of it in x, at the same height.
+		b3Vec3 beside = V( 3, 0, 0.5 );
+		b3ShapeProxy besideProxy = { &beside, 1, b3fFromDouble( 0.25 ) };
+		check( "and a sphere beside it does not", b3OverlapMesh( &mesh, b3Transform_identity, &besideProxy ) == false );
+
+		// The transform is the *mesh's*, not the query shape's -- b3MakeLocalProxy
+		// inverts it to bring the proxy into the mesh's frame, which is the same
+		// convention b3RayCastShape uses. So raising the mesh by 1 is what brings
+		// the floor up to the sphere that was clear of it a moment ago.
+		b3Transform raised = { V( 0, 1, 0 ), b3Quat_identity };
+		check( "and the transform moves the mesh, not the proxy", b3OverlapMesh( &mesh, raised, &aboveProxy ) );
+
+		// The opposite sign has to stay a miss, or the check above would pass
+		// for a transform that was simply being ignored.
+		b3Transform lowered = { V( 0, -1, 0 ), b3Quat_identity };
+		check( "so the opposite sign moves it further away", b3OverlapMesh( &mesh, lowered, &aboveProxy ) == false );
+	}
+
+	// --- scale ---
+	{
+		// Doubling the mesh in x moves the far edge from x = 2 to x = 4, so a
+		// ray at x = 3 goes from a miss to a hit without the blob changing.
+		b3Mesh wide = { &blob.header, V( 2, 1, 1 ) };
+
+		b3RayCastInput at3 = { V( 3, 2, 0.5 ), V( 0, -4, 0 ), b3c_one };
+		check( "a ray past the unscaled edge misses", b3RayCastMesh( &mesh, &at3 ).hit == false );
+		check( "and hits once the mesh is scaled out to meet it", b3RayCastMesh( &wide, &at3 ).hit );
+
+		// A reflection in y turns the floor upside down: the normal that was
+		// +y becomes -y, so the ray that used to hit is culled and the one that
+		// used to be culled hits.
+		b3Mesh flipped = { &blob.header, V( 1, -1, 1 ) };
+
+		b3RayCastInput down = { V( 0.25, 2, 0.25 ), V( 0, -4, 0 ), b3c_one };
+		b3RayCastInput up = { V( 0.25, -2, 0.25 ), V( 0, 4, 0 ), b3c_one };
+
+		check( "reflecting the mesh culls what used to hit", b3RayCastMesh( &flipped, &down ).hit == false );
+
+		b3CastOutput fromBelow = b3RayCastMesh( &flipped, &up );
+		check( "and hits what used to be culled", fromBelow.hit );
+		expectVec( "with the reversed normal", fromBelow.normal, 0, -1, 0, 8 * Q12 );
+	}
+}
+
 // =========================================================================
 // Triangles
 // =========================================================================
@@ -4064,6 +4225,644 @@ static void test_hull_hull_reduce( void )
 	}
 }
 
+// =========================================================================
+// Time of impact -- Phase 7, Stage 2
+// =========================================================================
+
+/// b3TimeOfImpact against closed forms.
+///
+/// Every fraction below is exact arithmetic on distances the geometry states,
+/// less one detail that has to be carried through by hand. The query stops when
+/// the *core* distance -- the proxies without their radii -- reaches
+///
+///     target = max( slop, radiusA + radiusB - slop )
+///
+/// so a sweep of length L stops `slop / L` away from the fraction at which the
+/// surfaces meet, and **which way** depends on the radii. Two spheres stop a
+/// slop past touching, because their target is a slop inside the sum of their
+/// radii. Two hulls, whose radii are zero, stop a slop short of it, because
+/// their target is the slop itself. Both signs appear below and both are
+/// written into the expectation rather than absorbed by a tolerance, which is
+/// what makes a check that fails here mean something.
+///
+/// The states are checked with checkInt2 rather than expect: which of the five
+/// a query ended in is a discrete fact, and a port that returns `failed` where
+/// upstream returns `hit` has a bug however close its fraction is.
+static void test_time_of_impact( void )
+{
+	printf( "time of impact\n" );
+
+	const double slop = b3fToDouble( B3_LINEAR_SLOP );
+	b3Vec3 zero = b3Vec3_zero;
+	b3Quat identity = b3Quat_identity;
+
+	// A unit sphere at the origin, not moving.
+	b3Vec3 centerA = zero;
+	b3ShapeProxy unitSphere = { &centerA, 1, b3fFromDouble( 1.0 ) };
+	b3Sweep still = { zero, zero, zero, identity, identity };
+
+	b3Vec3 centerB = zero;
+	b3ShapeProxy smallSphere = { &centerB, 1, b3fFromDouble( 0.25 ) };
+
+	// --- sphere versus sphere, the case with an exact answer ---
+	{
+		// B sweeps 16 units along -x from x = 8. The surfaces meet when the
+		// centres are 1.25 apart, so at x = 1.25 -- less the slop.
+		b3Sweep sweepB = { zero, V( 8, 0, 0 ), V( -8, 0, 0 ), identity, identity };
+		b3TOIInput input = { unitSphere, smallSphere, still, sweepB, b3c_one };
+		b3TOIOutput out = b3TimeOfImpact( &input );
+
+		checkInt2( "a sphere swept at another one hits it", out.state, b3_toiStateHit );
+		expect( "at the fraction the two radii give", b3cToDouble( out.fraction ), ( 8.0 - 1.25 + slop ) / 16.0, 1e-4 );
+		// The reported point is the midpoint of the two surfaces, and at the
+		// stopping distance they have passed through each other by a slop.
+		expectVec( "on the far side of the still one", out.point, 1.0 - 0.5 * slop, 0, 0, 4 * Q12 );
+		expectVec( "with the normal along the sweep", out.normal, 1, 0, 0, 4 * Q12 );
+		expect( "reporting the separation it stopped at", b3fToDouble( out.distance ), 1.25 - slop, 4 * Q12 );
+
+		// The sweep that goes the same way and stops short. 6.5 of the 16
+		// units leaves the centres 1.5 apart, which is a quarter of a unit
+		// clear.
+		input.maxFraction = b3cFromFrac( 65, 160 );
+		out = b3TimeOfImpact( &input );
+		checkInt2( "the same sweep cut short stays separated", out.state, b3_toiStateSeparated );
+		expect( "and reports the whole of what it was given", b3cToDouble( out.fraction ), 65.0 / 160.0, 2 * Q12 );
+	}
+
+	// --- the boundary, from both sides ---
+	{
+		// Passing at exactly the touching distance is a miss: the query stops
+		// at `target`, which is a slop nearer than that.
+		b3Sweep grazing = { zero, V( 8, 1.25, 0 ), V( -8, 1.25, 0 ), identity, identity };
+		b3TOIInput input = { unitSphere, smallSphere, still, grazing, b3c_one };
+		checkInt2( "a sweep passing at exactly the touching distance misses", b3TimeOfImpact( &input ).state,
+				   b3_toiStateSeparated );
+
+		// A tenth of a unit lower and it connects, which is what says the miss
+		// above is a boundary and not a blind spot.
+		input.sweepB.c1 = V( 8, 1.15, 0 );
+		input.sweepB.c2 = V( -8, 1.15, 0 );
+		checkInt2( "and a tenth of a unit lower it connects", b3TimeOfImpact( &input ).state, b3_toiStateHit );
+	}
+
+	// --- starting overlapped ---
+	{
+		// Cores 0.5 apart, which is inside `target` but still positive, so the
+		// query answers immediately with a hit at zero rather than giving up.
+		b3Sweep fromInside = { zero, V( 0.5, 0, 0 ), V( -8, 0, 0 ), identity, identity };
+		b3TOIInput input = { unitSphere, smallSphere, still, fromInside, b3c_one };
+		b3TOIOutput out = b3TimeOfImpact( &input );
+
+		checkInt2( "a sweep that starts touching hits at once", out.state, b3_toiStateHit );
+		expect( "at fraction zero", b3cToDouble( out.fraction ), 0.0, 1e-9 );
+		checkInt2( "having asked the distance query exactly once", out.distanceIterations, 1 );
+
+		// Cores coincident: no separating direction exists at all, and the
+		// only honest answer is that continuous collision cannot help.
+		input.sweepB.c1 = zero;
+		out = b3TimeOfImpact( &input );
+		checkInt2( "and one that starts coincident reports overlap", out.state, b3_toiStateOverlapped );
+		expect( "at fraction zero", b3cToDouble( out.fraction ), 0.0, 1e-9 );
+	}
+
+	// --- a hull through a thin slab, which is the case CCD exists for ---
+	{
+		// A slab 8 x 0.2 x 8 centred on the origin, and a unit cube. Without
+		// continuous collision a cube moving 16 units in one step crosses a
+		// 0.2-thick slab entirely.
+		b3Vec3 slabPoints[8], cubePoints[8];
+		for ( int i = 0; i < 8; ++i )
+		{
+			slabPoints[i] = V( ( i & 1 ) ? 4 : -4, ( i & 2 ) ? 0.1 : -0.1, ( i & 4 ) ? 4 : -4 );
+			cubePoints[i] = V( ( i & 1 ) ? 0.5 : -0.5, ( i & 2 ) ? 0.5 : -0.5, ( i & 4 ) ? 0.5 : -0.5 );
+		}
+
+		b3ShapeProxy slab = { slabPoints, 8, b3f_zero };
+		b3ShapeProxy cube = { cubePoints, 8, b3f_zero };
+
+		// The cube's bottom face meets the slab's top face when its centre is
+		// at 0.6, from a drop of 16 starting at y = 8. Both radii are zero, so
+		// the target is the slop itself and the cube stops a slop *above* the
+		// slab -- the opposite sign to the sphere pair above.
+		b3Sweep drop = { zero, V( 0, 8, 0 ), V( 0, -8, 0 ), identity, identity };
+		b3TOIInput input = { slab, cube, still, drop, b3c_one };
+		b3TOIOutput out = b3TimeOfImpact( &input );
+
+		checkInt2( "a cube dropped through a thin slab is caught", out.state, b3_toiStateHit );
+		expect( "at the fraction the two half heights give", b3cToDouble( out.fraction ), ( 8.0 - 0.6 - slop ) / 16.0,
+				1e-4 );
+		expectVec( "with the slab's own normal", out.normal, 0, 1, 0, 8 * Q12 );
+
+		// The same drop beside the slab passes through open air.
+		input.sweepB.c1 = V( 8, 8, 0 );
+		input.sweepB.c2 = V( 8, -8, 0 );
+		checkInt2( "and the same drop beside it is not", b3TimeOfImpact( &input ).state, b3_toiStateSeparated );
+
+		// Spinning on the way down: a corner reaches lower than a face, so the
+		// impact is earlier. This is the branch that builds an edge or face
+		// separating axis rather than a fixed world one, and the only property
+		// worth asserting is the inequality -- the exact fraction depends on
+		// which feature the simplex lands on.
+		b3Quat eighth = b3MakeQuatFromAxisAngle( V( 0, 0, 1 ), (b3a)4096 );
+		input.sweepB.c1 = V( 0, 8, 0 );
+		input.sweepB.c2 = V( 0, -8, 0 );
+		input.sweepB.q2 = eighth;
+		b3TOIOutput spun = b3TimeOfImpact( &input );
+
+		checkInt2( "a cube that spins as it falls is caught too", spun.state, b3_toiStateHit );
+		check( "sooner than the one that does not, because a corner leads",
+			   b3Raw( spun.fraction ) < b3Raw( out.fraction ) );
+
+		// Every one of these must stay well inside the caps, or the caps are
+		// load bearing rather than a safety net. The counters are the same
+		// numbers the hardware produces, since none of this is floating point.
+		check( "and none of it approaches the iteration caps",
+			   spun.distanceIterations < 25 && spun.rootIterations < 50 );
+	}
+
+	// --- the sweep that only rotates ---
+	{
+		// A cube sitting just above the slab, spinning in place. Nothing
+		// translates, so the bracket floor cannot be derived from a
+		// translation and has to come from the rotation -- the one case that
+		// would otherwise leave the root finder subdividing a Q30 interval
+		// that no longer changes the Q12 separation.
+		b3Vec3 slabPoints[8], cubePoints[8];
+		for ( int i = 0; i < 8; ++i )
+		{
+			slabPoints[i] = V( ( i & 1 ) ? 4 : -4, ( i & 2 ) ? 0.1 : -0.1, ( i & 4 ) ? 4 : -4 );
+			cubePoints[i] = V( ( i & 1 ) ? 0.5 : -0.5, ( i & 2 ) ? 0.5 : -0.5, ( i & 4 ) ? 0.5 : -0.5 );
+		}
+
+		b3ShapeProxy slab = { slabPoints, 8, b3f_zero };
+		b3ShapeProxy cube = { cubePoints, 8, b3f_zero };
+
+		// Centre at 0.75: clear of the slab flat, but a corner at 0.707 of the
+		// half diagonal reaches through it once turned.
+		b3Quat eighth = b3MakeQuatFromAxisAngle( V( 0, 0, 1 ), (b3a)4096 );
+		b3Sweep spinOnly = { zero, V( 0, 0.75, 0 ), V( 0, 0.75, 0 ), b3Quat_identity, eighth };
+		b3TOIInput input = { slab, cube, still, spinOnly, b3c_one };
+		b3TOIOutput out = b3TimeOfImpact( &input );
+
+		checkInt2( "a cube spinning in place drives its corner into the slab", out.state, b3_toiStateHit );
+		check( "partway through the turn", b3Raw( out.fraction ) > 0 && b3Raw( out.fraction ) < B3_C_ONE );
+		check( "without exhausting the root finder", out.rootIterations < 50 );
+	}
+}
+
+// =========================================================================
+// The mover's plane solver -- Phase 7, Stage 4
+// =========================================================================
+
+/// A rigid plane pushing `depth` along `normal`.
+///
+/// `depth` is the plane's `offset` and it is a **penetration**: positive means
+/// the mover is that far inside and the solver has that much to undo. Upstream
+/// spells the same thing `totalRadius - distance`. Zero is touching, and a
+/// negative value is a plane the mover is already clear of.
+static b3CollisionPlane Plane( b3Vec3 normal, double depth )
+{
+	b3CollisionPlane plane = { 0 };
+	plane.plane.normal = normal;
+	plane.plane.offset = b3fFromDouble( depth );
+	plane.pushLimit = B3_F_MAX;
+	plane.clipVelocity = true;
+	return plane;
+}
+
+/// b3SolvePlanes and b3ClipVector, against upstream's own two scenarios and
+/// against the one thing Q12 does that float cannot.
+///
+/// The first two cases are upstream's test/test_mover.c transliterated, down to
+/// the tolerance: `ParallelPlanes` asserts the solver reaches its answer in
+/// exactly two iterations, and `GamePlanes` asserts that it deliberately does
+/// not converge at all. Both are worth having because every intermediate in
+/// them is exact -- the normals are axis-aligned or given to nine digits -- so
+/// a disagreement is arithmetic rather than quantization.
+///
+/// The third case is not upstream's, and it is here because a Q12 solver was
+/// *expected* to behave worse than a float one and does not. Diagonal normals
+/// have no exact Q12 spelling, so the prediction was that a converged plane
+/// would oscillate by a raw unit and never let the loop's tolerance fire. It
+/// was measured instead of assumed: over 160,000 random plane sets the loop
+/// reaches its 20-iteration cap 52.4% of the time, and the identical scenarios
+/// in double precision reach it 52.3% of the time, with 83,660 of the ~83,800
+/// cases shared. The cap is a property of Gauss-Seidel on near-opposing planes,
+/// not of fixed point, and upstream's own GamePlanes above asserts it. So no
+/// deadband was added, this file is a straight transliteration, and the case
+/// below pins the behaviour that actually holds.
+static void test_mover_solver( void )
+{
+	printf( "mover plane solver\n" );
+
+	// --- upstream's ParallelPlanes: two planes facing the same way ---
+	{
+		b3CollisionPlane planes[2];
+		planes[0] = Plane( V( 0, 0, 1 ), 0.5 );
+		planes[1] = Plane( V( 0, 0, 1 ), 1.0 );
+
+		b3PlaneSolverResult result = b3SolvePlanes( b3Vec3_zero, planes, 2 );
+
+		checkInt2( "two parallel planes converge in two iterations", result.iterationCount, 2 );
+
+		// Upstream allows 0.0055, which is B3_LINEAR_SLOP plus a little, and
+		// that allowance is exactly what is being spent: the solver stops one
+		// slop **short** of full separation, because the slop is added to the
+		// separation before the push is taken from it. So the answer is
+		// 1.0 - 0.00488 = 0.99512 and not 1.0, on both sides. Every expectation
+		// below is written as `depth - slop` for the same reason.
+		expect( "having pushed out to the deeper of the two", b3fToDouble( result.delta.z ), 1.0, 0.0055 );
+
+		// The near plane is subsumed by the far one, so it ends up pushing
+		// nothing at all -- which is the accumulator being clamped back to
+		// zero, not the deadband refusing a small push.
+		checkInt2( "the subsumed plane pushes nothing", b3Raw( planes[0].push ), 0 );
+		check( "and the deeper one does the work", b3Raw( planes[1].push ) > 0 );
+	}
+
+	// --- upstream's GamePlanes: a target far behind both planes ---
+	{
+		b3CollisionPlane planes[2];
+		planes[0] = Plane( V( 0, -0.23941046, 0.970918416 ), 0.390724182 );
+		planes[1] = Plane( V( 0, 0, 1 ), 1.49998093 );
+
+		// Upstream folds the target into the offsets and solves from zero,
+		// which is what a caller does when the planes were generated at a
+		// position the mover has since left.
+		b3Vec3 target = V( -2.5390625, 0, -73.6880798 );
+		planes[0].plane.offset = b3SubF( planes[0].plane.offset, b3Dot( planes[0].plane.normal, target ) );
+		planes[1].plane.offset = b3SubF( planes[1].plane.offset, b3Dot( planes[1].plane.normal, target ) );
+
+		b3PlaneSolverResult result = b3SolvePlanes( b3Vec3_zero, planes, 2 );
+
+		// Upstream's own comment: the target is deep into the plane and this
+		// takes many iterations. It is here to prove the port runs out the same
+		// way rather than terminating early on a tolerance it should not meet.
+		checkInt2( "a target deep behind two planes runs the cap out", result.iterationCount, 20 );
+		check( "and is still pushing out along +z when it stops", b3Raw( result.delta.z ) > 0 );
+	}
+
+	// --- normals with no exact Q12 spelling ---
+	{
+		// Three planes a quarter of a unit deep, with diagonal normals. This is
+		// the case a fixed-point solver was expected to stall on and does not:
+		// measured at 7 iterations, and the same 7 with and without the
+		// deadband that was tried and dropped.
+		double d = 0.57735026918962576;
+		b3CollisionPlane planes[3];
+		planes[0] = Plane( V( d, d, d ), 0.25 );
+		planes[1] = Plane( V( -d, d, d ), 0.25 );
+		planes[2] = Plane( V( d, d, -d ), 0.25 );
+
+		b3PlaneSolverResult result = b3SolvePlanes( b3Vec3_zero, planes, 3 );
+
+		printf( "  three diagonal planes: %d iterations\n", result.iterationCount );
+		check( "three diagonal planes stop well inside the cap", result.iterationCount < 10 );
+		check( "having pushed up out of all three", b3Raw( result.delta.y ) > 0 );
+	}
+
+	// --- eight planes, which is B3_NEA_MAX_MOVER_PLANES worth of corner ---
+	{
+		// A capsule wedged where a floor meets two walls, with each surface
+		// contributing two triangles' worth of plane at slightly different
+		// depths -- which is what a triangulated corner actually produces.
+		b3CollisionPlane planes[8];
+		for ( int i = 0; i < 8; ++i )
+		{
+			b3Vec3 normal = ( i < 4 ) ? V( 0, 1, 0 ) : ( ( i < 6 ) ? V( 1, 0, 0 ) : V( 0, 0, 1 ) );
+			planes[i] = Plane( normal, 0.05 + 0.01 * i );
+		}
+
+		b3PlaneSolverResult result = b3SolvePlanes( b3Vec3_zero, planes, 8 );
+
+		check( "eight planes in a corner converge inside the cap", result.iterationCount < 20 );
+		check( "pushing up out of the floor", b3Raw( result.delta.y ) > 0 );
+		check( "and out along both walls", b3Raw( result.delta.x ) > 0 && b3Raw( result.delta.z ) > 0 );
+
+		// The deepest plane of each set is the one that decides, because the
+		// shallower ones are subsumed once it has pushed.
+		expect( "by the deepest of the floor planes", b3fToDouble( result.delta.y ),
+				0.08 - b3fToDouble( B3_LINEAR_SLOP ), 4 * Q12 );
+	}
+
+	// --- pushLimit, and the b3AddF headroom that makes B3_F_MAX safe ---
+	{
+		// One plane a metre deep, allowed to push only a quarter of that. The
+		// solver must stop at the limit rather than at the geometry.
+		b3CollisionPlane planes[2];
+		planes[0] = Plane( V( 0, 1, 0 ), 1.0 );
+		planes[0].pushLimit = b3fFromDouble( 0.25 );
+
+		b3PlaneSolverResult result = b3SolvePlanes( b3Vec3_zero, planes, 1 );
+
+		expect( "a soft plane pushes exactly its limit", b3fToDouble( planes[0].push ), 0.25, 2 * Q12 );
+		expect( "and the delta stops there", b3fToDouble( result.delta.y ), 0.25, 2 * Q12 );
+
+		// The same plane rigid. B3_F_MAX is INT32_MAX/2, and the accumulator is
+		// clamped into [0, pushLimit] before every add, so the add that could
+		// wrap never sees more than that plus one plane's worth of push. Under
+		// MODE=debug an overflow here aborts rather than wrapping quietly.
+		planes[1] = Plane( V( 0, 1, 0 ), 1.0 );
+		planes[1].pushLimit = B3_F_MAX;
+		result = b3SolvePlanes( b3Vec3_zero, planes + 1, 1 );
+
+		expect( "a rigid plane pushes the whole depth", b3fToDouble( result.delta.y ),
+				1.0 - b3fToDouble( B3_LINEAR_SLOP ), 2 * Q12 );
+	}
+
+	// --- b3ClipVector ---
+	{
+		b3CollisionPlane planes[3];
+		planes[0] = Plane( V( 0, 1, 0 ), 0.0 );
+		planes[1] = Plane( V( 1, 0, 0 ), 0.0 );
+		planes[2] = Plane( V( 0, 0, 1 ), 0.0 );
+
+		planes[0].push = b3fFromDouble( 0.1 );	 // pushed, and clips
+		planes[1].push = b3f_zero;				 // did nothing
+		planes[2].push = b3fFromDouble( 0.1 );	 // pushed, but soft
+		planes[2].clipVelocity = false;
+
+		b3Vec3 v = b3ClipVector( V( -3, -4, -5 ), planes, 3 );
+
+		expect( "the plane that pushed removes the inward component", b3fToDouble( v.y ), 0.0, 2 * Q12 );
+		expect( "the plane that did not is skipped", b3fToDouble( v.x ), -3.0, 2 * Q12 );
+		expect( "and so is the soft one", b3fToDouble( v.z ), -5.0, 2 * Q12 );
+
+		// Outward velocity is left alone: this is a clip, not a projection.
+		b3Vec3 up = b3ClipVector( V( 0, 7, 0 ), planes, 3 );
+		expect( "a velocity already leaving the plane is untouched", b3fToDouble( up.y ), 7.0, 2 * Q12 );
+	}
+}
+
+/// The three convex mover backends, from upstream's own subtests.
+///
+/// Upstream's test/test_mover.c states the point of the whole group in its
+/// header: these functions "must never emit a plane with a degenerate (zero)
+/// normal, even when the mover deeply penetrates the shape". That is the check
+/// worth having, because a zero normal does not crash and does not look wrong
+/// in a plane count -- it reaches b3SolvePlanes, where b3MulAdd against it is a
+/// no-op, and the mover simply stops being pushed out of the thing it is inside.
+///
+/// The three types answer deep overlap differently and deliberately: the sphere
+/// and the capsule substitute an analytic perpendicular, and the hull drops the
+/// plane so that it agrees with the mesh, which has no tractable answer.
+static void test_mover_convex( void )
+{
+	printf( "mover versus sphere, capsule and hull\n" );
+
+	// --- sphere ---
+	{
+		b3Sphere shape = { V( 0, 0, 0 ), b3fFromDouble( 0.5 ) };
+		b3PlaneResult result;
+
+		b3Capsule away = { V( 4, 3, 0 ), V( 6, 3, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "a mover clear of a sphere makes no plane", b3CollideMoverAndSphere( &result, &shape, &away ), 0 );
+
+		// The core segment runs along x at y = 0.6, which is 0.1 inside the 0.7
+		// combined radius.
+		b3Capsule touching = { V( -1, 0.6, 0 ), V( 1, 0.6, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "one touching it makes one", b3CollideMoverAndSphere( &result, &shape, &touching ), 1 );
+		check( "with a unit normal", b3IsNormalized( result.plane.normal ) );
+		check( "pointing from the sphere up at the mover", b3fToDouble( result.plane.normal.y ) > 0.99 );
+		expect( "and an offset that is the overlap depth", b3fToDouble( result.plane.offset ), 0.1, 2 * Q12 );
+
+		// The axis passes through the centre. This is the case that produces a
+		// zero normal if it is left to GJK.
+		b3Capsule through = { V( -1, 0, 0 ), V( 1, 0, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "a mover skewered through the centre still makes one",
+				   b3CollideMoverAndSphere( &result, &shape, &through ), 1 );
+		check( "and the normal is still a unit vector", b3IsNormalized( result.plane.normal ) );
+		expect( "perpendicular to the mover axis", b3fToDouble( result.plane.normal.x ), 0.0, 2 * Q12 );
+		expect( "at the deepest the pair can be", b3fToDouble( result.plane.offset ), 0.7, 2 * Q12 );
+	}
+
+	// --- capsule ---
+	{
+		b3Capsule shape = { V( -1, 0, 0 ), V( 1, 0, 0 ), b3fFromDouble( 0.3 ) };
+		b3PlaneResult result;
+
+		b3Capsule away = { V( -1, 5, 0 ), V( 1, 5, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "a mover clear of a capsule makes no plane", b3CollideMoverAndCapsule( &result, &shape, &away ), 0 );
+
+		b3Capsule touching = { V( -1, 0.4, 0 ), V( 1, 0.4, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "one 0.1 inside makes one", b3CollideMoverAndCapsule( &result, &shape, &touching ), 1 );
+		check( "with a unit normal", b3IsNormalized( result.plane.normal ) );
+		check( "pointing up at the mover", b3fToDouble( result.plane.normal.y ) > 0.99 );
+		expect( "at the overlap depth", b3fToDouble( result.plane.offset ), 0.1, 2 * Q12 );
+
+		// Crossed segments meeting at the origin.
+		b3Capsule crossing = { V( 0, 0, -1 ), V( 0, 0, 1 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "two crossed core segments still make one", b3CollideMoverAndCapsule( &result, &shape, &crossing ), 1 );
+		check( "with a unit normal", b3IsNormalized( result.plane.normal ) );
+		expect( "perpendicular to the shape axis", b3fToDouble( result.plane.normal.x ), 0.0, 2 * Q12 );
+		expect( "and to the mover axis", b3fToDouble( result.plane.normal.z ), 0.0, 2 * Q12 );
+		expect( "at the full combined radius", b3fToDouble( result.plane.offset ), 0.5, 2 * Q12 );
+
+		// Coincident segments: the cross product that would give a separating
+		// axis is zero, so the perpendicular fallback is the only answer.
+		b3Capsule coincident = { V( -1, 0, 0 ), V( 1, 0, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "and so do two coincident ones", b3CollideMoverAndCapsule( &result, &shape, &coincident ), 1 );
+		check( "with a unit normal", b3IsNormalized( result.plane.normal ) );
+		expect( "perpendicular to the shared axis", b3fToDouble( result.plane.normal.x ), 0.0, 2 * Q12 );
+		expect( "at the full combined radius", b3fToDouble( result.plane.offset ), 0.5, 2 * Q12 );
+	}
+
+	// --- hull ---
+	{
+		b3BoxHull box = b3MakeBoxHull( b3fFromDouble( 0.5 ), b3fFromDouble( 0.5 ), b3fFromDouble( 0.5 ) );
+		b3PlaneResult result;
+
+		b3Capsule away = { V( -0.3, 5, 0 ), V( 0.3, 5, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "a mover clear of a box makes no plane", b3CollideMoverAndHull( &result, &box.base, &away ), 0 );
+
+		// Above the +y face, with the 0.2 radius reaching 0.1 into it.
+		b3Capsule touching = { V( -0.3, 0.6, 0 ), V( 0.3, 0.6, 0 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "one resting on the top face makes one", b3CollideMoverAndHull( &result, &box.base, &touching ), 1 );
+		check( "with a unit normal", b3IsNormalized( result.plane.normal ) );
+		check( "which is the face normal", b3fToDouble( result.plane.normal.y ) > 0.99 );
+		expect( "at the overlap depth", b3fToDouble( result.plane.offset ), 0.1, 4 * Q12 );
+
+		// The `<=` boundary, from both sides. The core segment sits 0.2 above
+		// the +y face, so a radius either side of 0.2 decides it.
+		//
+		// The exactly-equal case is deliberately *not* asserted. GJK reaches
+		// the distance through b3SqrtWide, so whether it lands on 819 raw or
+		// 820 is a rounding question the geometry does not answer, and a test
+		// that pinned it would be pinning the square root rather than the
+		// backend. Four raw units either side is the tightest honest bracket.
+		b3f nominal = b3fFromDouble( 0.2 );
+
+		b3Capsule inside4 = { V( -0.3, 0.7, 0 ), V( 0.3, 0.7, 0 ), b3Makeb3f( b3Raw( nominal ) + 4 ) };
+		checkInt2( "a mover four raw units past grazing counts",
+				   b3CollideMoverAndHull( &result, &box.base, &inside4 ), 1 );
+
+		b3Capsule outside4 = { V( -0.3, 0.7, 0 ), V( 0.3, 0.7, 0 ), b3Makeb3f( b3Raw( nominal ) - 4 ) };
+		checkInt2( "and four raw units short of it does not",
+				   b3CollideMoverAndHull( &result, &box.base, &outside4 ), 0 );
+
+		// Wholly inside. Declined, so that a hull and the same shape baked as a
+		// mesh give the caller the same answer.
+		b3Capsule inside = { V( -0.2, 0, 0 ), V( 0.2, 0, 0 ), b3fFromDouble( 0.1 ) };
+		checkInt2( "a mover inside a hull is declined rather than guessed at",
+				   b3CollideMoverAndHull( &result, &box.base, &inside ), 0 );
+	}
+}
+
+/// b3CollideMoverAndMesh, against the hand-built blob test_mesh_blob uses.
+///
+/// The blob is a flat plane at y = 0 spanning x in [0, 2] and z in [0, 1], as
+/// four triangles: the left quad is 0 and 1, the right quad is 2 and 3.
+///
+/// The mesh backend is the only one that returns more than one plane, so it is
+/// the only one where the capacity is a real bound -- and the traversal's
+/// early-out is what makes it one, so that is checked directly rather than
+/// inferred from a count.
+static void test_mover_mesh( void )
+{
+	printf( "mover versus a triangle mesh\n" );
+
+	static meshBlob blob;
+	buildTestMesh( &blob );
+	b3Mesh mesh = { &blob.header, V( 1, 1, 1 ) };
+
+	b3PlaneResult planes[8];
+
+	// --- resting on the left quad ---
+	{
+		// Core segment 0.15 above the plane, radius 0.2, so 0.05 of overlap.
+		b3Capsule mover = { V( 0.2, 0.15, 0.5 ), V( 0.8, 0.15, 0.5 ), b3fFromDouble( 0.2 ) };
+		int count = b3CollideMoverAndMesh( planes, 8, &mesh, &mover );
+
+		printf( "  resting on the left quad: %d planes\n", count );
+		check( "a mover over the left quad finds at least one triangle", count >= 1 );
+
+		for ( int i = 0; i < count; ++i )
+		{
+			check( "every normal is a unit vector", b3IsNormalized( planes[i].plane.normal ) );
+			check( "and points up out of the plane", b3fToDouble( planes[i].plane.normal.y ) > 0.99 );
+			expect( "at the overlap depth", b3fToDouble( planes[i].plane.offset ), 0.05, 4 * Q12 );
+		}
+	}
+
+	// --- clear of it ---
+	{
+		b3Capsule mover = { V( 0.2, 2.0, 0.5 ), V( 0.8, 2.0, 0.5 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "a mover two units above finds nothing", b3CollideMoverAndMesh( planes, 8, &mesh, &mover ), 0 );
+	}
+
+	// --- across the seam, which is both leaves ---
+	{
+		b3Capsule mover = { V( 0.5, 0.15, 0.5 ), V( 1.5, 0.15, 0.5 ), b3fFromDouble( 0.2 ) };
+		int count = b3CollideMoverAndMesh( planes, 8, &mesh, &mover );
+
+		printf( "  across the seam: %d planes\n", count );
+		check( "a mover across the seam finds more than the left quad alone", count >= 2 );
+	}
+
+	// --- the capacity, and that it is the traversal that stops ---
+	{
+		b3Capsule mover = { V( 0.5, 0.15, 0.5 ), V( 1.5, 0.15, 0.5 ), b3fFromDouble( 0.2 ) };
+		int full = b3CollideMoverAndMesh( planes, 8, &mesh, &mover );
+
+		// Ask for one fewer than it wants, and then for exactly one. Both must
+		// return exactly what was asked for -- a backend that filled its buffer
+		// and kept testing triangles would look identical from the count alone,
+		// which is why b3CollideMoverMeshFcn returns false rather than skipping.
+		checkInt2( "a capacity of one returns exactly one", b3CollideMoverAndMesh( planes, 1, &mesh, &mover ), 1 );
+
+		if ( full > 1 )
+		{
+			checkInt2( "and a capacity one short returns that", b3CollideMoverAndMesh( planes, full - 1, &mesh, &mover ),
+					   full - 1 );
+		}
+
+		checkInt2( "a capacity of zero returns nothing at all", b3CollideMoverAndMesh( planes, 0, &mesh, &mover ), 0 );
+	}
+
+	// --- a reflected scale, which b3QueryMesh handles and upstream does not ---
+	{
+		// z mirrored, so the plane now spans z in [-1, 0]. The reflection swaps
+		// the second and third vertex on the way out of b3QueryMesh; for a
+		// three-point GJK proxy that is inert, and this says so.
+		b3Mesh reflected = { &blob.header, V( 1, 1, -1 ) };
+
+		b3Capsule mover = { V( 0.2, 0.15, -0.5 ), V( 0.8, 0.15, -0.5 ), b3fFromDouble( 0.2 ) };
+		int count = b3CollideMoverAndMesh( planes, 8, &reflected, &mover );
+
+		printf( "  on a z-reflected mesh: %d planes\n", count );
+		check( "a reflected mesh is found the same way", count >= 1 );
+
+		for ( int i = 0; i < count; ++i )
+		{
+			check( "with unit normals", b3IsNormalized( planes[i].plane.normal ) );
+			expect( "at the same depth", b3fToDouble( planes[i].plane.offset ), 0.05, 4 * Q12 );
+		}
+
+		// And the mirrored half really is empty now.
+		b3Capsule wrongSide = { V( 0.2, 0.15, 0.5 ), V( 0.8, 0.15, 0.5 ), b3fFromDouble( 0.2 ) };
+		checkInt2( "and its old half is empty", b3CollideMoverAndMesh( planes, 8, &reflected, &wrongSide ), 0 );
+	}
+}
+
+/// b3CollideMover: the dispatch, and the one invariant that survives it.
+///
+/// The post-transform rotates each normal and transforms each point but leaves
+/// each offset alone. That looks like an oversight and is not: the offset is a
+/// penetration depth measured from the mover's current position, so it is
+/// already in the frame the caller wants. This pins it.
+static void test_mover_dispatch( void )
+{
+	printf( "mover dispatch through b3CollideMover\n" );
+
+	b3BoxHull box = b3MakeBoxHull( b3fFromDouble( 0.5 ), b3fFromDouble( 0.5 ), b3fFromDouble( 0.5 ) );
+
+	b3Shape shape = { 0 };
+	shape.type = b3_hullShape;
+	shape.hull = &box.base;
+
+	b3PlaneResult planes[8];
+
+	// A mover resting on the top face, with the shape at the origin.
+	b3Capsule mover = { V( -0.3, 0.6, 0 ), V( 0.3, 0.6, 0 ), b3fFromDouble( 0.2 ) };
+
+	int atOrigin = b3CollideMover( planes, 8, &shape, b3Transform_identity, &mover );
+	checkInt2( "a hull at the origin gives one plane", atOrigin, 1 );
+	check( "with the face normal in world space", b3fToDouble( planes[0].plane.normal.y ) > 0.99 );
+	expect( "and the contact point on the face", b3fToDouble( planes[0].point.y ), 0.5, 4 * Q12 );
+	b3f depthAtOrigin = planes[0].plane.offset;
+
+	// The same pair, translated. Nothing about the geometry has changed.
+	b3Transform moved = { V( 10, 3, -4 ), b3Quat_identity };
+	b3Capsule movedMover = { V( 9.7, 3.6, -4 ), V( 10.3, 3.6, -4 ), b3fFromDouble( 0.2 ) };
+
+	int translated = b3CollideMover( planes, 8, &shape, moved, &movedMover );
+	checkInt2( "translating both still gives one plane", translated, 1 );
+	check( "with the same world normal", b3fToDouble( planes[0].plane.normal.y ) > 0.99 );
+	expect( "a point that moved with the shape", b3fToDouble( planes[0].point.y ), 3.5, 4 * Q12 );
+
+	// The offset must not have moved with it. The tolerance is a few raw units
+	// rather than zero because the mover is quantized into a different local
+	// frame before GJK sees it, which moves the distance by a unit or two --
+	// but that is nothing like the failure this is guarding. A b3TransformPlane
+	// here would shift the offset by dot( normal, transform.p ), which for this
+	// transform is 3.0 units, or 12288 raw. Three orders of magnitude apart.
+	expect( "and an offset that did not move with it", b3fToDouble( planes[0].plane.offset ),
+			b3fToDouble( depthAtOrigin ), 4 * Q12 );
+
+	// Rotated a quarter turn about z, so the +x face is now on top. The mover
+	// sits above it, and the normal must come back as +y in world space.
+	b3Quat quarter = b3MakeQuatFromAxisAngle( V( 0, 0, 1 ), (b3a)8192 );
+	b3Transform turned = { V( 0, 0, 0 ), quarter };
+
+	int rotated = b3CollideMover( planes, 8, &shape, turned, &mover );
+	checkInt2( "a rotated hull still gives one plane", rotated, 1 );
+	check( "whose normal was rotated into world space", b3fToDouble( planes[0].plane.normal.y ) > 0.99 );
+	expect( "and whose offset was again left alone", b3fToDouble( planes[0].plane.offset ), b3fToDouble( depthAtOrigin ),
+			4 * Q12 );
+
+	checkInt2( "a capacity of zero short-circuits", b3CollideMover( planes, 0, &shape, b3Transform_identity, &mover ), 0 );
+}
+
 int main( void )
 {
 	b3TestInstallAssertTrap();
@@ -4107,8 +4906,14 @@ int main( void )
 	test_tree_enlarge_and_rebuild();
 	test_broad_phase();
 	test_mesh_blob();
+	test_mesh_queries();
 	test_closest_point_on_triangle();
 	test_triangle_sphere();
+	test_time_of_impact();
+	test_mover_solver();
+	test_mover_convex();
+	test_mover_mesh();
+	test_mover_dispatch();
 
 	// Assertions are part of the result, not a trap: assert_trap.h keeps the
 	// run going and this turns any that fired into a reported failure.

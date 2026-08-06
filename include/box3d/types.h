@@ -61,6 +61,159 @@ typedef struct b3QueryFilter
 B3_API b3QueryFilter b3DefaultQueryFilter( void );
 
 // =========================================================================
+// World query results and callbacks
+// =========================================================================
+//
+// Phase 7. Upstream gives every one of these a `b3Pos origin` argument and
+// re-differences each shape against it, so a query stays accurate far from the
+// world origin in float. This port deleted that path in Phase 1 -- b3Pos is
+// b3Vec3 and b3WorldTransform is b3Transform -- so `origin` would be a
+// parameter that is added and then subtracted again. It is **dropped from
+// every signature**, the same call b3World_Step made when it lost `timeStep`.
+// Fixed point's accuracy far from the origin is a question of Q12 range, which
+// constants.h bounds at +/-2000 units for the whole engine, and no per-query
+// argument changes that.
+
+/// Called once per shape an overlap query finds.
+/// @return false to terminate the query.
+typedef bool b3OverlapResultFcn( b3ShapeId shapeId, void* context );
+
+/// Called once per shape a ray or shape cast hits, in no particular order.
+///
+/// The return value steers the rest of the cast:
+///   - **-1** (or anything negative): ignore this shape and keep going
+///   - **0**: stop the cast here
+///   - **a fraction in (0, 1)**: clip the cast to this point, which is what
+///     finds the closest hit
+///   - **1**: keep the full length and continue
+///
+/// @param shapeId        the shape that was hit
+/// @param point          the world point of intersection
+/// @param normal         the surface normal there
+/// @param fraction       how far along the cast the hit is
+/// @param userMaterialId the surface material at the hit
+/// @param triangleIndex  the triangle for a mesh shape, B3_NULL_INDEX otherwise
+/// @param childIndex     the child for a compound shape; always 0 in this port
+typedef b3c b3CastResultFcn( b3ShapeId shapeId, b3Vec3 point, b3Vec3 normal, b3c fraction, uint64_t userMaterialId,
+							 int triangleIndex, int childIndex, void* context );
+
+/// The single nearest hit, from b3World_CastRayClosest.
+typedef struct b3RayResult
+{
+	/// The shape hit. Only meaningful when `hit` is true.
+	b3ShapeId shapeId;
+
+	/// The world point of the hit.
+	b3Vec3 point;
+
+	/// The world surface normal there.
+	b3Vec3 normal;
+
+	/// The surface material at the hit point. Per triangle for a mesh, if the
+	/// blob carries per-triangle materials.
+	uint64_t userMaterialId;
+
+	/// How far along the input ray the hit is.
+	b3c fraction;
+
+	/// The triangle index for a mesh shape, B3_NULL_INDEX for the others.
+	int triangleIndex;
+
+	/// The child index for a compound shape. Always 0 -- the port has none.
+	int childIndex;
+
+	/// BVH internal nodes visited. Diagnostic; useful for sizing a level.
+	int nodeVisits;
+
+	/// BVH leaves visited. Diagnostic.
+	int leafVisits;
+
+	/// Did the ray hit anything at all?
+	bool hit;
+} b3RayResult;
+
+// =========================================================================
+// Character mover
+// =========================================================================
+//
+// Phase 7 Stage 4. A mover is a capsule that is **not** a body: it is moved by
+// depenetration and shape casting rather than by the solver, which is what
+// keeps a player from sliding down ramps, tipping over and picking up spin.
+// The types below are the whole of the shared vocabulary; the controller loop
+// that drives them is the caller's, or NEA_Phys3DMover's.
+//
+// The one thing to understand before reading the rest: **a plane's `offset` is
+// a penetration depth, not a `dot( normal, point )`**. Every b3CollideMoverAnd*
+// builds it as `totalRadius - distance`, measured against the mover where it is
+// *now*. So the plane set is expressed relative to the mover's current
+// position, which is why b3SolvePlanes hands b3PlaneSeparation a *translation*
+// rather than a point, and why b3CollideMover rotates a plane's normal and
+// transforms its point but deliberately leaves its offset alone. It is also
+// what makes the whole subsystem origin-independent, and therefore what lets
+// this port drop `b3Pos origin` from the two world entry points the way it did
+// from every other query.
+
+/// A collision plane between a character mover and one shape.
+typedef struct b3PlaneResult
+{
+	/// Outward pointing plane. `offset` is a depth -- see the note above.
+	b3Plane plane;
+
+	/// The closest point on the shape. May not be unique.
+	b3Vec3 point;
+} b3PlaneResult;
+
+/// A plane fed to b3SolvePlanes. Normally assembled by the caller from the
+/// b3PlaneResult batches b3World_CollideMover hands it, which is where the
+/// per-shape softness a game wants gets applied.
+typedef struct b3CollisionPlane
+{
+	/// The collision plane between the mover and some shape.
+	b3Plane plane;
+
+	/// How far this plane may push in total. B3_F_MAX makes it as rigid as
+	/// possible; lower values make the collision soft.
+	///
+	/// B3_F_MAX rather than B3_HUGE, and the choice is load bearing: b3AddF is
+	/// a bare int32 add in device mode, and B3_F_MAX is INT32_MAX/2 precisely
+	/// so that an add on the sentinel cannot wrap. B3_HUGE would work
+	/// arithmetically but is a sanity bound on *real lengths*, so using it here
+	/// would make a plane that genuinely needs a 2001-unit push behave
+	/// differently from a rigid one, for a reason the caller cannot see.
+	b3f pushLimit;
+
+	/// The push b3SolvePlanes decided on. Written by the solver, read by
+	/// b3ClipVector, and zero means this plane did nothing.
+	b3f push;
+
+	/// Should b3ClipVector clip against this plane? False for soft collision.
+	bool clipVelocity;
+} b3CollisionPlane;
+
+/// What b3SolvePlanes decided.
+typedef struct b3PlaneSolverResult
+{
+	/// The final relative translation.
+	b3Vec3 delta;
+
+	/// Iterations the solver used, out of a cap of 20.
+	///
+	/// Reaching the cap is ordinary, not a failure: measured over 160,000
+	/// random plane sets it happens 52% of the time, and the same scenarios in
+	/// double precision reach it 52% of the time too. See the note in mover.c.
+	int iterationCount;
+} b3PlaneSolverResult;
+
+/// Called once per shape b3World_CollideMover finds, with that shape's whole
+/// batch of planes.
+/// @return false to stop gathering.
+typedef bool b3PlaneResultFcn( b3ShapeId shapeId, const b3PlaneResult* planes, int planeCount, void* context );
+
+/// Called once per shape b3World_CastMover is about to sweep against.
+/// @return true to accept the shape.
+typedef bool b3MoverFilterFcn( b3ShapeId shapeId, void* context );
+
+// =========================================================================
 // Ray and shape casts
 // =========================================================================
 
@@ -249,6 +402,62 @@ typedef struct b3Sweep
 	b3Quat q1;			///< Starting world rotation.
 	b3Quat q2;			///< Ending world rotation.
 } b3Sweep;
+
+/// Input for b3TimeOfImpact.
+typedef struct b3TOIInput
+{
+	b3ShapeProxy proxyA; ///< The proxy for shape A.
+	b3ShapeProxy proxyB; ///< The proxy for shape B.
+	b3Sweep sweepA;		 ///< The motion of shape A.
+	b3Sweep sweepB;		 ///< The motion of shape B.
+	b3c maxFraction;	 ///< The sweep interval is [0, maxFraction].
+} b3TOIInput;
+
+/// How a time-of-impact query ended.
+typedef enum b3TOIState
+{
+	/// Never returned. The output is initialized to this so the exit asserts
+	/// can tell "no branch set the state" from any real answer.
+	b3_toiStateUnknown,
+
+	/// The root finder ran out of iterations. The fraction is the last one
+	/// known separated, so acting on it is conservative rather than wrong.
+	b3_toiStateFailed,
+
+	/// The shapes were already touching at the start of the sweep. Continuous
+	/// collision has nothing to contribute; the fraction is zero.
+	b3_toiStateOverlapped,
+
+	/// The shapes touch during the sweep, at `fraction`.
+	b3_toiStateHit,
+
+	/// The shapes stay apart for the whole sweep. The fraction is maxFraction.
+	b3_toiStateSeparated
+} b3TOIState;
+
+/// Output for b3TimeOfImpact.
+typedef struct b3TOIOutput
+{
+	/// How the query ended. Read this before the fraction: the fraction means
+	/// something different in each state.
+	b3TOIState state;
+
+	b3Vec3 point;  ///< The hit point, in world space.
+	b3Vec3 normal; ///< The hit normal, pointing from A to B.
+	b3c fraction;  ///< The sweep fraction of the collision.
+	b3f distance;  ///< The final distance between the shapes.
+
+	/// Iteration counts, so the caps can be set from measurement rather than
+	/// from upstream's float-era guesses. The port is deterministic integer
+	/// code, so these read the same on host and on hardware.
+	int distanceIterations; ///< Outer (separating axis) iterations.
+	int pushBackIterations; ///< Total deepest-point resolutions.
+	int rootIterations;		///< Total false-position/bisection steps.
+
+	/// The query found initial overlap and fell back to a sphere around the
+	/// fast shape's centroid, as a last effort to prevent tunnelling.
+	bool usedFallback;
+} b3TOIOutput;
 
 // =========================================================================
 // Mass properties
@@ -945,6 +1154,20 @@ typedef struct b3Capacity
 	/// while the scene is built, not during a step, so an undeclared one grows
 	/// the arrays as build memory rather than as a mid-frame allocation.
 	int jointCount;
+
+	/// Number of expected sensor shapes.
+	///
+	/// A port-only field, and the third of this kind. It sizes world->sensors
+	/// and the bitset the sensor pass flags changed overlap sets in. Each
+	/// sensor additionally reserves its own overlap arrays when its shape is
+	/// created -- B3_NEA_MAX_SENSOR_VISITORS twice and
+	/// B3_NEA_MAX_CONTINUOUS_SENSOR_HITS once -- so a sensor is not free even
+	/// when nothing ever enters it.
+	///
+	/// Zero -- the default -- costs nothing. A scene that creates a sensor
+	/// without declaring one here grows the array as build memory rather than
+	/// mid-frame, since shapes are created while the scene is built.
+	int sensorCount;
 } b3Capacity;
 
 // -------------------------------------------------------------------------
@@ -1908,10 +2131,12 @@ B3_API b3WheelJointDef b3DefaultWheelJointDef( void );
 // Events
 // =========================================================================
 //
-// Buffered in the world during a step and read back afterwards. Sensor events
-// are absent: sensors are Phase 7. Joint events arrived with Stage 7, once every
-// joint type existed -- the threshold test reads the reaction of whatever type
-// the joint happens to be, so it could not be written before the last one.
+// Buffered in the world during a step and read back afterwards. Joint events
+// arrived with Phase 6 Stage 7, once every joint type existed -- the threshold
+// test reads the reaction of whatever type the joint happens to be, so it could
+// not be written before the last one. Sensor events arrived with Phase 7 Stage
+// 3, and are the only ones here produced by comparing two steps rather than by
+// something that happened during one.
 
 /// A begin-touch event is generated when two shapes begin touching.
 typedef struct b3ContactBeginTouchEvent
@@ -1998,6 +2223,55 @@ typedef struct b3ContactEvents
 	/// Number of hit events
 	int hitCount;
 } b3ContactEvents;
+
+/// A begin-touch event is generated when a shape starts overlapping a sensor.
+///
+/// Both shapes must have sensor events enabled: the sensor to report, and the
+/// visitor to be reported. A shape never trips a sensor on its own body.
+typedef struct b3SensorBeginTouchEvent
+{
+	/// The id of the sensor shape.
+	b3ShapeId sensorShapeId;
+
+	/// The id of the shape that entered the sensor.
+	b3ShapeId visitorShapeId;
+} b3SensorBeginTouchEvent;
+
+/// An end-touch event is generated when a shape stops overlapping a sensor.
+///
+/// You also get one when the overlap is ended by something other than motion:
+/// either shape being destroyed or disabled, or sensor events being turned off
+/// on either of them.
+typedef struct b3SensorEndTouchEvent
+{
+	/// The id of the sensor shape. @warning may have been destroyed
+	b3ShapeId sensorShapeId;
+
+	/// The id of the shape that left the sensor. @warning may have been
+	/// destroyed
+	b3ShapeId visitorShapeId;
+} b3SensorEndTouchEvent;
+
+/// Sensor events buffered in the world, available after the step completes.
+///
+/// Only transitions are reported. A shape that stays inside a sensor produces
+/// one begin event and then nothing until it leaves, so the current contents of
+/// a sensor are b3Shape_GetSensorData rather than an event count.
+/// @note These may become invalid if bodies or shapes are destroyed.
+typedef struct b3SensorEvents
+{
+	/// Array of sensor begin touch events
+	b3SensorBeginTouchEvent* beginEvents;
+
+	/// Array of sensor end touch events
+	b3SensorEndTouchEvent* endEvents;
+
+	/// Number of begin touch events
+	int beginCount;
+
+	/// Number of end touch events
+	int endCount;
+} b3SensorEvents;
 
 /// A joint event is generated when a joint's reaction exceeds a threshold set
 /// on it, which is how a game notices a joint being overloaded -- a suspension
@@ -2213,8 +2487,8 @@ typedef b3c b3TreeBoxCastCallbackFcn( const b3BoxCastInput* input, int proxyId, 
 // =========================================================================
 //
 // Implemented in distance.c. Declared here because the shape primitives call
-// them for overlap tests, and they are the shared entry points that Phase 7's
-// continuous collision will reuse.
+// them for overlap tests, and they are the shared entry points continuous
+// collision reuses.
 
 /// Compute the closest points between two convex shapes, using GJK.
 B3_API b3DistanceOutput b3ShapeDistance( const b3DistanceInput* input, b3SimplexCache* cache, b3Simplex* simplexes,
@@ -2222,3 +2496,17 @@ B3_API b3DistanceOutput b3ShapeDistance( const b3DistanceInput* input, b3Simplex
 
 /// Cast one convex shape against another, using conservative advancement.
 B3_API b3CastOutput b3ShapeCast( const b3ShapeCastPairInput* input );
+
+/// Re-express a proxy in a frame, writing its points into `buffer`, which must
+/// hold at least B3_MAX_SHAPE_CAST_POINTS of them.
+B3_API b3ShapeProxy b3MakeLocalProxy( const b3ShapeProxy* proxy, b3Transform transform, b3Vec3* buffer );
+
+/// The proxy's bounds, radius included.
+B3_API b3AABB b3ComputeProxyAABB( const b3ShapeProxy* proxy );
+
+/// The pose a sweep has reached at `time`, which must be in [0, 1].
+B3_API b3Transform b3GetSweepTransform( const b3Sweep* sweep, b3c time );
+
+/// The first time in [0, maxFraction] at which two moving convex shapes touch,
+/// by root finding on a separating axis.
+B3_API b3TOIOutput b3TimeOfImpact( const b3TOIInput* input );

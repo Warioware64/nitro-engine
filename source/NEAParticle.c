@@ -616,6 +616,8 @@ static int ne_find_free_slot(NEA_ParticleEmitter *e)
     return -1;
 }
 
+// ARM mode: 15 __aeabi_lmul calls in Thumb, paid once per particle spawned.
+ARM_CODE
 static void ne_spawn_one(NEA_ParticleEmitter *e)
 {
     int slot = ne_find_free_slot(e);
@@ -827,6 +829,9 @@ static void ne_update_emitter(NEA_ParticleEmitter *e)
     }
 }
 
+// ARM mode: only 3 __aeabi_lmul calls, but they are inside the per-particle
+// integration loop rather than beside it.
+ARM_CODE
 void NEA_ParticleUpdateAll(void)
 {
     if (!ne_part_inited)
@@ -871,6 +876,8 @@ static bool ne_billboard_basis(int32_t right[3], int32_t up[3])
     return true;
 }
 
+// ARM mode: 8 __aeabi_lmul calls in Thumb, paid per emitter per frame.
+ARM_CODE
 void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter)
 {
     if (emitter == NULL || !emitter->params_loaded

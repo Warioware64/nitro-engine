@@ -116,6 +116,71 @@
 /// KB of scratch on a machine with 4 MB. This pair wants 6 KB.
 #define B3_NEA_MAX_POINTS_PER_TRIANGLE 8
 
+/// Shapes one sensor may report as overlapping it at once.
+///
+/// Upstream creates the two overlap arrays at 16 and lets them grow; the port
+/// reserves them once when the sensor shape is created and never grows them,
+/// because growing an array during a step is the allocation the pool refuses.
+/// 16 is upstream's starting size kept as the bound.
+///
+/// @section drop What happens at the cap
+///
+/// The visitor is dropped and b3World::sensorOverlapDropCount counts it. That
+/// is a begin event that never fires -- and, a step later, an end event that
+/// never fires either, since a set that was never entered cannot be left. Same
+/// rule and same reason as B3_NEA_MAX_MESH_MANIFOLDS: a bound the port invents
+/// is a bound the port has to be able to see bind.
+#define B3_NEA_MAX_SENSOR_VISITORS 16
+
+/// Sensors one fast body may sweep through in a single step.
+///
+/// Upstream's B2_MAX_CONTINUOUS_SENSOR_HITS, unchanged at 8. This is the array
+/// the continuous pass fills for a body moving fast enough to cross a trigger
+/// volume entirely within one step -- without it, the end-of-step overlap
+/// query is looking at a body that is already past the sensor and the trigger
+/// never fires. It is per fast body, not per world, and lives on the stack in
+/// b3ContinuousContext.
+#define B3_NEA_MAX_CONTINUOUS_SENSOR_HITS 8
+
+/// Collision planes one shape may hand a character mover in one call.
+///
+/// Two arrays share this bound: the buffer b3World_CollideMover puts on the
+/// stack inside its tree callback, and whatever the caller collects into.
+/// Upstream uses 64 for the first and 8 for the second (samples/mover.h), so 8
+/// is the number that was ever reachable -- the other 56 are computed by GJK,
+/// copied, and dropped by the collector on the way past.
+///
+/// 64 is also the wrong number for this machine. sizeof(b3PlaneResult) is 28
+/// bytes in device mode, so 64 of them is 1792 bytes of stack, claimed inside a
+/// broad-phase tree callback that is already standing on b3DynamicTree_Query's
+/// node stack and a GJK frame, on an ARM9 with 16 KB of DTCM. Eight is 224.
+///
+/// Eight also fits the geometry. Only the mesh backend returns more than one
+/// plane, and it returns one per *triangle*: a capsule in the corner of a
+/// triangulated room touches two floor triangles and two per wall, which is
+/// six.
+///
+/// @section drop What happens at the cap
+///
+/// The traversal stops -- b3CollideMoverAndMesh returns false from its
+/// b3QueryMesh callback and the remaining triangles are never tested -- and
+/// b3World::moverPlaneDropCount counts the batch that saturated.
+///
+/// What it costs is a **surface the mover is never pushed away from**, because
+/// b3SolvePlanes only pushes against planes it was handed. That is worse than
+/// the other two caps in this file and worth saying plainly: a dropped contact
+/// is a body settling slowly into a crease, and a dropped mover plane is a
+/// player walking through a wall, at the one moment the geometry was busiest.
+/// Same rule all the same: a bound the port invents is a bound the port has to
+/// be able to see bind.
+///
+/// The counter counts saturated *batches*, not dropped planes. Counting planes
+/// exactly would mean finishing the traversal past the cap -- a GJK call per
+/// remaining triangle, which is the cost the cap exists to avoid. A saturated
+/// batch is an upper bound on the drops and a lower bound of one, which is all
+/// "see it bind" needs.
+#define B3_NEA_MAX_MOVER_PLANES 8
+
 // =========================================================================
 // Disabled subsystems
 // =========================================================================

@@ -313,9 +313,15 @@ static bool b3PairQueryCallback( int proxyId, uint64_t userData, void* context )
 		return true;
 	}
 
-	// Upstream skips sensors here; the port has none (Phase 7), so this is an
-	// assert rather than a branch -- same treatment as 3A gave shape creation.
-	B3_ASSERT( shapeA->sensorIndex == B3_NULL_INDEX && shapeB->sensorIndex == B3_NULL_INDEX );
+	// A sensor reports overlaps; it does not resolve them. This is where that
+	// is decided, and it decides it for the whole library: no contact is ever
+	// created for a pair with a sensor in it, so nothing downstream -- the
+	// contact graph, the islands, the solver -- has to know sensors exist.
+	// sensor.c runs its own query instead, after the solve.
+	if ( shapeA->sensorIndex != B3_NULL_INDEX || shapeB->sensorIndex != B3_NULL_INDEX )
+	{
+		return true;
+	}
 
 	if ( b3ShouldShapesCollide( shapeA->filter, shapeB->filter ) == false )
 	{

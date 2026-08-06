@@ -254,6 +254,9 @@ void NEA_BoneCollisionFree(NEA_BoneCollisionData *bcd)
 // World-space bone collision queries
 // =========================================================================
 
+// ARM mode: this is the only function in the file that does 64-bit multiplies,
+// and it does 18 of them. See NEA_AnimMatEvaluate for the reason.
+ARM_CODE
 int NEA_BoneCollisionGetWorldShape(const NEA_Model *model,
                                    const NEA_BoneCollisionData *bcd,
                                    int bone_idx,

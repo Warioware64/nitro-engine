@@ -61,6 +61,44 @@ typedef struct
 	pdVec3 point, normal;
 } pdCastOut;
 
+/// A sweep: where a body's centre of mass and rotation start and end.
+///
+/// Both libraries spell this the same way, so it crosses as five plain vectors
+/// and two quaternions rather than needing a conversion either side.
+typedef struct
+{
+	pdVec3 localCenter;
+	pdVec3 c1, c2;
+	double q1x, q1y, q1z, q1w;
+	double q2x, q2y, q2z, q2w;
+} pdSweep;
+
+/// The state enumerators, in the order both libraries declare them, so the
+/// integer crosses unchanged and a mismatch is a real disagreement about how
+/// the query ended rather than a numbering difference.
+typedef enum
+{
+	pd_toiUnknown = 0,
+	pd_toiFailed,
+	pd_toiOverlapped,
+	pd_toiHit,
+	pd_toiSeparated,
+} pdTOIState;
+
+typedef struct
+{
+	int state;
+	double fraction;
+	double distance;
+	pdVec3 point, normal;
+
+	/// What the root finder actually cost. Not compared -- the two libraries
+	/// converge differently by construction -- but reported, because it is the
+	/// only direct evidence about whether the iteration caps are a safety net
+	/// or the thing doing the stopping.
+	int distanceIterations, pushBackIterations, rootIterations;
+} pdTOIOut;
+
 typedef struct
 {
 	int pointCount;
@@ -279,6 +317,17 @@ typedef struct
 	/// b3SafeScale to (1,1,1) and get it back, so a scale here would only add a
 	/// quantization difference to a comparison that is about the narrow phase.
 	int meshIndex;
+
+	/// Make this shape a sensor: it reports what overlaps it and resolves
+	/// nothing. Zero for every scene predating Phase 7 Stage 3, which is why
+	/// they are unaffected by the field existing.
+	bool isSensor;
+
+	/// Sensor events on this shape. Both ends need it -- a sensor with it off
+	/// reports nothing and an ordinary shape with it off is invisible to every
+	/// sensor -- so a sensor scene sets it on the sensor *and* on each visitor
+	/// it expects to see.
+	bool enableSensorEvents;
 } pdBodyShape;
 
 typedef struct
@@ -641,6 +690,20 @@ typedef struct
 	bool awake;
 } pdSceneBodyOut;
 
+/// One sensor transition, by creation-order shape index on both ends.
+///
+/// Unlike a contact this carries no geometry at all, and that is the point:
+/// a sensor's whole output is *which shapes* crossed its boundary and *when*.
+/// There is nothing here to budget a tolerance against -- the two libraries
+/// either name the same pair on the same pass or they disagree.
+typedef struct
+{
+	int sensorShape;
+	int visitorShape;
+} pdSensorEvent;
+
+#define PD_MAX_SCENE_SENSOR_EVENTS 12
+
 typedef struct
 {
 	int contactCount;
@@ -653,6 +716,21 @@ typedef struct
 
 	int beginCount;
 	int endCount;
+
+	/// Sensor transitions from this pass, each sorted by
+	/// (sensorShape, visitorShape) for the reason the contacts are: the port
+	/// publishes them in sensor order and then in shapeId order, the reference
+	/// in its own, and neither promises the other's.
+	int sensorBeginCount;
+	pdSensorEvent sensorBegins[PD_MAX_SCENE_SENSOR_EVENTS];
+
+	int sensorEndCount;
+	pdSensorEvent sensorEnds[PD_MAX_SCENE_SENSOR_EVENTS];
+
+	/// Shapes inside each sensor at the end of the pass, in creation order of
+	/// the sensor. -1 for a shape that is not a sensor, so a scene can tell
+	/// "empty" from "not a sensor" without a second array.
+	int sensorOccupancy[PD_MAX_SCENE_BODIES * PD_MAX_BODY_SHAPES];
 
 	/// Post-pass body states, in creation order. Filled by every scene; only
 	/// the stepping ones have anything interesting in them.
@@ -703,6 +781,10 @@ typedef struct
 	void ( *distance )( const pdProxy* a, const pdProxy* b, const pdTransform* xf, bool useRadii, pdDistanceOut* out );
 
 	void ( *shapeCast )( const pdProxy* a, const pdProxy* b, const pdTransform* xf, pdVec3 translation, pdCastOut* out );
+
+	/// The first time two swept convex shapes touch.
+	void ( *timeOfImpact )( const pdProxy* a, const pdProxy* b, const pdSweep* sweepA, const pdSweep* sweepB,
+							double maxFraction, pdTOIOut* out );
 
 	void ( *sphereSphere )( pdVec3 cA, double rA, pdVec3 cB, double rB, const pdTransform* xf, pdManifoldOut* out );
 

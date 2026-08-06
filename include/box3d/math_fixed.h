@@ -422,8 +422,8 @@ B3_INLINE b3Vec3 b3Lerp( b3Vec3 a, b3Vec3 b, b3c t )
 // The dot product is the one place a naive port loses badly. Narrowing each
 // term to Q12 before summing throws away the low bits of all three and can
 // overflow on large vectors -- which is what NEA_Vec3LengthSq in
-// NEACollision.h does today. Accumulating wide and narrowing once is both
-// more accurate and cheaper: three SMLALs and one shift.
+// NEACollision.h did until Phase 7 rewrote it this way. Accumulating wide and
+// narrowing once is both more accurate and cheaper: three SMLALs and one shift.
 
 /// Dot product accumulated in an int64 at Q24, before narrowing. Callers that
 /// need the extra range (squared lengths, GJK) should use this directly.

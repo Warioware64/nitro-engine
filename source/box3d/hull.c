@@ -34,13 +34,15 @@
 ///   b3ComputeHullProjectedArea                            -- dropped with
 ///                                                            b3World_Explode
 ///                                                            and wind
-///   b3CollideMoverAndHull                                 -- Phase 7 (mover)
 ///   b3UpdateHullBounds, b3UpdateHullBulkProperties        -- host baking; the
 ///                                                            device never
 ///                                                            constructs a
 ///                                                            hull, so it
 ///                                                            never recomputes
 ///                                                            these
+///
+/// b3CollideMoverAndHull was on this list until Phase 7 Stage 4 and is now at
+/// the end of the query section, beside b3ShapeCastHull.
 ///
 /// @section soa No structure-of-arrays
 ///
@@ -474,6 +476,46 @@ b3CastOutput b3ShapeCastHull( const b3HullData* shape, const b3ShapeCastInput* i
 	pairInput.canEncroach = input->canEncroach;
 
 	return b3ShapeCast( &pairInput );
+}
+
+int b3CollideMoverAndHull( b3PlaneResult* result, const b3HullData* shape, const b3Capsule* mover )
+{
+	b3DistanceInput distanceInput;
+	distanceInput.proxyA = ( b3ShapeProxy ){ b3GetHullPoints( shape ), shape->vertexCount, b3f_zero };
+	distanceInput.proxyB = ( b3ShapeProxy ){ &mover->center1, 2, mover->radius };
+	distanceInput.transform = b3Transform_identity;
+	distanceInput.useRadii = false;
+
+	b3f totalRadius = mover->radius;
+
+	b3SimplexCache cache = { 0 };
+	b3DistanceOutput distanceOutput = b3ShapeDistance( &distanceInput, &cache, NULL, 0 );
+
+	if ( b3Raw( distanceOutput.distance ) == 0 )
+	{
+		// Deep overlap, declined. Upstream's reasoning: a hull could be handled
+		// here, but a mesh cannot, and a hull converted to a mesh must not
+		// behave differently -- so neither does.
+		//
+		// The single test covers every way GJK can report an overlap, and that
+		// is not a coincidence to rely on quietly: all four of b3ShapeDistance's
+		// overlap exits return the zero-initialized output, so a zero distance
+		// comes with a zero normal in each of them. The assertion below is what
+		// says so, on the branch where the normal is about to be used.
+		return 0;
+	}
+
+	if ( b3Raw( distanceOutput.distance ) <= b3Raw( totalRadius ) )
+	{
+		B3_ASSERT( b3IsNormalized( distanceOutput.normal ) );
+
+		// A depth, not a dot( normal, point ) -- see types.h above b3PlaneResult.
+		b3Plane plane = { distanceOutput.normal, b3SubF( totalRadius, distanceOutput.distance ) };
+		*result = ( b3PlaneResult ){ plane, distanceOutput.pointA };
+		return 1;
+	}
+
+	return 0;
 }
 
 // =========================================================================

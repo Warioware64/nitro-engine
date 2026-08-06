@@ -31,8 +31,12 @@
 /// against a closed form, and checking them before any impulse exists is the
 /// point of the split. Phase 3C-ii fills the stages in.
 ///
-/// Absent, with CCD's phase named at the call site: `b3SolveContinuous`,
-/// `b3ContinuousQueryCallback` and `b3BulletBodyTask`.
+/// `b3SolveContinuous` and `b3ContinuousQueryCallback` arrived in Phase 7 Stage
+/// 2. `b3BulletBodyTask` did not: it exists upstream to hand a stack-allocated
+/// array of bullet indices to a worker pool, and on one core the second pass is
+/// a plain loop that re-tests the flag. Stage 3 added the sensor half of the
+/// continuous pass, which upstream also routes through a per-worker array and
+/// which for the same reason goes straight onto the sensor here.
 
 #include "solver.h"
 
@@ -46,6 +50,7 @@
 #include "island.h"
 #include "joint.h"
 #include "physics_world.h"
+#include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
 
@@ -347,6 +352,389 @@ static void b3SolveJointsTask( int startIndex, int endIndex, b3StepContext* cont
 }
 
 // =========================================================================
+// Continuous collision
+// =========================================================================
+//
+// A body that moves more than half its own smallest extent in one step can end
+// the step on the far side of something thin, having never produced a contact.
+// This pass sweeps such a body from where it started to where it ended, and if
+// it meets anything on the way, puts it back at the moment of contact so the
+// next step's narrow phase sees a normal overlap.
+//
+// It runs after b3FinalizeBodiesTask has written the end pose, and before the
+// enlarged AABBs reach the broad phase -- so a body that gets pulled back has
+// its proxy built from the pose it was pulled back to.
+//
+// Two passes, for the reason upstream has two: ordinary fast bodies sweep
+// against static geometry only, which no other body's motion can affect, so
+// they are handled inline as they are finalized. Bullets also sweep against
+// kinematic and dynamic bodies, and must therefore wait until every ordinary
+// fast body has been resolved, or they would collide with poses that are about
+// to be corrected.
+
+typedef struct b3ContinuousContext
+{
+	b3World* world;
+	b3BodySim* fastBodySim;
+	const b3Shape* fastShape;
+	b3Sweep sweep;
+
+	/// Where the sweep was re-centred, so world space can be recovered.
+	b3Vec3 base;
+
+	/// The earliest impact found so far, and the sweep limit for the rest.
+	b3c fraction;
+
+	/// Sensors this sweep passed through, and where along it.
+	///
+	/// A sensor hit is not an impact -- nothing stops -- so it cannot narrow
+	/// `fraction`, and it cannot be acted on when it is found either: a solid
+	/// hit discovered later may turn out to be earlier, and a body that never
+	/// reached the sensor did not trip it. So they are collected here and
+	/// filtered against the final fraction once the sweep is done.
+	b3SensorHit sensorHits[B3_NEA_MAX_CONTINUOUS_SENSOR_HITS];
+	b3c sensorFractions[B3_NEA_MAX_CONTINUOUS_SENSOR_HITS];
+	int sensorCount;
+} b3ContinuousContext;
+
+/// The sweep a body traced this step, relative to `base`.
+///
+/// Upstream calls this b3MakeRelativeSweep and takes a b3Pos origin, which in
+/// this port is the same type as b3Vec3. It is kept anyway, unlike the query
+/// layer's `origin` argument which Stage 1b dropped as a no-op: here it is not
+/// one. Re-centring on center0 leaves the separation function multiplying
+/// coordinates that are the size of a body and a step of motion, rather than
+/// the size of the world -- and those products are quadratic.
+static b3Sweep b3MakeRelativeSweep( const b3BodySim* sim, b3Vec3 base )
+{
+	return ( b3Sweep ){
+		.localCenter = sim->localCenter,
+		.c1 = b3Sub( sim->center0, base ),
+		.c2 = b3Sub( sim->center, base ),
+		.q1 = sim->rotation0,
+		.q2 = sim->transform.q,
+	};
+}
+
+/// Implements b3TreeQueryCallbackFcn.
+static bool b3ContinuousQueryCallback( int proxyId, uint64_t userData, void* context )
+{
+	B3_UNUSED( proxyId );
+
+	int shapeId = (int)userData;
+	b3ContinuousContext* continuousContext = context;
+
+	const b3Shape* fastShape = continuousContext->fastShape;
+	b3BodySim* fastBodySim = continuousContext->fastBodySim;
+
+	// Skip the shape itself.
+	if ( shapeId == fastShape->id )
+	{
+		return true;
+	}
+
+	b3World* world = continuousContext->world;
+	b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+	// Skip the rest of the same body.
+	if ( shape->bodyId == fastShape->bodyId )
+	{
+		return true;
+	}
+
+	// A sensor is swept against, but only when both ends want sensor events --
+	// the same pair of flags the ordinary sensor pass tests, so a shape cannot
+	// be invisible to a trigger at rest and visible to it at speed.
+	bool isSensor = shape->sensorIndex != B3_NULL_INDEX;
+	if ( isSensor && ( ( shape->flags & b3_enableSensorEvents ) == 0 || ( fastShape->flags & b3_enableSensorEvents ) == 0 ) )
+	{
+		return true;
+	}
+
+	if ( b3ShouldShapesCollide( fastShape->filter, shape->filter ) == false )
+	{
+		return true;
+	}
+
+	b3Body* body = b3Array_Get( world->bodies, shape->bodyId );
+	b3BodySim* bodySim = b3GetBodySim( world, body );
+	B3_ASSERT( body->type == b3_staticBody || ( fastBodySim->flags & b3_isBullet ) );
+
+	// Bullets do not stop each other. Two of them would each be sweeping
+	// against the other's uncorrected pose, and the answer would depend on
+	// which was resolved first.
+	if ( bodySim->flags & b3_isBullet )
+	{
+		return true;
+	}
+
+	b3Body* fastBody = b3Array_Get( world->bodies, fastBodySim->bodyId );
+	if ( b3ShouldBodiesCollide( world, fastBody, body ) == false )
+	{
+		return true;
+	}
+
+	if ( ( shape->flags & b3_enableCustomFiltering ) != 0 || ( fastShape->flags & b3_enableCustomFiltering ) != 0 )
+	{
+		b3CustomFilterFcn* customFilterFcn = world->customFilterFcn;
+		if ( customFilterFcn != NULL )
+		{
+			b3ShapeId idA = { shape->id + 1, world->worldId, shape->generation };
+			b3ShapeId idB = { fastShape->id + 1, world->worldId, fastShape->generation };
+			if ( customFilterFcn( idA, idB, world->customFilterContext ) == false )
+			{
+				return true;
+			}
+		}
+	}
+
+	// The struck body's own sweep. For a static body this is a fixed pose, and
+	// b3GetSweepTransform's equal-rotation fast path picks that up.
+	b3Sweep sweepA = b3MakeRelativeSweep( bodySim, continuousContext->base );
+
+	b3TOIOutput output =
+		b3ShapeTimeOfImpact( shape, fastShape, &sweepA, &continuousContext->sweep, continuousContext->fraction );
+
+	world->toiDistanceIterations = b3MaxInt( world->toiDistanceIterations, output.distanceIterations );
+	world->toiPushBackIterations = b3MaxInt( world->toiPushBackIterations, output.pushBackIterations );
+	world->toiRootIterations = b3MaxInt( world->toiRootIterations, output.rootIterations );
+
+	if ( isSensor )
+	{
+		// `<=` where the solid branch below uses `<`: a trigger touched at the
+		// exact moment of a solid impact was still touched. Nothing narrows the
+		// sweep here, because passing through a sensor does not stop anything.
+		if ( b3Raw( output.fraction ) <= b3Raw( continuousContext->fraction ) &&
+			 continuousContext->sensorCount < B3_NEA_MAX_CONTINUOUS_SENSOR_HITS )
+		{
+			int index = continuousContext->sensorCount;
+			continuousContext->sensorHits[index] = ( b3SensorHit ){ shape->id, fastShape->id };
+			continuousContext->sensorFractions[index] = output.fraction;
+			continuousContext->sensorCount += 1;
+		}
+
+		return true;
+	}
+
+	// A fraction of zero means the shapes were already touching, which the
+	// narrow phase handles perfectly well; only a hit strictly inside the
+	// sweep is this pass's business.
+	if ( 0 < b3Raw( output.fraction ) && b3Raw( output.fraction ) < b3Raw( continuousContext->fraction ) )
+	{
+		bool didHit = true;
+
+		if ( ( shape->flags & b3_enablePreSolveEvents ) || ( fastShape->flags & b3_enablePreSolveEvents ) )
+		{
+			b3PreSolveFcn* preSolveFcn = world->preSolveFcn;
+			if ( preSolveFcn != NULL )
+			{
+				b3ShapeId shapeIdA = { shape->id + 1, world->worldId, shape->generation };
+				b3ShapeId shapeIdB = { fastShape->id + 1, world->worldId, fastShape->generation };
+				b3Vec3 point = b3Add( continuousContext->base, output.point );
+				didHit = preSolveFcn( shapeIdA, shapeIdB, point, output.normal, world->preSolveContext );
+			}
+		}
+
+		if ( didHit )
+		{
+			fastBodySim->flags |= b3_hadTimeOfImpact;
+			continuousContext->fraction = output.fraction;
+		}
+	}
+
+	// Continue the query.
+	return true;
+}
+
+/// Sweep one fast body and, if it hits something, put it back at the impact.
+static void b3SolveContinuous( b3World* world, int bodySimIndex, b3StepContext* context )
+{
+	b3SolverSet* awakeSet = b3Array_Get( world->solverSets, b3_awakeSet );
+	b3BodySim* fastBodySim = b3Array_Get( awakeSet->bodySims, bodySimIndex );
+	B3_ASSERT( fastBodySim->flags & b3_isFast );
+
+	b3Vec3 base = fastBodySim->center0;
+	b3Sweep sweep = b3MakeRelativeSweep( fastBodySim, base );
+
+	b3Transform xf2;
+	xf2.q = sweep.q2;
+	xf2.p = b3Sub( sweep.c2, b3RotateVector( sweep.q2, sweep.localCenter ) );
+
+	b3DynamicTree* staticTree = world->broadPhase.trees + b3_staticBody;
+	b3DynamicTree* kinematicTree = world->broadPhase.trees + b3_kinematicBody;
+	b3DynamicTree* dynamicTree = world->broadPhase.trees + b3_dynamicBody;
+	b3Body* fastBody = b3Array_Get( world->bodies, fastBodySim->bodyId );
+
+	b3ContinuousContext continuousContext = { 0 };
+	continuousContext.world = world;
+	continuousContext.sweep = sweep;
+	continuousContext.base = base;
+	continuousContext.fastBodySim = fastBodySim;
+	continuousContext.fraction = b3c_one;
+
+	bool isBullet = ( fastBodySim->flags & b3_isBullet ) != 0;
+
+	int shapeId = fastBody->headShapeId;
+	while ( shapeId != B3_NULL_INDEX )
+	{
+		b3Shape* fastShape = b3Array_Get( world->shapes, shapeId );
+		shapeId = fastShape->nextShapeId;
+
+		continuousContext.fastShape = fastShape;
+
+		b3AABB box1 = fastShape->aabb;
+
+		// xf2 is relative to the base, so the box comes back to world space.
+		b3AABB box2 = b3ComputeShapeAABB( fastShape, xf2 );
+		box2.lowerBound = b3Add( box2.lowerBound, base );
+		box2.upperBound = b3Add( box2.upperBound, base );
+
+		// Kept, so the no-impact path below does not compute it twice.
+		fastShape->aabb = box2;
+
+		// A mesh is a triangle soup on a body that should not be moving fast
+		// in the first place, and b3ShapeTimeOfImpact cannot sweep one.
+		if ( fastShape->type == b3_meshShape )
+		{
+			continue;
+		}
+
+		// A sensor on a fast body sweeps against nothing. It has no collision
+		// response to preserve, and the sensor pass will query it from its end
+		// pose in a moment -- upstream's rule, and the same asymmetry the
+		// callback above has: a sensor is something to be swept *against*, not
+		// something that sweeps.
+		if ( fastShape->sensorIndex != B3_NULL_INDEX )
+		{
+			continue;
+		}
+
+		b3AABB sweptBox = b3AABB_Union( box1, box2 );
+		b3DynamicTree_Query( staticTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &continuousContext );
+
+		if ( isBullet )
+		{
+			b3DynamicTree_Query( kinematicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &continuousContext );
+			b3DynamicTree_Query( dynamicTree, sweptBox, B3_DEFAULT_MASK_BITS, false, b3ContinuousQueryCallback, &continuousContext );
+		}
+	}
+
+	// Deposit the sensor hits, now that the final fraction is known.
+	//
+	// The filter is upstream's: a sensor found beyond where the body was
+	// stopped was not actually reached, so it did not happen. `<` rather than
+	// `<=` because a sensor exactly at the impact was recorded by a `<=` in the
+	// callback, and one of the two comparisons has to be strict or a trigger
+	// sitting on a wall fires on every body that hits the wall.
+	//
+	// Upstream pushes these to a per-worker b3TaskContext and drains every
+	// worker's array back in b3Solve, because its workers fill them
+	// concurrently and the event order must not depend on which thread won.
+	// There is one core here, so the hits go straight onto the sensor -- no
+	// second pass, no array on the solver stack, and b3SolverStackDemand
+	// unchanged. Same argument as the bullet pass below.
+	for ( int i = 0; i < continuousContext.sensorCount; ++i )
+	{
+		if ( b3Raw( continuousContext.sensorFractions[i] ) >= b3Raw( continuousContext.fraction ) )
+		{
+			continue;
+		}
+
+		b3SensorHit hit = continuousContext.sensorHits[i];
+		b3Shape* sensorShape = b3Array_Get( world->shapes, hit.sensorId );
+		b3Shape* visitor = b3Array_Get( world->shapes, hit.visitorId );
+
+		b3Sensor* sensor = b3Array_Get( world->sensors, sensorShape->sensorIndex );
+
+		// Bounded like every other sensor array, and dropped the same way: the
+		// sensor pass folds these into overlaps2, so a hit that does not fit is
+		// a begin event that does not fire.
+		if ( sensor->hits.count == sensor->hits.capacity )
+		{
+			world->sensorOverlapDropCount += 1;
+			continue;
+		}
+
+		b3Visitor shapeRef = { hit.visitorId, visitor->generation };
+		b3Array_Push( sensor->hits, shapeRef );
+	}
+
+	if ( b3Raw( continuousContext.fraction ) < B3_C_ONE )
+	{
+		world->toiEventCount += 1;
+
+		// Put the body back where it first touched, and make that the start of
+		// the next step's sweep as well -- it is a pose the body actually
+		// occupied, so nothing was skipped over.
+		b3Quat q = b3NLerp( sweep.q1, sweep.q2, continuousContext.fraction );
+		b3Vec3 c = b3Lerp( sweep.c1, sweep.c2, continuousContext.fraction );
+		b3Vec3 origin = b3Sub( c, b3RotateVector( q, sweep.localCenter ) );
+
+		b3WorldTransform transform = { b3Add( base, origin ), q };
+		b3Pos center = b3Add( base, c );
+		fastBodySim->transform = transform;
+		fastBodySim->center = center;
+		fastBodySim->rotation0 = q;
+		fastBodySim->center0 = center;
+
+		// The move event was written from the un-swept pose in finalize.
+		b3BodyMoveEvent* event = b3Array_Get( world->bodyMoveEvents, bodySimIndex );
+		event->transform = transform;
+
+		// A body can be fast and still barely move, so the AABBs are rebuilt
+		// at the impact pose and only grown if they actually left the fat one.
+		shapeId = fastBody->headShapeId;
+		while ( shapeId != B3_NULL_INDEX )
+		{
+			b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+			b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, B3_SPECULATIVE_DISTANCE );
+			shape->aabb = aabb;
+
+			if ( b3AABB_Contains( shape->fatAABB, aabb ) == false )
+			{
+				b3f margin = shape->aabbMargin;
+				b3Vec3 aabbMargin = b3MakeVec3( margin, margin, margin );
+				shape->fatAABB.lowerBound = b3Sub( aabb.lowerBound, aabbMargin );
+				shape->fatAABB.upperBound = b3Add( aabb.upperBound, aabbMargin );
+				shape->flags |= b3_enlargedAABB;
+			}
+
+			shapeId = shape->nextShapeId;
+		}
+	}
+	else
+	{
+		// Nothing in the way: the body keeps the pose it reached, and that pose
+		// starts the next sweep.
+		fastBodySim->rotation0 = fastBodySim->transform.q;
+		fastBodySim->center0 = fastBodySim->center;
+
+		shapeId = fastBody->headShapeId;
+		while ( shapeId != B3_NULL_INDEX )
+		{
+			b3Shape* shape = b3Array_Get( world->shapes, shapeId );
+
+			// shape->aabb was written by the loop above, except for a mesh,
+			// which that loop skipped before storing it -- and a mesh on a fast
+			// dynamic body has no mass anyway.
+			if ( b3AABB_Contains( shape->fatAABB, shape->aabb ) == false )
+			{
+				b3f margin = shape->aabbMargin;
+				b3Vec3 aabbMargin = b3MakeVec3( margin, margin, margin );
+				shape->fatAABB.lowerBound = b3Sub( shape->aabb.lowerBound, aabbMargin );
+				shape->fatAABB.upperBound = b3Add( shape->aabb.upperBound, aabbMargin );
+				shape->flags |= b3_enlargedAABB;
+			}
+
+			shapeId = shape->nextShapeId;
+		}
+	}
+
+	B3_UNUSED( context );
+}
+
+// =========================================================================
 // Finalize
 // =========================================================================
 
@@ -493,16 +881,29 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, b3StepContext* c
 
 			if ( body->type == b3_dynamicBody && enableContinuous && b3Raw( maxMotion ) > b3Raw( safeMotion ) )
 			{
-				// Retained for debug draw, and read by the enlarged-AABB pass
-				// below -- so the bookkeeping continuous collision needs is
-				// exercised from this increment onward even though the sweep
-				// itself is not here. b3SolveContinuous is deferred past 3C;
-				// upstream branches on b3_isBullet here and calls it.
 				sim->flags |= b3_isFast;
-			}
 
-			sim->center0 = sim->center;
-			sim->rotation0 = sim->transform.q;
+				// center0 and rotation0 are deliberately *not* stamped here.
+				// They are the start of the sweep, and overwriting them with
+				// the pose the body has already reached would leave the
+				// continuous pass a sweep of zero length -- which is what this
+				// branch did for every phase before Stage 2, when there was no
+				// sweep to feed.
+				if ( ( sim->flags & b3_isBullet ) == 0 )
+				{
+					b3SolveContinuous( world, simIndex, context );
+				}
+
+				// A bullet is left for the second pass in b3Solve, so that it
+				// sweeps against where the other fast bodies *stopped* rather
+				// than where they were heading.
+			}
+			else
+			{
+				// Safe to advance.
+				sim->center0 = sim->center;
+				sim->rotation0 = sim->transform.q;
+			}
 		}
 		else
 		{
@@ -546,26 +947,31 @@ static void b3FinalizeBodiesTask( int startIndex, int endIndex, b3StepContext* c
 
 			if ( isFast )
 			{
-				// A fast body's AABB is enlarged by the continuous pass, which
-				// this phase does not have -- so it is marked enlarged
-				// unconditionally and the proxy is refreshed from the tight
-				// AABB below. Through a bit set rather than directly, to keep
-				// the move array in deterministic order.
+				// The AABB belongs to the continuous pass: b3SolveContinuous
+				// wrote it at the impact pose above, or a bullet's second pass
+				// will write it shortly. Either way it must not be recomputed
+				// here from the un-swept transform.
+				//
+				// Flagged enlarged regardless of whether it grew, and through a
+				// bit set rather than directly, to keep the move array in
+				// deterministic order.
 				b3SetBit( enlargedSimBitSet, simIndex );
 			}
-
-			b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, B3_SPECULATIVE_DISTANCE );
-			shape->aabb = aabb;
-
-			if ( b3AABB_Contains( shape->fatAABB, aabb ) == false )
+			else
 			{
-				b3f margin = shape->aabbMargin;
-				b3Vec3 aabbMargin = b3MakeVec3( margin, margin, margin );
-				shape->fatAABB.lowerBound = b3Sub( aabb.lowerBound, aabbMargin );
-				shape->fatAABB.upperBound = b3Add( aabb.upperBound, aabbMargin );
-				shape->flags |= b3_enlargedAABB;
+				b3AABB aabb = b3ComputeFatShapeAABB( shape, transform, B3_SPECULATIVE_DISTANCE );
+				shape->aabb = aabb;
 
-				b3SetBit( enlargedSimBitSet, simIndex );
+				if ( b3AABB_Contains( shape->fatAABB, aabb ) == false )
+				{
+					b3f margin = shape->aabbMargin;
+					b3Vec3 aabbMargin = b3MakeVec3( margin, margin, margin );
+					shape->fatAABB.lowerBound = b3Sub( aabb.lowerBound, aabbMargin );
+					shape->fatAABB.upperBound = b3Add( aabb.upperBound, aabbMargin );
+					shape->flags |= b3_enlargedAABB;
+
+					b3SetBit( enlargedSimBitSet, simIndex );
+				}
 			}
 
 			shapeId = shape->nextShapeId;
@@ -876,6 +1282,36 @@ void B3_ITCM_IF( B3_ITCM_CORE, b3Solve )( b3World* world, b3StepContext* context
 	color->contactConstraintCount = 0;
 	context->manifoldConstraints = NULL;
 	context->contactConstraints = NULL;
+
+	// -----------------------------------------------------------------
+	// Bullets
+	// -----------------------------------------------------------------
+	//
+	// The fast bodies that also sweep against kinematic and dynamic geometry,
+	// held back until every ordinary fast body has been pulled to its impact.
+	//
+	// Upstream collects these into a stack-allocated array during finalize,
+	// because its workers fill it concurrently and the order must not depend on
+	// which thread got there first. There is nothing to collect here: b3_isFast
+	// is a transient that finalize sets after clearing, so re-testing the flag
+	// finds exactly the same bodies in exactly the same order, with no
+	// allocation and nothing added to b3SolverStackDemand.
+	//
+	// Must stay ahead of the AABB pass below and the sleeping pass after it --
+	// the first reads the proxies a bullet may still move, and the second
+	// invalidates these very indices by moving sims between solver sets.
+	{
+		b3BodySim* sims = context->sims;
+		const uint32_t bulletFlags = b3_isFast | b3_isBullet;
+
+		for ( int simIndex = 0; simIndex < awakeBodyCount; ++simIndex )
+		{
+			if ( ( sims[simIndex].flags & bulletFlags ) == bulletFlags )
+			{
+				b3SolveContinuous( world, simIndex, context );
+			}
+		}
+	}
 
 	// -----------------------------------------------------------------
 	// Apply the AABB growth to the broad phase
