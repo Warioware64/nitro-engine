@@ -49,6 +49,31 @@
 //
 // As in every other physics example there are no NEA_Phys3DJoint* wrappers yet,
 // so this calls Box3D's joint API directly through NEA_Phys3DBody::id.
+//
+// How to build the library for this scene
+// ---------------------------------------
+// b3SolveWheelJoint is 11,312 bytes -- larger than the ARM9's entire 8 KiB
+// instruction cache -- and this scene calls it 32 times a frame (4 wheels x 4
+// sub-steps x 2 passes). Every one of those calls re-streams it from main RAM
+// unless it is in ITCM. So build the library with:
+//
+//     make -f Makefile.blocksds install NEA_BOX3D_ITCM_WHEEL_SOLVE=1
+//
+// which fits alongside the default contact groups at 18,564 of 19,668 free.
+// Note it is WHEEL_SOLVE and not WHEEL: the whole group also drags in the
+// 2,792-byte warm start, which overruns the budget by 1,688 -- and the warm
+// start is the half that does not need ITCM, since it fits in the instruction
+// cache and stays resident between its 16 calls a frame.
+//
+// `make -f Makefile.blocksds itcm-report` prints the live costs, and
+// overshooting is a link error rather than a silent slowdown.
+//
+// Profiling
+// ---------
+// Built against a library configured with NEA_BOX3D_PROFILE=1, START cycles
+// two extra console pages showing where the step actually goes -- the phases,
+// then inside the solve. The example detects that at run time through
+// b3IsProfilingEnabled(), so the same source builds either way.
 
 #include <NEAMain.h>
 #include <NEAPhysics3D.h>
@@ -602,7 +627,7 @@ int main(int argc, char *argv[])
     printf("A/B: drive fwd/back\n");
     printf("Left/Right: steer\n");
     printf("X: susp limits  Y: spring\n");
-    printf("SELECT: reset\n\n");
+    printf("L/R: substeps  SELECT: reset\n\n");
 
     uint32_t stepTicks = 0;
     uint32_t peakTicks = 0;
@@ -643,6 +668,45 @@ int main(int argc, char *argv[])
     // them are still being measured -- just not displayed.
     (void)buildBytes;
 #endif
+
+    // The engine's own breakdown of the step, on its own console page.
+    //
+    // A page rather than more lines: the car readout already occupies rows 9
+    // to 22 of a 24-row console, and the numbers worth comparing are the ones
+    // visible at the same moment. START cycles.
+    //
+    //   0  the car (default, unchanged)
+    //   1  step phases -- broad, narrow, solve, sensors
+    //   2  inside the solve, and the counters
+    //
+    // Averaged over a second like the phase table below, and for the same
+    // reason: at 30 ns a tick the per-frame numbers jitter far more than the
+    // differences being looked for.
+    int profPage = 0;
+
+    uint32_t accBroad = 0, accNarrow = 0, accSolve = 0, accSensor = 0;
+    uint32_t accPrepare = 0, accSubStep = 0, accRestitution = 0;
+    uint32_t accFinalize = 0, accContinuous = 0, accSleep = 0;
+    uint32_t accTotal = 0, accProfFrames = 0;
+
+    uint32_t avgBroad = 0, avgNarrow = 0, avgSolve = 0, avgSensor = 0;
+    uint32_t avgPrepare = 0, avgSubStep = 0, avgRestitution = 0;
+    uint32_t avgFinalize = 0, avgContinuous = 0, avgSleep = 0;
+    uint32_t avgTotal = 0;
+
+    // Counters are read from the latest step rather than averaged -- they are
+    // small integers that either move or do not, and a mean of 3.7 contacts
+    // says less than "3".
+    b3Profile lastProfile = { 0 };
+
+    // Asked once. The library answers whether *it* was built with the probes;
+    // the B3_NEA_PROFILE macro visible here is nea_config.h's default and says
+    // nothing about the archive being linked. See b3IsProfilingEnabled.
+    const bool profiling = b3IsProfilingEnabled();
+
+    // The live sub-step count, driven by L and R. Starts at the library
+    // default so the first reading is the configuration being compared against.
+    int subSteps = B3_NEA_DEFAULT_SUBSTEPS;
 
     bool limited = true;
     bool stiff = true;
@@ -804,11 +868,56 @@ int main(int argc, char *argv[])
         if (down & KEY_SELECT)
             ResetScene(&scene);
 
+        if (profiling && (down & KEY_START))
+            profPage = (profPage + 1) % 3;
+
+        // **The sub-step count, live.** L and R step it between 1 and 4.
+        //
+        // Switchable at run time rather than compiled in, because the question
+        // it answers -- what does dropping from 4 sub-steps to 2 cost, and what
+        // does it buy -- is a comparison, and comparing two ROMs on two runs
+        // adds every difference between those runs to the measurement. One ROM,
+        // one device, one thermal state, one scene position: the only thing
+        // that changes is the number.
+        //
+        // b3World_Step takes the count as an argument and recomputes `h` and
+        // every soft-constraint coefficient from it each step, so nothing is
+        // cached across the change and no reset is needed. What does change is
+        // the *feel*: fewer, larger sub-steps means a lower stiffness ceiling,
+        // so the suspension gets softer and penetration under load gets deeper.
+        // Watch `travel` and the overload count, not just the microseconds.
+        if (down & KEY_L)
+        {
+            subSteps = subSteps > 1 ? subSteps - 1 : 1;
+            NEA_Phys3DSetSubStepCount(subSteps);
+        }
+        if (down & KEY_R)
+        {
+            subSteps = subSteps < 4 ? subSteps + 1 : 4;
+            NEA_Phys3DSetSubStepCount(subSteps);
+        }
+
         // Stepped by hand so it can be timed, hence NEA_CAN_SKIP_VBL below
         // rather than NEA_UPDATE_PHYS3D, which would step the world twice.
-        cpuStartTiming(0);
+        // A profiling library owns timers 0 and 1 for the duration of the step
+        // and arms them itself, so bracketing here would have its count reset
+        // by the first internal probe. totalTicks measures the same interval --
+        // b3World_Step's first line to its last -- so nothing is lost; the
+        // number comes back through the profile instead.
+        if (profiling == false)
+            cpuStartTiming(0);
+
         NEA_Phys3DWorldStep();
-        stepTicks = cpuEndTiming();
+
+        if (profiling)
+        {
+            lastProfile = b3World_GetProfile(NEA_Phys3DWorldGetId());
+            stepTicks = lastProfile.totalTicks;
+        }
+        else
+        {
+            stepTicks = cpuEndTiming();
+        }
         frames++;
 
 #ifdef BOX3D_PHASE_PROFILE
@@ -934,6 +1043,103 @@ int main(int argc, char *argv[])
         cpuStartTiming(0);
 #endif
 
+        // The engine's phases, averaged on the same one-second cadence and
+        // converted outside any timed region for the same reason.
+        accBroad += lastProfile.broadPhaseTicks;
+        accNarrow += lastProfile.narrowPhaseTicks;
+        accSolve += lastProfile.solveTicks;
+        accSensor += lastProfile.sensorTicks;
+        accPrepare += lastProfile.prepareTicks;
+        accSubStep += lastProfile.subStepTicks;
+        accRestitution += lastProfile.restitutionTicks;
+        accFinalize += lastProfile.finalizeTicks;
+        accContinuous += lastProfile.continuousTicks;
+        accSleep += lastProfile.sleepTicks;
+        accTotal += lastProfile.totalTicks;
+        accProfFrames++;
+
+        if (accProfFrames >= 60)
+        {
+            avgBroad = accBroad / accProfFrames;
+            avgNarrow = accNarrow / accProfFrames;
+            avgSolve = accSolve / accProfFrames;
+            avgSensor = accSensor / accProfFrames;
+            avgPrepare = accPrepare / accProfFrames;
+            avgSubStep = accSubStep / accProfFrames;
+            avgRestitution = accRestitution / accProfFrames;
+            avgFinalize = accFinalize / accProfFrames;
+            avgContinuous = accContinuous / accProfFrames;
+            avgSleep = accSleep / accProfFrames;
+            avgTotal = accTotal / accProfFrames;
+            accBroad = accNarrow = accSolve = accSensor = 0;
+            accPrepare = accSubStep = accRestitution = 0;
+            accFinalize = accContinuous = accSleep = accTotal = 0;
+            accProfFrames = 0;
+        }
+
+        // Ticks to microseconds. Same rule as the block above: ahead of the
+        // timer, never inside it.
+        unsigned long usBroad = (unsigned long)(avgBroad * 1000u / 33514u);
+        unsigned long usNarrow = (unsigned long)(avgNarrow * 1000u / 33514u);
+        unsigned long usSolve = (unsigned long)(avgSolve * 1000u / 33514u);
+        unsigned long usSensor = (unsigned long)(avgSensor * 1000u / 33514u);
+        unsigned long usPrepare = (unsigned long)(avgPrepare * 1000u / 33514u);
+        unsigned long usSubStep = (unsigned long)(avgSubStep * 1000u / 33514u);
+        unsigned long usRest = (unsigned long)(avgRestitution * 1000u / 33514u);
+        unsigned long usFinal = (unsigned long)(avgFinalize * 1000u / 33514u);
+        unsigned long usCont = (unsigned long)(avgContinuous * 1000u / 33514u);
+        unsigned long usSleep = (unsigned long)(avgSleep * 1000u / 33514u);
+        unsigned long usTotal = (unsigned long)(avgTotal * 1000u / 33514u);
+
+        if (profiling && profPage == 1)
+        {
+            // The step, tiled. `rest` is what totalTicks holds that no phase
+            // claimed -- the event buffer swap, the stack assert, the counter
+            // copy. It should stay small; a large one means a probe is missing
+            // rather than that time vanished.
+            unsigned long usPhases = usBroad + usNarrow + usSolve + usSensor;
+            printf("\x1b[9;0H-- step phases (us) ----   ");
+            printf("\x1b[10;0Hbroad  %6lu             ", usBroad);
+            printf("\x1b[11;0Hnarrow %6lu             ", usNarrow);
+            printf("\x1b[12;0Hsolve  %6lu             ", usSolve);
+            printf("\x1b[13;0Hsensor %6lu             ", usSensor);
+            printf("\x1b[14;0Hrest   %6lu             ",
+                   usTotal > usPhases ? usTotal - usPhases : 0);
+            printf("\x1b[15;0Htotal  %6lu of 16667    ", usTotal);
+            printf("\x1b[16;0H                          ");
+            printf("\x1b[17;0Hawake %2d  contacts %3d    ",
+                   lastProfile.awakeBodyCount, lastProfile.contactCount);
+            printf("\x1b[18;0Hmanif %3d  joints   %3d    ",
+                   lastProfile.manifoldCount, lastProfile.jointCount);
+            printf("\x1b[19;0Hsubsteps %d  START: page  ",
+                   lastProfile.subStepCount);
+        }
+        else if (profiling && profPage == 2)
+        {
+            // Inside the solve. subStep is the loop as a whole; with the
+            // library built NEA_BOX3D_PROFILE_SUBSTEP=1 the eight stage fields
+            // break it down further, but read those as ratios only -- see the
+            // switch's comment in nea_config.h.
+            printf("\x1b[9;0H-- inside solve (us) ---   ");
+            printf("\x1b[10;0Hprepare %6lu            ", usPrepare);
+            printf("\x1b[11;0Hsubstep %6lu            ", usSubStep);
+            printf("\x1b[12;0Hrestit  %6lu            ", usRest);
+            printf("\x1b[13;0Hfinal   %6lu            ", usFinal);
+            printf("\x1b[14;0Hcontin  %6lu            ", usCont);
+            printf("\x1b[15;0Hsleep   %6lu            ", usSleep);
+            printf("\x1b[16;0Hsolve   %6lu            ", usSolve);
+            printf("\x1b[17;0Hrecycl %3d  parked %3d    ",
+                   lastProfile.recycledContactCount, lastProfile.parkedBodyCount);
+            printf("\x1b[18;0Htoi %2d  tris %4lu  drop %d ",
+                   lastProfile.toiEventCount,
+                   (unsigned long)lastProfile.meshTriangleCount,
+                   lastProfile.meshManifoldDropCount);
+            printf("\x1b[19;0Hmesh %5lu  other %5lu us",
+                   (unsigned long)(lastProfile.meshManifoldTicks * 1000u / 33514u),
+                   (unsigned long)(lastProfile.narrowPhaseOtherTicks * 1000u / 33514u));
+        }
+        else
+        {
         printf("\x1b[9;0Hstep   %5lu us (%lu ticks)  ",
                (unsigned long)stepMicros, (unsigned long)stepTicks);
         printf("\x1b[10;0Hpeak   %5lu us @ %d awake  ",
@@ -942,8 +1148,8 @@ int main(int argc, char *argv[])
         printf("\x1b[12;0Htravel %5d mm  steer %5d  ", travelMilli, steerNow);
         printf("\x1b[13;0Htarget %5d br  spin %5d  ", steerTarget, spinMilli);
         printf("\x1b[14;0Hmast %4d br  at %5d,%5d ", tiltBrads, posXMilli, posZMilli);
-        printf("\x1b[15;0Hlimit  %-3s   spring %-5s  ",
-               limited ? "on" : "OFF", stiff ? "stiff" : "soft");
+        printf("\x1b[15;0Hlimit %-3s spring %-5s sub %d",
+               limited ? "on" : "OFF", stiff ? "stiff" : "soft", subSteps);
 #ifdef BOX3D_PHASE_PROFILE
         // The frame, attributed. All six in microseconds, averaged over the
         // last second. A 60 Hz frame is 16667 us, so these summed against that
@@ -965,7 +1171,12 @@ int main(int argc, char *argv[])
                NEA_Phys3DWorldGetLateAllocCount(),
                (long)NEA_Phys3DWorldGetOverflowBytes());
 #endif
-        printf("\x1b[20;0Hcpu    %3d %%               ", NEA_GetCPUPercent());
+        }
+
+        // Rows 20-22 are shared by every page: the whole-frame CPU reading is
+        // the number each page's detail has to be reconciled against.
+        printf("\x1b[20;0Hcpu %3d %%  fps %2d             ",
+               NEA_GetCPUPercent(), NEA_GetFPS());
         printf("\x1b[21;0Hmissing %d bd %d jt %d shp  ",
                bodiesMissing, jointsMissing, shapesMissing);
         printf("\x1b[22;0Hrespawn %3d  frame %8lu   ", respawns,

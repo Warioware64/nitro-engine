@@ -387,7 +387,7 @@ void b3PrepareRevoluteJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_REVOLUTE -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_REVOLUTE, b3WarmStartRevoluteJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_REVOLUTE_WARM, b3WarmStartRevoluteJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_revoluteJoint );
 
@@ -434,7 +434,7 @@ void B3_ITCM_IF( B3_ITCM_REVOLUTE, b3WarmStartRevoluteJoint )( b3JointSim* base,
 }
 
 /// @note ITCM group B3_ITCM_REVOLUTE -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_REVOLUTE, b3SolveRevoluteJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_REVOLUTE_SOLVE, b3SolveRevoluteJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_revoluteJoint );
 

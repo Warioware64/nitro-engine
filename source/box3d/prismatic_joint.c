@@ -479,7 +479,7 @@ void b3PreparePrismaticJoint( b3JointSim* base, b3StepContext* context )
 }
 
 /// @note ITCM group B3_ITCM_PRISMATIC -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_PRISMATIC, b3WarmStartPrismaticJoint )( b3JointSim* base, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_PRISMATIC_WARM, b3WarmStartPrismaticJoint )( b3JointSim* base, b3StepContext* context )
 {
 	B3_ASSERT( base->type == b3_prismaticJoint );
 
@@ -547,7 +547,7 @@ void B3_ITCM_IF( B3_ITCM_PRISMATIC, b3WarmStartPrismaticJoint )( b3JointSim* bas
 }
 
 /// @note ITCM group B3_ITCM_PRISMATIC -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_PRISMATIC, b3SolvePrismaticJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_PRISMATIC_SOLVE, b3SolvePrismaticJoint )( b3JointSim* base, b3StepContext* context, bool useBias )
 {
 	B3_ASSERT( base->type == b3_prismaticJoint );
 

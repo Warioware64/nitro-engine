@@ -952,6 +952,22 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 
 	world->locked = true;
 
+	// The step's own clock. Armed here rather than by the caller because the
+	// phases below have to tile the step exactly for their sum to mean
+	// anything -- see @section nesting in b3profile.h. Compiles away entirely
+	// when B3_NEA_PROFILE is 0.
+	//
+	// This takes over timers 0 and 1 for the duration. A caller that was
+	// bracketing b3World_Step with cpuStartTiming/cpuEndTiming must drop that
+	// bracket in a profiling build and read b3Profile::totalTicks instead.
+	B3_PROFILE_START( &world->profileTimer );
+
+	// Zeroed rather than cleared field by field: every timing field is
+	// overwritten below, but the level-2 and level-3 fields *accumulate*
+	// within a step, so they must start at zero. Doing it in one memset keeps
+	// the two kinds from drifting apart when a field is added to one of them.
+	world->profile = ( b3Profile ){ 0 };
+
 	// Cleared up front so a caller who reads events after an early return sees
 	// an empty set rather than the previous step's.
 	b3Array_Clear( world->bodyMoveEvents );
@@ -980,6 +996,7 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 
 	// Find new overlapping pairs and create their contacts.
 	b3UpdateBroadPhasePairs( world );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.broadPhaseTicks );
 
 	b3StepContext context = { 0 };
 	context.world = world;
@@ -1020,10 +1037,21 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	context.maxLinearVelocity = world->maxLinearSpeed;
 	context.enableWarmStarting = world->enableWarmStarting;
 
+	// The context setup above is charged to the broad phase rather than given
+	// a phase of its own: it is a few dozen fixed-point operations and two
+	// b3MakeSoft calls, and a probe either side of it would cost a measurable
+	// fraction of what it is measuring.
+
 	// Narrow phase.
 	b3Collide( world );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.narrowPhaseTicks );
 
 	// Integrate, solve, integrate, finalize.
+	//
+	// b3Solve marks its own eight sub-phases against world->profileTimer, so
+	// it must not be bracketed here -- that would double-charge. solveTicks is
+	// summed from those eight instead, which is also the check that none is
+	// missing.
 	b3Solve( world, &context );
 
 	// Rebuild every sensor's overlap set and publish its transitions.
@@ -1033,6 +1061,7 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	// crossed a sensor without ending inside it. Before the buffer swap below,
 	// so those events are the ones this step publishes.
 	b3OverlapSensors( world );
+	B3_PROFILE_MARK( &world->profileTimer, &world->profile.sensorTicks );
 
 	// Every stack allocation made this step must have been freed.
 	B3_ASSERT( b3GetStackAllocation( &world->stack ) == 0 );
@@ -1047,7 +1076,63 @@ void b3World_Step( b3WorldId worldId, int subStepCount )
 	b3Array_Clear( world->contactEndEvents[world->endEventArrayIndex] );
 	b3Array_Clear( world->sensorEndEvents[world->endEventArrayIndex] );
 
+	// The counters. Copied out rather than timed -- every one of these was
+	// already being maintained by b3Collide or b3Solve and simply had no way
+	// out of the library, so they are published whether or not the timing
+	// probes are compiled in. They are what distinguishes a phase that is
+	// expensive because it is slow from one that is expensive because it ran a
+	// hundred times.
+	{
+		b3Profile* profile = &world->profile;
+
+		profile->subStepCount = context.subStepCount;
+
+		// awakeBodyCount, contactCount, manifoldCount and jointCount are set
+		// by b3Solve and deliberately not restated here. Reading the awake set
+		// at this point would give the count *after* the sleeping pass, which
+		// is not the number of bodies the step integrated -- and the whole use
+		// of the field is as the multiplier on the per-body passes.
+		profile->recycledContactCount = world->recycledContactCount;
+		profile->parkedBodyCount = world->parkedBodyCount;
+		profile->toiEventCount = world->toiEventCount;
+		profile->toiDistanceIterations = world->toiDistanceIterations;
+		profile->toiPushBackIterations = world->toiPushBackIterations;
+		profile->toiRootIterations = world->toiRootIterations;
+		profile->meshManifoldDropCount = world->meshManifoldDropCount;
+	}
+
+	// Last, and it releases timers 0 and 1 back to the caller. Everything
+	// between the final phase mark and here -- the stack assert, the event
+	// buffer swap, the counter copy above -- is unattributed, which is why the
+	// phases can sum to slightly less than the total rather than exactly.
+	B3_PROFILE_END( &world->profileTimer, &world->profile.totalTicks );
+
 	world->locked = false;
+}
+
+b3Profile b3World_GetProfile( b3WorldId worldId )
+{
+	b3World* world = b3GetWorldFromId( worldId );
+	B3_ASSERT( world->locked == false );
+	if ( world->locked )
+	{
+		return ( b3Profile ){ 0 };
+	}
+
+	// Always linkable, all zeros in a build without B3_NEA_PROFILE except for
+	// the counters, which are maintained regardless. See b3profile.h.
+	return world->profile;
+}
+
+bool b3IsProfilingEnabled( void )
+{
+	// Compiled *here*, inside the library, which is the whole point -- see the
+	// declaration in b3profile.h for why a caller cannot ask the macro.
+#if defined( B3_NEA_PROFILE ) && B3_NEA_PROFILE && defined( __NDS__ )
+	return true;
+#else
+	return false;
+#endif
 }
 
 b3BodyEvents b3World_GetBodyEvents( b3WorldId worldId )

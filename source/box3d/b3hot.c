@@ -67,14 +67,88 @@
 #include "box3d/math_fixed.h"
 
 // =========================================================================
+// Accumulate wide, round once
+// =========================================================================
+//
+// Every function below computes a sum or difference of products that all share
+// one shift. Written the obvious way -- `b3AddF( b3MulFF( .. ), b3MulFF( .. ) )`
+// -- each product is separately rounded and narrowed to 32 bits before the add,
+// so a three-term expression rounds three times and a cross product twice.
+//
+// Accumulating the whole expression in one int64 and rounding once at the end
+// is better on both counts, which is unusual enough to be worth stating
+// plainly:
+//
+//   **Fewer instructions.** ARMv5TE has SMLAL -- a 64-bit multiply-accumulate
+//   in one instruction. So `a*b + c*d + e*f` is SMULL followed by two SMLALs,
+//   and the rounding add and the 64-to-32 narrowing shift happen once instead
+//   of three times. Written term by term it is three SMULLs, three rounding
+//   adds, three narrowing shift pairs and two 32-bit adds.
+//
+//   **More accurate.** The intermediate roundings are gone. B3_MUL_ROUND's
+//   comment in b3fixed.h explains why round-to-nearest matters at all; not
+//   rounding until the end is strictly better than rounding well three times.
+//
+// b3DotWide and b3CrossWide in math_fixed.h already do this -- b3DotWide's own
+// comment says "three SMLALs and one shift" -- and these four functions are
+// simply the rest of the shared leaf math brought into line with them.
+//
+// The rule for reading the code: the shift passed to B3_SHIFT_ROUND is the one
+// the corresponding b3Mul* would have used, and it is the same for every term
+// by construction. Where the terms do *not* share a shift, the term-by-term
+// form is still correct and must stay.
+//
+// @section results This changes results in the last bit
+//
+// It has to -- removing an intermediate rounding is a change in the number
+// produced, always toward the exactly-rounded answer. The host suite in
+// tests/box3d_host is what says whether that is safe.
+//
+// @section notdone Two functions this was NOT applied to, and why
+//
+// b3MulMV and b3RotateVector are the obvious next candidates -- both are pure
+// sums of same-shift products, both are called from everywhere, and the
+// rewrite saves 120 and 76 bytes respectively on top of what is here. Neither
+// is applied, because each one **on its own** turns test_world's "a box slides
+// down a mesh ramp" case into a hard abort: an impulse overflows int32 in
+// b3MulFFToImp, with the double shadow already NaN.
+//
+// The scene is at least partly to blame. Replacing the rewrite with a
+// deliberate one-quantum nudge to a single component of the *old* b3MulMV --
+// no restructuring, just `+1` at Q12 -- also breaks that case, at 4 failures
+// and 2 unexpected assertions. So the ramp is sitting on a stability cliff
+// where a sub-quantum change in any direction tips it.
+//
+// That is not a licence to call these two safe. The nudge degrades the test;
+// the rewrite *aborts* it, which is a strictly worse failure and is not
+// explained by fragility alone. Something in the mesh-ramp friction path
+// depends on the current rounding in a way nothing here has yet identified,
+// and until it is identified these two stay as they are.
+//
+// Both directions are worth having: the ramp scene's sensitivity is a defect
+// in its own right, and finding it would unblock 196 bytes and a measurable
+// share of the per-frame instruction fetch.
+//
+// The four applied below each pass the whole suite individually and together.
+
+// =========================================================================
 // Vectors
 // =========================================================================
 
 b3Vec3 B3_ITCM( b3Cross )( b3Vec3 a, b3Vec3 b )
 {
-	return b3MakeVec3( b3SubF( b3MulFF( a.y, b.z ), b3MulFF( a.z, b.y ) ),
-					   b3SubF( b3MulFF( a.z, b.x ), b3MulFF( a.x, b.z ) ),
-					   b3SubF( b3MulFF( a.x, b.y ), b3MulFF( a.y, b.x ) ) );
+	// b3CrossWide is the same three components at Q24, which is exactly this
+	// accumulator -- so the narrowing is all that is left to do here.
+	int64_t w[3];
+	b3CrossWide( w, a, b );
+
+	return b3MakeVec3(
+		b3Makeb3fRef( B3_SHIFT_ROUND( w[0], B3_F_SHIFT ),
+					  B3_REF( b3RefF( a.y ) * b3RefF( b.z ) - b3RefF( a.z ) * b3RefF( b.y ) ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( w[1], B3_F_SHIFT ),
+					  B3_REF( b3RefF( a.z ) * b3RefF( b.x ) - b3RefF( a.x ) * b3RefF( b.z ) ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( w[2], B3_F_SHIFT ),
+					  B3_REF( b3RefF( a.x ) * b3RefF( b.y ) - b3RefF( a.y ) * b3RefF( b.x ) ) ) );
 }
 
 b3Vec3 B3_ITCM( b3Normalize )( b3Vec3 v )
@@ -157,31 +231,67 @@ b3Vec3 B3_ITCM( b3MulMV )( b3Matrix3 m, b3Vec3 v )
 					   b3AddF( b3AddF( b3MulFF( m.cx.z, v.x ), b3MulFF( m.cy.z, v.y ) ), b3MulFF( m.cz.z, v.z ) ) );
 }
 
+// The same row, with the matrix at Q24 and the vector at Q12 -- b3MulFW, so the
+// shift is B3_W_SHIFT. Operand order is (vector, matrix) to match b3MulFW's.
+#define B3_ROW_FW( c0, c1, c2, v )                                                                                               \
+	( (int64_t)b3Raw( ( v ).x ) * b3Raw( c0 ) + (int64_t)b3Raw( ( v ).y ) * b3Raw( c1 ) +                                        \
+	  (int64_t)b3Raw( ( v ).z ) * b3Raw( c2 ) )
+
+#define B3_ROW_FW_REF( c0, c1, c2, v )                                                                                           \
+	B3_REF( b3RefF( ( v ).x ) * b3RefW( c0 ) + b3RefF( ( v ).y ) * b3RefW( c1 ) + b3RefF( ( v ).z ) * b3RefW( c2 ) )
+
 b3Vec3 B3_ITCM( b3MulMWV )( b3MatrixW m, b3Vec3 v )
 {
 	return b3MakeVec3(
-		b3AddF( b3AddF( b3MulFW( v.x, m.cx.x ), b3MulFW( v.y, m.cy.x ) ), b3MulFW( v.z, m.cz.x ) ),
-		b3AddF( b3AddF( b3MulFW( v.x, m.cx.y ), b3MulFW( v.y, m.cy.y ) ), b3MulFW( v.z, m.cz.y ) ),
-		b3AddF( b3AddF( b3MulFW( v.x, m.cx.z ), b3MulFW( v.y, m.cy.z ) ), b3MulFW( v.z, m.cz.z ) ) );
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_FW( m.cx.x, m.cy.x, m.cz.x, v ), B3_W_SHIFT ),
+					  B3_ROW_FW_REF( m.cx.x, m.cy.x, m.cz.x, v ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_FW( m.cx.y, m.cy.y, m.cz.y, v ), B3_W_SHIFT ),
+					  B3_ROW_FW_REF( m.cx.y, m.cy.y, m.cz.y, v ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_FW( m.cx.z, m.cy.z, m.cz.z, v ), B3_W_SHIFT ),
+					  B3_ROW_FW_REF( m.cx.z, m.cy.z, m.cz.z, v ) ) );
 }
 
 // =========================================================================
 // Impulses
 // =========================================================================
 
+// An impulse through an inverse-inertia row: b3MulImpW, Q16 * Q24 -> Q12, so
+// the shift is 16 + 24 - 12 = 28.
+#define B3_IMP_W_SHIFT ( B3_IMP_SHIFT + B3_W_SHIFT - B3_F_SHIFT )
+
+#define B3_ROW_IMPW( c0, c1, c2, p )                                                                                             \
+	( (int64_t)b3Raw( ( p ).x ) * b3Raw( c0 ) + (int64_t)b3Raw( ( p ).y ) * b3Raw( c1 ) +                                        \
+	  (int64_t)b3Raw( ( p ).z ) * b3Raw( c2 ) )
+
+#define B3_ROW_IMPW_REF( c0, c1, c2, p )                                                                                         \
+	B3_REF( b3RefImp( ( p ).x ) * b3RefW( c0 ) + b3RefImp( ( p ).y ) * b3RefW( c1 ) + b3RefImp( ( p ).z ) * b3RefW( c2 ) )
+
 b3Vec3 B3_ITCM( b3MulMWImp )( b3MatrixW m, b3Imp3 p )
 {
 	return b3MakeVec3(
-		b3AddF( b3AddF( b3MulImpW( p.x, m.cx.x ), b3MulImpW( p.y, m.cy.x ) ), b3MulImpW( p.z, m.cz.x ) ),
-		b3AddF( b3AddF( b3MulImpW( p.x, m.cx.y ), b3MulImpW( p.y, m.cy.y ) ), b3MulImpW( p.z, m.cz.y ) ),
-		b3AddF( b3AddF( b3MulImpW( p.x, m.cx.z ), b3MulImpW( p.y, m.cy.z ) ), b3MulImpW( p.z, m.cz.z ) ) );
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_IMPW( m.cx.x, m.cy.x, m.cz.x, p ), B3_IMP_W_SHIFT ),
+					  B3_ROW_IMPW_REF( m.cx.x, m.cy.x, m.cz.x, p ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_IMPW( m.cx.y, m.cy.y, m.cz.y, p ), B3_IMP_W_SHIFT ),
+					  B3_ROW_IMPW_REF( m.cx.y, m.cy.y, m.cz.y, p ) ),
+		b3Makeb3fRef( B3_SHIFT_ROUND( B3_ROW_IMPW( m.cx.z, m.cy.z, m.cz.z, p ), B3_IMP_W_SHIFT ),
+					  B3_ROW_IMPW_REF( m.cx.z, m.cy.z, m.cz.z, p ) ) );
 }
 
 b3Imp3 B3_ITCM( b3CrossVImp )( b3Vec3 r, b3Imp3 p )
 {
-	return b3MakeImp3( b3SubImp( b3MulImpF( p.z, r.y ), b3MulImpF( p.y, r.z ) ),
-					   b3SubImp( b3MulImpF( p.x, r.z ), b3MulImpF( p.z, r.x ) ),
-					   b3SubImp( b3MulImpF( p.y, r.x ), b3MulImpF( p.x, r.y ) ) );
+	// b3MulImpF is Q16 * Q12 -> Q16, so the shift is B3_F_SHIFT and the two
+	// terms of each component share it.
+#define B3_CROSS_IMP( pa, ra, pb, rb ) ( (int64_t)b3Raw( pa ) * b3Raw( ra ) - (int64_t)b3Raw( pb ) * b3Raw( rb ) )
+
+	return b3MakeImp3(
+		b3Makeb3impRef( B3_SHIFT_ROUND( B3_CROSS_IMP( p.z, r.y, p.y, r.z ), B3_F_SHIFT ),
+						B3_REF( b3RefImp( p.z ) * b3RefF( r.y ) - b3RefImp( p.y ) * b3RefF( r.z ) ) ),
+		b3Makeb3impRef( B3_SHIFT_ROUND( B3_CROSS_IMP( p.x, r.z, p.z, r.x ), B3_F_SHIFT ),
+						B3_REF( b3RefImp( p.x ) * b3RefF( r.z ) - b3RefImp( p.z ) * b3RefF( r.x ) ) ),
+		b3Makeb3impRef( B3_SHIFT_ROUND( B3_CROSS_IMP( p.y, r.x, p.x, r.y ), B3_F_SHIFT ),
+						B3_REF( b3RefImp( p.y ) * b3RefF( r.x ) - b3RefImp( p.x ) * b3RefF( r.y ) ) ) );
+
+#undef B3_CROSS_IMP
 }
 
 // =========================================================================

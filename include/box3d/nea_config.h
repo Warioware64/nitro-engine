@@ -246,6 +246,89 @@
 #define B3_NEA_LENGTH_UNITS_PER_METER 1
 
 // =========================================================================
+// Profiling
+// =========================================================================
+//
+// Set from the command line as `make -f Makefile.blocksds NEA_BOX3D_PROFILE=1`,
+// which is why each is #ifndef-guarded like the ITCM switches below.
+//
+// Three levels, because they do not cost the same. Level 1 is cheap enough to
+// leave on; the other two change the thing they are measuring and are for
+// answering one question and then turning off again.
+
+/// Level 1: the step broken into phases. Off by default.
+///
+/// Ten probes per step -- broad phase, narrow phase, solve, sensors, and the
+/// eight stages inside b3Solve -- each two 16-bit I/O reads plus a subtract and
+/// a store. Order tens of cycles against a DSi frame of roughly 2.2 million, so
+/// this is measurable only as noise.
+///
+/// This is the switch that also publishes the counters b3World already keeps
+/// (recycled contacts, parked bodies, the TOI iteration counts, the mesh
+/// manifold drops). Those are free either way; they simply had no way out of
+/// the library before.
+///
+/// See include/box3d/b3profile.h for what the numbers mean and why the port
+/// counts timer ticks where upstream counted milliseconds.
+///
+/// @section timer What it takes over
+///
+/// Timers 0 and 1, for the duration of the step -- the same cascaded pair
+/// libnds's cpuStartTiming()/cpuEndTiming() drives. They cannot be shared: a
+/// caller that brackets b3World_Step with its own cpuStartTiming will have its
+/// count reset by the first probe. Drop the bracket and read
+/// b3Profile::totalTicks, which is measuring the same interval.
+#ifndef B3_NEA_PROFILE
+#define B3_NEA_PROFILE 0
+#endif
+
+/// Level 2: the sub-step loop broken into its eight stages. Requires level 1.
+///
+/// 32 probes per step at the default four sub-steps -- but only eight *sites*,
+/// because they are inside the loop rather than unrolled with it. Measured on
+/// b3Solve, which is the function that carries them:
+///
+///     7,264 B   no profiling
+///     7,488 B   level 1   (+224)
+///     7,600 B   level 2   (+336, so +112 over level 1)
+///
+/// That is 4.6% growth on one function, which is smaller than it first looks
+/// worth worrying about: the sub-step loop is one copy of the code, not four.
+///
+/// It is still not free. b3Solve is re-entered after every joint and contact
+/// pass, each large enough to have evicted it from an 8 KiB instruction cache,
+/// so bytes added here are bytes re-fetched many times per frame. Two rules
+/// follow:
+///
+///   - Read stages against each other rather than against the frame budget.
+///     The proportions are sound; the absolute microseconds are inflated.
+///   - Never choose an ITCM group from a level-2 build. An ITCM group exists
+///     to change instruction fetch, and this build has already perturbed
+///     exactly that. Measure ITCM changes with level 1, or with profiling off
+///     and NEA_GetCPUPercent().
+#ifndef B3_NEA_PROFILE_SUBSTEP
+#define B3_NEA_PROFILE_SUBSTEP 0
+#endif
+
+/// Level 3: the narrow phase split into mesh and convex, plus a triangle count.
+/// Requires level 1.
+///
+/// Two probes per contact rather than per step, so the overhead scales with the
+/// contact count instead of being constant -- but it is bracketing
+/// b3ComputeMeshManifolds, which is 8,496 bytes of work, so the ratio stays
+/// tiny.
+///
+/// The triangle count is the reason to turn this on rather than infer from
+/// level 1. Mesh narrow-phase cost is roughly linear in triangles tested, and
+/// B3_NEA_MAX_MESH_CONTACT_TRIANGLES caps that at 32 per contact -- so a scene
+/// sitting at the cap is both spending the most it can and dropping geometry,
+/// and only this counter distinguishes that from a scene that happens to touch
+/// 32 triangles honestly.
+#ifndef B3_NEA_PROFILE_NARROW
+#define B3_NEA_PROFILE_NARROW 0
+#endif
+
+// =========================================================================
 // ITCM groups
 // =========================================================================
 //
@@ -286,58 +369,226 @@
 // B3_NO_ITCM (NEA_BOX3D_NO_ITCM=1) is the master switch and overrides all of
 // these, for a game that wants its ITCM to itself.
 
-/// Contact solve + warm start. 7,252 bytes.
+// -------------------------------------------------------------------------
+// Why solve and warm start are separate groups
+// -------------------------------------------------------------------------
+//
+// They were one group per joint type until the budget arithmetic was actually
+// done. For a four-wheeled vehicle:
+//
+//     19,668  free after baseline + shared math
+//      7,252  CONTACTS  (b3SolveContacts 4,924 + b3WarmStartContacts 2,328)
+//     14,104  WHEEL     (b3SolveWheelJoint 11,312 + b3WarmStartWheelJoint 2,792)
+//     ------
+//     21,356  over by 1,688
+//
+// So box3d_car shipped with WHEEL **off** -- excluding the one function the
+// comment below calls 77% of the engine's per-frame instruction fetch, to keep
+// a warm start that did not need to be there.
+//
+// The two halves have completely different fetch volumes:
+//
+//     b3SolveWheelJoint       11,312 B, called 2x per joint per sub-step
+//                             (32 calls/frame at 4 wheels, 4 sub-steps)
+//     b3WarmStartWheelJoint    2,792 B, called 1x per joint per sub-step
+//                             (16 calls/frame)
+//
+// The solve is four times the size and runs twice as often, and at 11,312 bytes
+// it does not fit in the ARM9's 8 KiB instruction cache even alone -- so every
+// one of those 32 calls re-streams it from main RAM. The warm start fits with
+// room to spare and stays resident between calls, so main RAM costs it a miss
+// on first use and nothing after.
+//
+// Splitting the group spends ITCM where the fetch is:
+//
+//      7,252  CONTACTS
+//     11,312  WHEEL_SOLVE
+//     ------
+//     18,564  fits, 1,104 to spare
+//
+// The old names still work and set both halves -- see the aliases at the end of
+// this section -- so an existing `NEA_BOX3D_ITCM_WHEEL=1` build line keeps its
+// meaning.
+
+/// Contact solve. 4,924 bytes.
 ///
-/// The one group on by default: every scene has contacts, so these bytes are
-/// never wasted. Turn it off to afford a large joint group -- box3d_car has to,
-/// because CONTACTS plus WHEEL is 21,356 against 19,668 free.
-#ifndef B3_ITCM_CONTACTS
-#define B3_ITCM_CONTACTS 1
+/// On by default with its warm-start half: every scene has contacts, so these
+/// bytes are never wasted.
+#ifndef B3_ITCM_CONTACTS_SOLVE
+#define B3_ITCM_CONTACTS_SOLVE 1
 #endif
 
-/// Wheel joint solve + warm start. 14,104 bytes.
+/// Contact warm start. 2,328 bytes.
+#ifndef B3_ITCM_CONTACTS_WARM
+#define B3_ITCM_CONTACTS_WARM 1
+#endif
+
+/// Wheel joint solve. 11,312 bytes.
 ///
-/// The most valuable group by a wide margin, and the reason the mechanism
-/// exists. b3SolveWheelJoint is 11,312 bytes -- the only function in the engine
-/// that exceeds the instruction cache on its own -- and accounts for 77% of the
-/// engine's per-frame instruction fetch in a four-wheeled vehicle scene.
-#ifndef B3_ITCM_WHEEL
-#define B3_ITCM_WHEEL 0
+/// The most valuable single placement in the engine, and the reason the
+/// mechanism exists. The only function in the port that exceeds the instruction
+/// cache on its own, and it accounts for 77% of the engine's per-frame
+/// instruction fetch in a four-wheeled vehicle scene.
+///
+/// This is the one to turn on for a vehicle game: `NEA_BOX3D_ITCM_WHEEL_SOLVE=1`
+/// fits alongside the default CONTACTS pair, where the old whole-group
+/// `NEA_BOX3D_ITCM_WHEEL=1` did not.
+#ifndef B3_ITCM_WHEEL_SOLVE
+#define B3_ITCM_WHEEL_SOLVE 0
 #endif
 
-/// Prismatic joint solve + warm start. 10,180 bytes.
-#ifndef B3_ITCM_PRISMATIC
-#define B3_ITCM_PRISMATIC 0
+/// Wheel joint warm start. 2,792 bytes.
+#ifndef B3_ITCM_WHEEL_WARM
+#define B3_ITCM_WHEEL_WARM 0
 #endif
 
-/// Spherical joint solve + warm start. 7,456 bytes.
-#ifndef B3_ITCM_SPHERICAL
-#define B3_ITCM_SPHERICAL 0
+/// Prismatic joint solve. 8,316 bytes.
+#ifndef B3_ITCM_PRISMATIC_SOLVE
+#define B3_ITCM_PRISMATIC_SOLVE 0
 #endif
 
-/// Revolute joint solve + warm start. 7,376 bytes.
-#ifndef B3_ITCM_REVOLUTE
-#define B3_ITCM_REVOLUTE 0
+/// Prismatic joint warm start. 1,864 bytes.
+#ifndef B3_ITCM_PRISMATIC_WARM
+#define B3_ITCM_PRISMATIC_WARM 0
 #endif
 
-/// Distance joint solve + warm start. 6,516 bytes.
-#ifndef B3_ITCM_DISTANCE
-#define B3_ITCM_DISTANCE 0
+/// Spherical joint solve. 6,244 bytes.
+#ifndef B3_ITCM_SPHERICAL_SOLVE
+#define B3_ITCM_SPHERICAL_SOLVE 0
 #endif
 
-/// Motor joint solve + warm start. 5,976 bytes.
-#ifndef B3_ITCM_MOTOR
-#define B3_ITCM_MOTOR 0
+/// Spherical joint warm start. 1,212 bytes.
+#ifndef B3_ITCM_SPHERICAL_WARM
+#define B3_ITCM_SPHERICAL_WARM 0
 #endif
 
-/// Weld joint solve + warm start. 4,600 bytes.
-#ifndef B3_ITCM_WELD
-#define B3_ITCM_WELD 0
+/// Revolute joint solve. 6,108 bytes.
+#ifndef B3_ITCM_REVOLUTE_SOLVE
+#define B3_ITCM_REVOLUTE_SOLVE 0
 #endif
 
-/// Parallel joint solve + warm start. 2,640 bytes.
-#ifndef B3_ITCM_PARALLEL
-#define B3_ITCM_PARALLEL 0
+/// Revolute joint warm start. 1,268 bytes.
+#ifndef B3_ITCM_REVOLUTE_WARM
+#define B3_ITCM_REVOLUTE_WARM 0
+#endif
+
+/// Distance joint solve. 5,672 bytes.
+#ifndef B3_ITCM_DISTANCE_SOLVE
+#define B3_ITCM_DISTANCE_SOLVE 0
+#endif
+
+/// Distance joint warm start. 844 bytes.
+#ifndef B3_ITCM_DISTANCE_WARM
+#define B3_ITCM_DISTANCE_WARM 0
+#endif
+
+/// Motor joint solve. 4,900 bytes.
+#ifndef B3_ITCM_MOTOR_SOLVE
+#define B3_ITCM_MOTOR_SOLVE 0
+#endif
+
+/// Motor joint warm start. 1,076 bytes.
+#ifndef B3_ITCM_MOTOR_WARM
+#define B3_ITCM_MOTOR_WARM 0
+#endif
+
+/// Weld joint solve. 3,588 bytes.
+#ifndef B3_ITCM_WELD_SOLVE
+#define B3_ITCM_WELD_SOLVE 0
+#endif
+
+/// Weld joint warm start. 1,012 bytes.
+#ifndef B3_ITCM_WELD_WARM
+#define B3_ITCM_WELD_WARM 0
+#endif
+
+/// Parallel joint solve. 2,052 bytes.
+#ifndef B3_ITCM_PARALLEL_SOLVE
+#define B3_ITCM_PARALLEL_SOLVE 0
+#endif
+
+/// Parallel joint warm start. 588 bytes.
+#ifndef B3_ITCM_PARALLEL_WARM
+#define B3_ITCM_PARALLEL_WARM 0
+#endif
+
+// -------------------------------------------------------------------------
+// Whole-group aliases, kept for compatibility
+// -------------------------------------------------------------------------
+//
+// `-DB3_ITCM_WHEEL=1` still means "both halves of the wheel joint". Defined
+// after the halves so that setting a half directly is not overridden, and
+// tested with #if defined so that only a group the caller actually named
+// participates.
+//
+// Makefile.blocksds expands NEA_BOX3D_ITCM_<GROUP> into one of these, so a
+// build line written against the old group list keeps working unchanged.
+
+#if defined( B3_ITCM_WHEEL ) && B3_ITCM_WHEEL
+#undef B3_ITCM_WHEEL_SOLVE
+#undef B3_ITCM_WHEEL_WARM
+#define B3_ITCM_WHEEL_SOLVE 1
+#define B3_ITCM_WHEEL_WARM 1
+#endif
+
+#if defined( B3_ITCM_PRISMATIC ) && B3_ITCM_PRISMATIC
+#undef B3_ITCM_PRISMATIC_SOLVE
+#undef B3_ITCM_PRISMATIC_WARM
+#define B3_ITCM_PRISMATIC_SOLVE 1
+#define B3_ITCM_PRISMATIC_WARM 1
+#endif
+
+#if defined( B3_ITCM_SPHERICAL ) && B3_ITCM_SPHERICAL
+#undef B3_ITCM_SPHERICAL_SOLVE
+#undef B3_ITCM_SPHERICAL_WARM
+#define B3_ITCM_SPHERICAL_SOLVE 1
+#define B3_ITCM_SPHERICAL_WARM 1
+#endif
+
+#if defined( B3_ITCM_REVOLUTE ) && B3_ITCM_REVOLUTE
+#undef B3_ITCM_REVOLUTE_SOLVE
+#undef B3_ITCM_REVOLUTE_WARM
+#define B3_ITCM_REVOLUTE_SOLVE 1
+#define B3_ITCM_REVOLUTE_WARM 1
+#endif
+
+#if defined( B3_ITCM_DISTANCE ) && B3_ITCM_DISTANCE
+#undef B3_ITCM_DISTANCE_SOLVE
+#undef B3_ITCM_DISTANCE_WARM
+#define B3_ITCM_DISTANCE_SOLVE 1
+#define B3_ITCM_DISTANCE_WARM 1
+#endif
+
+#if defined( B3_ITCM_MOTOR ) && B3_ITCM_MOTOR
+#undef B3_ITCM_MOTOR_SOLVE
+#undef B3_ITCM_MOTOR_WARM
+#define B3_ITCM_MOTOR_SOLVE 1
+#define B3_ITCM_MOTOR_WARM 1
+#endif
+
+#if defined( B3_ITCM_WELD ) && B3_ITCM_WELD
+#undef B3_ITCM_WELD_SOLVE
+#undef B3_ITCM_WELD_WARM
+#define B3_ITCM_WELD_SOLVE 1
+#define B3_ITCM_WELD_WARM 1
+#endif
+
+#if defined( B3_ITCM_PARALLEL ) && B3_ITCM_PARALLEL
+#undef B3_ITCM_PARALLEL_SOLVE
+#undef B3_ITCM_PARALLEL_WARM
+#define B3_ITCM_PARALLEL_SOLVE 1
+#define B3_ITCM_PARALLEL_WARM 1
+#endif
+
+// CONTACTS is the one whose alias must also be able to turn things **off**,
+// because both halves default to on -- that is how a scene affords a large
+// joint group. `-DB3_ITCM_CONTACTS=0` therefore clears both rather than being
+// ignored the way a 0 is for the default-off groups above.
+#if defined( B3_ITCM_CONTACTS )
+#undef B3_ITCM_CONTACTS_SOLVE
+#undef B3_ITCM_CONTACTS_WARM
+#define B3_ITCM_CONTACTS_SOLVE B3_ITCM_CONTACTS
+#define B3_ITCM_CONTACTS_WARM B3_ITCM_CONTACTS
 #endif
 
 /// b3ComputeMeshManifolds, the triangle-mesh narrow phase. 8,496 bytes.

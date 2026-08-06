@@ -315,7 +315,7 @@ void b3PrepareContacts( int startIndex, int endIndex, b3StepContext* context )
 // =========================================================================
 
 /// @note ITCM group B3_ITCM_CONTACTS -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_CONTACTS, b3WarmStartContacts )( int startIndex, int endIndex, b3StepContext* context )
+void B3_ITCM_IF( B3_ITCM_CONTACTS_WARM, b3WarmStartContacts )( int startIndex, int endIndex, b3StepContext* context )
 {
 	b3World* world = context->world;
 	b3GraphColor* color = world->constraintGraph.colors + B3_OVERFLOW_INDEX;
@@ -418,7 +418,7 @@ void B3_ITCM_IF( B3_ITCM_CONTACTS, b3WarmStartContacts )( int startIndex, int en
 // friction always trails the normal force by an iteration.
 
 /// @note ITCM group B3_ITCM_CONTACTS -- see nea_config.h.
-void B3_ITCM_IF( B3_ITCM_CONTACTS, b3SolveContacts )( int startIndex, int endIndex, b3StepContext* context, bool useBias )
+void B3_ITCM_IF( B3_ITCM_CONTACTS_SOLVE, b3SolveContacts )( int startIndex, int endIndex, b3StepContext* context, bool useBias )
 {
 	b3World* world = context->world;
 	b3GraphColor* color = world->constraintGraph.colors + B3_OVERFLOW_INDEX;

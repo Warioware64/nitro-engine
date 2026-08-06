@@ -683,6 +683,16 @@ bool B3_ITCM_IF( B3_ITCM_MESH, b3ComputeMeshManifolds )( b3World* world, b3Conta
 	b3MeshContact* meshContact = &contact->meshContact;
 	int triangleCount = meshContact->triangleCount;
 
+	// The work unit meshContactTicks is spent on. Accumulated across every mesh
+	// contact in the step, so the two together give a cost per triangle that
+	// is comparable between scenes -- which the tick count alone is not.
+	//
+	// Counted before the early return, so a contact whose cache refresh found
+	// nothing contributes its honest zero.
+#if defined( B3_NEA_PROFILE_NARROW ) && B3_NEA_PROFILE_NARROW
+	world->profile.meshTriangleCount += (uint32_t)triangleCount;
+#endif
+
 	if ( triangleCount == 0 )
 	{
 		contact->manifoldCount = 0;

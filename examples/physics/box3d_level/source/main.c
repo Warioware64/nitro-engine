@@ -337,7 +337,8 @@ int main(int argc, char *argv[])
                (long)NEA_Phys3DWorldGetOverflowBytes());
         printf("\x1b[13;0Hdrop   %5d now, %d peak     ", drops, peakDrops);
         printf("\x1b[14;0Hmesh   %5d bytes            ", level_b3mesh_size);
-        printf("\x1b[15;0Hcpu    %3d %%                ", NEA_GetCPUPercent());
+        printf("\x1b[15;0Hcpu %3d %%  fps %2d             ",
+               NEA_GetCPUPercent(), NEA_GetFPS());
         printf("\x1b[16;0Hrespawn %4d                ", respawns);
 
         NEA_WaitForVBL(NEA_CAN_SKIP_VBL);

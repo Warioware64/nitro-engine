@@ -26,8 +26,13 @@
 ///     their shape callbacks. Sensors arrived in Phase 7 Stage 3 and are here;
 ///     their per-worker b3SensorTaskContext folded into sensorEventBitSet by
 ///     the first rule above.
-///   - **`b3Profile` and the counters.** Millisecond timers on a machine
-///     without a millisecond clock. NEA measures in scanlines.
+///   - **Upstream's `b3Profile`.** Millisecond timers on a machine without a
+///     millisecond clock: a 16.6 ms frame quantized to milliseconds has
+///     sixteen distinguishable values. Replaced rather than dropped -- the
+///     `profile` field below counts BUS_CLOCK ticks instead, which resolve the
+///     same frame into 558,000. See include/box3d/b3profile.h. The counters
+///     upstream kept alongside it were always here; they just had no accessor
+///     until the profile gave them one.
 ///   - **`inv_dt`.** The time step is a compile-time constant here
 ///     (B3_NEA_STEP_HZ), which is the whole reason `b3World_Step` takes only a
 ///     substep count. `inv_h` *is* kept, since it depends on that count -- see
@@ -340,6 +345,33 @@ typedef struct b3World
 
 	/// The capacities the world was created with, for reporting.
 	b3Capacity maxCapacity;
+
+	/// The step's clock, live only between b3ProfileStart and b3ProfileEnd
+	/// inside b3World_Step.
+	///
+	/// On the world rather than passed down as a parameter because the probes
+	/// are three call levels apart -- b3World_Step, b3Solve, and the mesh/convex
+	/// branch inside b3UpdateContact -- and every one of those already has the
+	/// world in hand. Threading a parameter through b3Collide, b3CollideTask
+	/// and b3UpdateContact would change three hot signatures to carry something
+	/// that is nothing at all in a non-profiling build.
+	///
+	/// Four bytes, and the world is already hot in the data cache wherever a
+	/// probe fires.
+	b3ProfileTimer profileTimer;
+
+	/// Where the last step went, in timer ticks. Published by
+	/// b3World_GetProfile; see include/box3d/b3profile.h.
+	///
+	/// The field is here unconditionally even though the probes that fill it
+	/// are compiled out unless B3_NEA_PROFILE is set. Roughly 120 bytes on a
+	/// struct already several kilobytes wide, in exchange for an accessor that
+	/// always links and a game that keeps compiling when the switch goes off.
+	///
+	/// The counter half of it is filled either way -- those numbers were
+	/// already being maintained by b3Collide and b3Solve and cost nothing to
+	/// copy out.
+	b3Profile profile;
 
 	uint16_t generation;
 	uint16_t worldId;
