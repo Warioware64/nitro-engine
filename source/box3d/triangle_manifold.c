@@ -547,7 +547,22 @@ static void b3BuildTriangleAndCapsuleEdgeContact( b3LocalManifold* manifold, con
 	b3Vec3 capsuleEdge = b3Sub( capsule->center2, p1 );
 
 	b3Vec3 v1 = triangle[query.indexA];
-	b3Vec3 v2 = triangle[( query.indexA + 1 ) % 3];
+
+	// The next vertex around the triangle. Written `( query.indexA + 1 ) % 3`,
+	// which is the natural spelling and the wrong instruction: the divisor is a
+	// compile-time 3 but the dividend is not, and ARMv5TE has no integer divide
+	// -- so GCC emits a call to __aeabi_idivmod, tens of cycles inside the
+	// per-triangle mesh narrow phase.
+	//
+	// It was also the **only** libgcc arithmetic call left in the whole
+	// archive. `arm-none-eabi-nm --undefined-only lib/libNEA_box3d.a` now
+	// reports memcpy and memset and nothing else, which makes "no division
+	// helpers" a property the build can be checked against rather than a claim.
+	//
+	// The assert above bounds indexA to [0,3), so the wrap is a single compare.
+	int indexB = query.indexA + 1 == 3 ? 0 : query.indexA + 1;
+
+	b3Vec3 v2 = triangle[indexB];
 	b3Vec3 triangleEdge = b3Sub( v2, v1 );
 
 	b3Vec3 sideNormal = b3TriangleSideNormal( triangleEdge, plane.normal );
