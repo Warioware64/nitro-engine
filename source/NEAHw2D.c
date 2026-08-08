@@ -204,10 +204,17 @@ int NEA_Hw2DInit(const NEA_Hw2DVRAMConfig *config)
 
     // --- Configure VRAM banks ---
 
-    // If bank E is claimed for 2D, remove it from texture palette duty.
-    // This prevents ne_init_registers() from re-assigning it on future inits.
+    // If bank E is claimed for 2D, remove it from texture palette duty. This
+    // prevents ne_init_registers() from re-assigning it on future inits.
+    //
+    // Only bank E is dropped: banks F and G can still back texture palettes,
+    // and clearing them here would leave a later NEA_TextureSystemReset() with
+    // no palette VRAM at all, which makes every palette load fail.
     if ((mb | mo) & NEA_VRAM_E)
-        NEA_SetTexPaletteBank(0);
+    {
+        NEA_VRAMBankFlags pal_banks = NEA_GetTexPaletteBank();
+        NEA_SetTexPaletteBank(pal_banks & ~NEA_VRAM_E);
+    }
 
     // Main BG
     if (mb & NEA_VRAM_A)
