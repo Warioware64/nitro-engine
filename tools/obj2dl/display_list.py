@@ -13,6 +13,8 @@ def float_to_v16(val):
     return res
 
 def v16_to_float(val):
+    if val >= 0x8000:
+        val -= 0x10000
     return val / (1 << 12)
 
 def float_to_v10(val):
@@ -26,6 +28,8 @@ def float_to_v10(val):
     return res
 
 def v10_to_float(val):
+    if val >= 0x200:
+        val -= 0x400
     return val / (1 << 6)
 
 def float_to_diff10(val):
@@ -39,6 +43,8 @@ def float_to_diff10(val):
     return res
 
 def diff10_to_float(val):
+    if val >= 0x200:
+        val -= 0x400
     return val / (1 << 9)
 
 def float_to_t16(val):
