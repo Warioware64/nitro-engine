@@ -169,6 +169,64 @@ NEA_AnimMatData *NEA_AnimMatDataLoadFAT(const char *path)
     return amd;
 }
 
+// Parameters of an asynchronous NEA_AnimMatDataLoadFATAsync() job.
+typedef struct {
+    NEA_AnimMatData **out;
+} ne_async_animmat_param;
+
+// Runs on the main thread during the vertical blank: parses the loaded file and
+// hands the resulting object to the caller's storage slot.
+static void ne_async_animmat_finalize(NEA_AsyncFile *job)
+{
+    ne_async_animmat_param *p = __NEA_AsyncParam(job);
+
+    // Take ownership of the buffer: the keyframe pointers of the parsed object
+    // reference it directly, so NEA_AnimMatDataFree() frees it.
+    char *data = __NEA_AsyncTakeBuffer(job, NULL);
+    if (data == NULL)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    NEA_AnimMatData *amd = ne_animmat_parse(data, true);
+    if (amd == NULL)
+    {
+        free(data);
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    *p->out = amd;
+    __NEA_AsyncSetResult(job, 1);
+}
+
+NEA_AsyncFile *NEA_AnimMatDataLoadFATAsync(NEA_AnimMatData **out,
+                                           const char *path)
+{
+    NEA_AssertPointer(out, "NULL out pointer");
+    NEA_AssertPointer(path, "NULL path");
+
+    ne_async_animmat_param *p = malloc(sizeof(ne_async_animmat_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->out = out;
+
+    // The target is the storage slot itself: this loader creates the object
+    // instead of writing into an existing one.
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL,
+                                          ne_async_animmat_finalize, NULL, p,
+                                          out);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
 void NEA_AnimMatDataFree(NEA_AnimMatData *data)
 {
     if (data == NULL)

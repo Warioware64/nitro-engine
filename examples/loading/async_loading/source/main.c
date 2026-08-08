@@ -16,6 +16,15 @@
 //     The whole main loop blocks until the load finishes, so the frame counter
 //     freezes for a moment.
 //
+//   - Press X to queue a texture and a palette at the same time
+//     (NEA_MaterialTexLoadFATAsync + NEA_PaletteLoadFATAsync). They share a
+//     single worker, so they are read one after the other while the main loop
+//     keeps running. Watch the pending counter go 2 -> 1 -> 0.
+//
+//   - Press Y to delete the material while a load into it is still pending.
+//     The load is aborted instead of writing into freed memory: it reports
+//     NEA_ASYNC_ERROR and the program keeps running.
+//
 // The finalize step (uploading the texture to VRAM) is run automatically by
 // NEA_WaitForVBL() because NEA_UPDATE_ASSETS is passed to it.
 //
@@ -30,10 +39,14 @@
 #include <NEAMain.h>
 
 #define TEXTURE_PATH "a1rgb5_png.grf"
+#define SPIRAL_TEX_PATH "spiral_red_pal32.img.bin"
+#define SPIRAL_PAL_PATH "spiral_red_pal32.pal.bin"
 
 typedef struct {
     NEA_Material *material;
+    NEA_Material *spiral;
     bool textured;
+    bool spiral_ready;
     int quad_x;
 } SceneData;
 
@@ -45,9 +58,27 @@ void Draw3DScene(void *arg)
 
     if (Scene->textured)
     {
-        NEA_2DDrawTexturedQuad(Scene->quad_x, 56,
-                               Scene->quad_x + 128, 56 + 128,
+        NEA_2DDrawTexturedQuad(Scene->quad_x, 16,
+                               Scene->quad_x + 96, 16 + 96,
                                0, Scene->material);
+    }
+
+    if (Scene->spiral_ready)
+    {
+        NEA_2DDrawTexturedQuad(96, 120, 96 + 64, 120 + 64,
+                               0, Scene->spiral);
+    }
+}
+
+// Prints the name of a state so that the abort case is easy to see on screen.
+static const char *StateName(NEA_AsyncState state)
+{
+    switch (state)
+    {
+        case NEA_ASYNC_PENDING: return "pending";
+        case NEA_ASYNC_READY:   return "ready";
+        case NEA_ASYNC_DONE:    return "done";
+        default:                return "ERROR";
     }
 }
 
@@ -76,8 +107,13 @@ int main(int argc, char *argv[])
     }
 
     Scene.material = NEA_MaterialCreate();
+    Scene.spiral = NEA_MaterialCreate();
+    NEA_Palette *SpiralPalette = NEA_PaletteCreate();
 
     NEA_AsyncFile *load = NULL;
+    NEA_AsyncFile *tex_load = NULL;
+    NEA_AsyncFile *pal_load = NULL;
+    const char *last_event = "none";
     int frame = 0;
     const char spinner[4] = { '|', '/', '-', '\\' };
 
@@ -113,6 +149,29 @@ int main(int argc, char *argv[])
             }
         }
 
+        // Two loads queued at once. The worker runs them one after the other,
+        // and the palette is uploaded to VRAM by NEA_AsyncProcess() just like
+        // the texture.
+        if ((keys & KEY_X) && (tex_load == NULL) && (pal_load == NULL)
+            && !Scene.spiral_ready)
+        {
+            tex_load = NEA_MaterialTexLoadFATAsync(Scene.spiral, NEA_A3PAL32,
+                                                   64, 64, NEA_TEXGEN_TEXCOORD,
+                                                   SPIRAL_TEX_PATH);
+            pal_load = NEA_PaletteLoadFATAsync(SpiralPalette, SPIRAL_PAL_PATH,
+                                               NEA_A3PAL32);
+        }
+
+        // Deleting the target of a pending load aborts it. The handle stays
+        // valid and reports NEA_ASYNC_ERROR, so this is safe at any time.
+        if ((keys & KEY_Y) && (load != NULL))
+        {
+            NEA_MaterialDelete(Scene.material);
+            Scene.material = NULL;
+            Scene.textured = false;
+            last_event = "material deleted";
+        }
+
         // Poll the asynchronous load.
         if (load != NULL)
         {
@@ -122,12 +181,43 @@ int main(int argc, char *argv[])
                 Scene.textured = true;
                 NEA_AsyncRelease(load);
                 load = NULL;
+                last_event = "texture loaded";
             }
             else if (state == NEA_ASYNC_ERROR)
             {
-                printf("Async load failed!\n");
                 NEA_AsyncRelease(load);
                 load = NULL;
+                if (Scene.material != NULL)
+                    last_event = "load failed";
+                else
+                    last_event = "load aborted (safe)";
+            }
+        }
+
+        if (tex_load != NULL && NEA_AsyncGetState(tex_load) != NEA_ASYNC_PENDING
+            && NEA_AsyncGetState(tex_load) != NEA_ASYNC_READY)
+        {
+            NEA_AsyncRelease(tex_load);
+            tex_load = NULL;
+        }
+
+        if (pal_load != NULL)
+        {
+            NEA_AsyncState state = NEA_AsyncGetState(pal_load);
+            if (state == NEA_ASYNC_DONE)
+            {
+                // Both halves are in VRAM now, so the material can be drawn.
+                NEA_MaterialTexSetPal(Scene.spiral, SpiralPalette);
+                Scene.spiral_ready = true;
+                NEA_AsyncRelease(pal_load);
+                pal_load = NULL;
+                last_event = "tex + palette loaded";
+            }
+            else if (state == NEA_ASYNC_ERROR)
+            {
+                NEA_AsyncRelease(pal_load);
+                pal_load = NULL;
+                last_event = "palette failed";
             }
         }
 
@@ -136,9 +226,13 @@ int main(int argc, char *argv[])
         printf("==========================\n\n");
         printf("Frame:    %d %c\n\n", frame, spinner[frame & 3]);
         printf("Pending:  %d\n", NEA_AsyncPendingCount());
-        printf("Textured: %s\n\n", Scene.textured ? "yes" : "no");
+        printf("GRF:      %s\n",
+               load ? StateName(NEA_AsyncGetState(load)) : "-");
+        printf("Last:     %s\n\n", last_event);
         printf("A: load async (smooth)\n");
         printf("B: load sync  (blocks!)\n");
+        printf("X: tex + palette async\n");
+        printf("Y: delete target mid-load\n");
     }
 
     return 0;

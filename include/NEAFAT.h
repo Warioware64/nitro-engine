@@ -58,6 +58,16 @@ int NEA_ScreenshotBMP(const char *filename);
 /// Call NEA_AsyncProcess() once per frame, or pass NEA_UPDATE_ASSETS to
 /// NEA_WaitForVBL() to have it called automatically.
 ///
+/// Object lifetime: a pending load holds a pointer to the object it will write
+/// into (a material, a model, a palette...). Deleting that object aborts the
+/// load, which then reports NEA_ASYNC_ERROR. The handle itself stays valid, so
+/// it is always safe to delete an object with a load in flight, and the handle
+/// must still be released with NEA_AsyncRelease().
+///
+/// Never poll NEA_AsyncGetState() in a loop that doesn't yield: the worker only
+/// runs while the main thread is waiting. Use NEA_WaitForVBL() as usual, or
+/// NEA_AsyncWait() if you really need to block.
+///
 /// Note: On DS hardware, filesystem access through DLDI runs on the ARM9 by
 /// default and blocks it during reads. For loading to truly overlap with the
 /// main loop the filesystem driver must run on the ARM7. This is already the
@@ -104,13 +114,25 @@ NEA_AsyncState NEA_AsyncGetState(const NEA_AsyncFile *handle);
 ///
 /// This can be called once the state is NEA_ASYNC_READY or NEA_ASYNC_DONE. The
 /// ownership of the buffer is transferred to the caller, which must free it
-/// with free(). It returns NULL for handles created by the texture or model
-/// async loaders, which manage their data internally.
+/// with free(). It returns NULL for handles created by the texture, model,
+/// palette (and similar) async loaders, which manage their data internally.
 ///
 /// @param handle Async handle.
 /// @param size If not NULL, the size of the file is stored here.
 /// @return Pointer to the file data, or NULL if it isn't available.
 char *NEA_AsyncGetData(NEA_AsyncFile *handle, size_t *size);
+
+/// Blocks until an asynchronous load has finished.
+///
+/// The worker thread only runs while the main thread yields, so polling
+/// NEA_AsyncGetState() in a tight loop hangs forever. This function yields to
+/// the worker and runs NEA_AsyncProcess() until the load reaches a terminal
+/// state. It defeats the point of loading asynchronously, so it is only meant
+/// for shutdown paths and loading screens.
+///
+/// @param handle Async handle.
+/// @return The final state, NEA_ASYNC_DONE or NEA_ASYNC_ERROR.
+NEA_AsyncState NEA_AsyncWait(NEA_AsyncFile *handle);
 
 /// Sets a callback to be invoked when an asynchronous load finishes.
 ///
@@ -158,11 +180,27 @@ typedef void (*__NEA_AsyncFinalizeFn)(NEA_AsyncFile *handle);
 
 // Queues an async job with module-defined worker, finalize and discard hooks.
 // On failure it returns NULL and does not free 'param'.
+//
+// 'target' is the engine object that the finalize step writes into (or NULL for
+// a plain file read). Deleting that object must call __NEA_AsyncCancelTarget()
+// so that finalize never runs against freed memory.
 NEA_AsyncFile *__NEA_AsyncQueue(const char *filename,
                                 __NEA_AsyncWorkerFn worker_stage2,
                                 __NEA_AsyncFinalizeFn finalize,
                                 __NEA_AsyncFinalizeFn discard,
-                                void *param);
+                                void *param, void *target);
+
+// Registers an extra object as a target of a job, on top of the one passed to
+// __NEA_AsyncQueue(). Used by loaders that write into more than one object,
+// such as the GRF loader (a material and its palette).
+void __NEA_AsyncAddTarget(NEA_AsyncFile *handle, void *target);
+
+// Aborts every queued or in-flight load registered against 'target'. Their
+// finalize step never runs. The handles stay valid and report NEA_ASYNC_ERROR,
+// because the app may still be holding them; it releases them as usual with
+// NEA_AsyncRelease(). Call this from the destructor of any object that can be
+// the target of an asynchronous load, before freeing it.
+void __NEA_AsyncCancelTarget(void *target);
 
 // Returns the file data buffer of a job (no ownership transfer).
 char *__NEA_AsyncBuffer(NEA_AsyncFile *handle, size_t *size);

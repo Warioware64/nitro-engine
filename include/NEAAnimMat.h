@@ -170,6 +170,25 @@ void NEA_AnimMatSystemEnd(void);
 /// @return Pointer to loaded data, or NULL on error.
 NEA_AnimMatData *NEA_AnimMatDataLoadFAT(const char *path);
 
+/// Asynchronously load animated material data from a .neaanimmat file.
+///
+/// Unlike NEA_AnimMatDataLoadFAT(), this returns right away and the file is
+/// read in the background. Because this loader creates the object instead of
+/// filling in an existing one, the result is stored in '*out' by
+/// NEA_AsyncProcess() once the file has been parsed. See @ref async for
+/// details.
+///
+/// '*out' is only written on success, and the storage it points at must stay
+/// valid until the load finishes. If it is about to go away, release the handle
+/// with NEA_AsyncRelease() first: unlike the other async loaders, this one
+/// cannot detect that on its own.
+///
+/// @param out Where to store the pointer to the loaded data.
+/// @param path Path to the file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_AnimMatDataLoadFATAsync(NEA_AnimMatData **out,
+                                           const char *path);
+
 /// Load animated material data from RAM.
 ///
 /// The data pointer must remain valid for the lifetime of the returned

@@ -56,6 +56,10 @@ void NEA_AnimationDelete(NEA_Animation *animation)
 
     NEA_AssertPointer(animation, "NULL pointer");
 
+    // Abort any asynchronous load that would write into this animation, before
+    // the memory it points to goes away.
+    __NEA_AsyncCancelTarget(animation);
+
     int i = 0;
     while (1)
     {
@@ -109,6 +113,73 @@ int NEA_AnimationLoadFAT(NEA_Animation *animation, const char *dsa_path)
 
     animation->data = (void *)pointer;
     return 1;
+}
+
+// Parameters of an asynchronous NEA_AnimationLoadFATAsync() job.
+typedef struct {
+    NEA_Animation *animation;
+} ne_async_anim_param;
+
+// Runs on the main thread during the vertical blank: validates the DSA data and
+// assigns it to the animation object.
+static void ne_async_anim_finalize(NEA_AsyncFile *job)
+{
+    ne_async_anim_param *p = __NEA_AsyncParam(job);
+
+    // Take ownership of the buffer: the animation frees it when it is deleted.
+    uint32_t *pointer = (uint32_t *)__NEA_AsyncTakeBuffer(job, NULL);
+    if (pointer == NULL)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    // Check version
+    uint32_t version = pointer[0];
+    if (version != 1 && version != 2)
+    {
+        NEA_DebugPrint("file version is %ld, it should be 1 or 2", version);
+        free(pointer);
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    // Only replace the old data now that the new data is known to be valid, so
+    // that a failed load leaves the animation usable.
+    if (p->animation->loadedfromfat)
+        free((void *)p->animation->data);
+
+    p->animation->loadedfromfat = true;
+    p->animation->data = (void *)pointer;
+
+    __NEA_AsyncSetResult(job, 1);
+}
+
+NEA_AsyncFile *NEA_AnimationLoadFATAsync(NEA_Animation *animation,
+                                         const char *dsa_path)
+{
+    if (!ne_animation_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(animation, "NULL animation pointer");
+    NEA_AssertPointer(dsa_path, "NULL path pointer");
+
+    ne_async_anim_param *p = malloc(sizeof(ne_async_anim_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->animation = animation;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(dsa_path, NULL,
+                                          ne_async_anim_finalize, NULL, p,
+                                          animation);
+    if (job == NULL)
+        free(p);
+
+    return job;
 }
 
 int NEA_AnimationLoad(NEA_Animation *animation, const void *dsa_pointer)

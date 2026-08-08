@@ -184,6 +184,56 @@ int NEA_PaletteLoadFAT(NEA_Palette *pal, const char *path, NEA_TextureFormat for
     return ret;
 }
 
+// Parameters of an asynchronous NEA_PaletteLoadFATAsync() job.
+typedef struct {
+    NEA_Palette *pal;
+    NEA_TextureFormat format;
+} ne_async_pal_param;
+
+// Runs on the main thread during the vertical blank: uploads the loaded data to
+// palette VRAM with the regular (synchronous) loader.
+static void ne_async_pal_finalize(NEA_AsyncFile *job)
+{
+    ne_async_pal_param *p = __NEA_AsyncParam(job);
+
+    size_t size = 0;
+    char *buffer = __NEA_AsyncBuffer(job, &size);
+
+    // Unlike NEA_PaletteLoadFAT(), the size comes from the read itself, so the
+    // file doesn't need to be opened a second time to measure it.
+    int ret = (buffer != NULL && size > 0)
+            ? NEA_PaletteLoadSize(p->pal, buffer, size, p->format) : 0;
+
+    __NEA_AsyncSetResult(job, ret);
+}
+
+NEA_AsyncFile *NEA_PaletteLoadFATAsync(NEA_Palette *pal, const char *path,
+                                       NEA_TextureFormat format)
+{
+    if (!ne_palette_system_inited)
+        return NULL;
+
+    NEA_AssertPointer(pal, "NULL palette pointer");
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    ne_async_pal_param *p = malloc(sizeof(ne_async_pal_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->pal = pal;
+    p->format = format;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_pal_finalize,
+                                          NULL, p, pal);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
 int NEA_PaletteLoad(NEA_Palette *pal, const void *pointer, u16 numcolor,
                    NEA_TextureFormat format)
 {
@@ -255,6 +305,10 @@ void NEA_PaletteDelete(NEA_Palette *pal)
         return;
 
     NEA_AssertPointer(pal, "NULL pointer");
+
+    // Abort any asynchronous load that would write into this palette, before
+    // the memory it points to goes away.
+    __NEA_AsyncCancelTarget(pal);
 
     // Free the palette VRAM if there is one assigned
     ne_palette_vram_free(pal);
@@ -454,7 +508,10 @@ void NEA_PaletteSystemEnd(void)
     for (int i = 0; i < NEA_MAX_PALETTES; i++)
     {
         if (NEA_UserPalette[i])
+        {
+            __NEA_AsyncCancelTarget(NEA_UserPalette[i]);
             free(NEA_UserPalette[i]);
+        }
     }
 
     free(NEA_UserPalette);

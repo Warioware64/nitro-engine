@@ -9,6 +9,7 @@
 
 #include <nds.h>
 
+#include "NEAFAT.h"
 #include "NEAPolygon.h"
 
 /// @file   NEAPalette.h
@@ -43,6 +44,21 @@ NEA_Palette *NEA_PaletteCreate(void);
 /// @param format Format of the palette.
 /// @return It returns 1 on success, 0 on error.
 int NEA_PaletteLoadFAT(NEA_Palette *pal, const char *path, NEA_TextureFormat format);
+
+/// Asynchronously loads a palette from the filesystem into a palette object.
+///
+/// Unlike NEA_PaletteLoadFAT(), this returns right away and the file is read in
+/// the background. The palette is uploaded to VRAM by NEA_AsyncProcess() once
+/// the data is in RAM. See @ref async for details.
+///
+/// Deleting the palette cancels a load that is still in progress.
+///
+/// @param pal Pointer to the palette object.
+/// @param path Path of the palette.
+/// @param format Format of the palette.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_PaletteLoadFATAsync(NEA_Palette *pal, const char *path,
+                                       NEA_TextureFormat format);
 
 /// Assign a palette in RAM to a palette object, given its number of colors.
 ///

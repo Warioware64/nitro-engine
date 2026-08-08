@@ -7,6 +7,10 @@
 #ifndef NEA_ANIMATION_H__
 #define NEA_ANIMATION_H__
 
+#include <nds.h>
+
+#include "NEAFAT.h"
+
 /// @file   NEAAnimation.h
 /// @brief  Functions to load animations.
 
@@ -47,6 +51,22 @@ int NEA_AnimationLoad(NEA_Animation *animation, const void *pointer);
 /// @param path Path to the file.
 /// @return It returns 1 on success.
 int NEA_AnimationLoadFAT(NEA_Animation *animation, const char *path);
+
+/// Asynchronously loads a DSA file in FAT to an animation object.
+///
+/// Unlike NEA_AnimationLoadFAT(), this returns right away and the file is read
+/// in the background. The data is assigned to the animation by
+/// NEA_AsyncProcess() once it is in RAM. See @ref async for details.
+///
+/// The previous animation data (if it was loaded from a filesystem) is only
+/// freed once the new one has been read, so a failed load leaves the animation
+/// untouched. Deleting the animation cancels a load that is still in progress.
+///
+/// @param animation Pointer to the animation.
+/// @param path Path to the file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_AnimationLoadFATAsync(NEA_Animation *animation,
+                                         const char *path);
 
 /// Deletes all animations.
 void NEA_AnimationDeleteAll(void);

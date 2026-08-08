@@ -187,6 +187,10 @@ void NEA_ModelDelete(NEA_Model *model)
 
     NEA_AssertPointer(model, "NULL pointer");
 
+    // Abort any asynchronous load that would write into this model, before the
+    // memory it points to goes away.
+    __NEA_AsyncCancelTarget(model);
+
     int i = 0;
     while (1)
     {
@@ -1131,7 +1135,7 @@ static NEA_AsyncFile *ne_model_load_async_common(NEA_Model *model,
     p->kind = kind;
 
     NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_model_finalize,
-                                          NULL, p);
+                                          NULL, p, model);
     if (job == NULL)
         free(p);
 

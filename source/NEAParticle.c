@@ -203,6 +203,7 @@ void NEA_ParticleSystemEnd(void)
     {
         if (ne_part_emitters[i] != NULL)
         {
+            __NEA_AsyncCancelTarget(ne_part_emitters[i]);
             free(ne_part_emitters[i]->pool);
             free(ne_part_emitters[i]);
             ne_part_emitters[i] = NULL;
@@ -255,6 +256,10 @@ void NEA_ParticleEmitterDelete(NEA_ParticleEmitter *emitter)
 {
     if (!ne_part_inited || emitter == NULL)
         return;
+
+    // Abort any asynchronous load that would write into this emitter, before
+    // the memory it points to goes away.
+    __NEA_AsyncCancelTarget(emitter);
 
     for (int i = 0; i < ne_part_max; i++)
     {
@@ -468,7 +473,7 @@ NEA_AsyncFile *NEA_ParticleEmitterLoadFATAsync(NEA_ParticleEmitter *emitter,
     p->emitter = emitter;
 
     NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_part_finalize,
-                                          NULL, p);
+                                          NULL, p, emitter);
     if (job == NULL)
         free(p);
     return job;

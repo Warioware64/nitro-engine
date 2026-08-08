@@ -383,6 +383,48 @@ void NEA_MaterialColorDelete(NEA_Material *tex)
 }
 
 #ifdef NEA_BLOCKSDS
+
+// Chunk IDs of the GRF container. libnds builds these the same way but doesn't
+// export them, so they are repeated here for the sanity check below.
+#define NEA_GRF_CHUNK_ID(a, b, c, d) \
+    ((uint32_t)((a) | ((b) << 8) | ((c) << 16) | ((d) << 24)))
+
+#define NEA_GRF_ID_RIFF NEA_GRF_CHUNK_ID('R', 'I', 'F', 'F')
+#define NEA_GRF_ID_GRF  NEA_GRF_CHUNK_ID('G', 'R', 'F', ' ')
+
+// Checks that a buffer really holds a whole GRF file before it is decoded.
+//
+// grfLoadMemEx() walks the chunk list using the lengths stored inside the file
+// and never compares them against the size of the buffer it was given, so a
+// truncated or corrupt file makes it read (and decompress) past the end of the
+// allocation. Only the loaders that decode from RAM can check this, because
+// they are the only ones that know how many bytes were actually read.
+//
+// This bounds the outer walk only. The length of each individual chunk is still
+// up to the library to trust.
+static bool ne_grf_buffer_is_sane(const void *buffer, size_t size)
+{
+    // "RIFF" + size + "GRF ", which is the smallest possible valid header.
+    if (buffer == NULL || size < 12)
+        return false;
+
+    const uint32_t *words = buffer;
+
+    if (words[0] != NEA_GRF_ID_RIFF)
+        return false;
+
+    if (words[2] != NEA_GRF_ID_GRF)
+        return false;
+
+    // grfLoadMemEx() stops at 'buffer + riff_size + 8', so everything up to
+    // there has to be inside the buffer.
+    uint32_t riff_size = words[1];
+    if (riff_size > size - 8)
+        return false;
+
+    return true;
+}
+
 // Applies the data decoded from a GRF file to a material (and palette). The
 // decoded buffers (gfxDst, pidxDst, palDst) are not freed by this function.
 //
@@ -434,6 +476,15 @@ static int ne_grf_apply(NEA_Material *tex, NEA_Palette *pal,
 
     if (header->gfxAttr == GRF_TEXFMT_4x4)
     {
+        // A tex4x4 texture needs the palette index data from the PIDX chunk.
+        // A file that declares the format but doesn't carry one would be
+        // passed to the loader as a NULL second half.
+        if (pidxDst == NULL)
+        {
+            NEA_DebugPrint("Tex4x4 GRF file without PIDX data");
+            return 0;
+        }
+
         if (NEA_MaterialTex4x4Load(tex, header->gfxWidth, header->gfxHeight,
                            flags, gfxDst, pidxDst) == 0)
         {
@@ -636,7 +687,7 @@ NEA_AsyncFile *NEA_MaterialTexLoadFATAsync(NEA_Material *tex,
     p->flags = flags;
 
     NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_tex_finalize,
-                                          NULL, p);
+                                          NULL, p, tex);
     if (job == NULL)
         free(p);
 
@@ -723,7 +774,7 @@ NEA_AsyncFile *NEA_MaterialTex4x4LoadFATAsync(NEA_Material *tex,
 
     NEA_AsyncFile *job = __NEA_AsyncQueue(path02, ne_async_tex4x4_stage2,
                                           ne_async_tex4x4_finalize,
-                                          ne_async_tex4x4_discard, p);
+                                          ne_async_tex4x4_discard, p, tex);
     if (job == NULL)
     {
         free(p->path1);
@@ -750,7 +801,18 @@ typedef struct {
 static bool ne_async_grf_stage2(NEA_AsyncFile *job)
 {
     ne_async_grf_param *p = __NEA_AsyncParam(job);
-    char *raw = __NEA_AsyncBuffer(job, NULL);
+
+    size_t raw_size = 0;
+    char *raw = __NEA_AsyncBuffer(job, &raw_size);
+
+    // grfLoadMemEx() trusts the lengths inside the file, so check the buffer
+    // really holds a complete GRF before letting it walk off the end.
+    if (!ne_grf_buffer_is_sane(raw, raw_size))
+    {
+        NEA_DebugPrint("Not a complete GRF file: %s", "async buffer");
+        __NEA_AsyncFreeBuffer(job);
+        return false;
+    }
 
     GRFError err = grfLoadMemEx(raw, &p->header,
                                 &p->gfxDst, NULL, &p->pidxDst, NULL,
@@ -821,9 +883,16 @@ NEA_AsyncFile *NEA_MaterialTexLoadGRFAsync(NEA_Material *tex, NEA_Palette *pal,
 
     NEA_AsyncFile *job = __NEA_AsyncQueue(path, ne_async_grf_stage2,
                                           ne_async_grf_finalize,
-                                          ne_async_grf_discard, p);
+                                          ne_async_grf_discard, p, tex);
     if (job == NULL)
+    {
         free(p);
+        return NULL;
+    }
+
+    // The finalize step writes into the palette too, so deleting it must abort
+    // this load as well.
+    __NEA_AsyncAddTarget(job, pal);
 
     return job;
 #endif // NEA_BLOCKSDS
@@ -1410,6 +1479,10 @@ void NEA_MaterialDelete(NEA_Material *tex)
 {
     NEA_AssertPointer(tex, "NULL pointer");
 
+    // Abort any asynchronous load that would write into this material, before
+    // the memory it points to goes away.
+    __NEA_AsyncCancelTarget(tex);
+
     // Delete the palette if it has been flagged to be autodeleted
     if (tex->palette_autodelete)
         NEA_PaletteDelete(tex->palette);
@@ -1509,7 +1582,10 @@ void NEA_TextureSystemEnd(void)
     for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
         if (NEA_UserMaterials[i])
+        {
+            __NEA_AsyncCancelTarget(NEA_UserMaterials[i]);
             free(NEA_UserMaterials[i]);
+        }
     }
 
     free(NEA_UserMaterials);
