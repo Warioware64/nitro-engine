@@ -187,17 +187,43 @@ int NEA_RichTextMaterialLoadGRF(u32 slot, const char *path)
     if (!info->active)
         return 0;
 
-    info->material = NEA_MaterialCreate();
-    info->palette = NEA_PaletteCreate();
+    // Load into local pointers and only publish them to the slot once the whole
+    // thing has succeeded. Storing them first and freeing them on failure would
+    // leave the slot pointing at freed objects, and the render functions would
+    // then use them (info->active is still true) instead of doing nothing.
+    NEA_Material *material = NEA_MaterialCreate();
+    NEA_Palette *palette = NEA_PaletteCreate();
 
-    int ret = NEA_MaterialTexLoadGRF(info->material, info->palette,
+    if (material == NULL || palette == NULL)
+    {
+        NEA_DebugPrint("Couldn't create the font material or palette");
+
+        if (material != NULL)
+            NEA_MaterialDelete(material);
+        if (palette != NULL)
+            NEA_PaletteDelete(palette);
+
+        return 0;
+    }
+
+    int ret = NEA_MaterialTexLoadGRF(material, palette,
                     NEA_TEXGEN_TEXCOORD | NEA_TEXTURE_COLOR0_TRANSPARENT, path);
     if (ret == 0)
     {
-        NEA_MaterialDelete(info->material);
-        NEA_PaletteDelete(info->palette);
+        NEA_DebugPrint("Couldn't load the font material: %s", path);
+        NEA_MaterialDelete(material);
+        NEA_PaletteDelete(palette);
         return 0;
     }
+
+    // Drop whatever this slot held before, so reloading a font doesn't leak.
+    if (info->material != NULL)
+        NEA_MaterialDelete(info->material);
+    if (info->palette != NULL)
+        NEA_PaletteDelete(info->palette);
+
+    info->material = material;
+    info->palette = palette;
 
     return 1;
 }
@@ -242,6 +268,12 @@ int NEA_RichTextBitmapLoadGRF(u32 slot, const char *path)
             free(info->texture_buffer);
         if (info->palette_buffer != NULL)
             free(info->palette_buffer);
+
+        // Clear them here: if the load below fails the slot must not be left
+        // holding pointers to the buffers that were just freed.
+        info->texture_buffer = NULL;
+        info->palette_buffer = NULL;
+        info->has_to_free_buffers = false;
     }
 
     void *gfxDst = NULL;
@@ -404,6 +436,12 @@ int NEA_RichTextRender3DWithIndent(u32 slot, const char *str, s32 x, s32 y,
     if (!info->active)
         return 0;
 
+    // A slot can be active but have no font material yet (the metadata was
+    // loaded but the material load failed or hasn't happened). Draw nothing
+    // rather than handing a NULL material to the GPU setup.
+    if (info->material == NULL || info->handle == 0)
+        return 0;
+
     NEA_MaterialUse(info->material);
 
     dsf_error err = DSF_StringRender3DWithIndent(info->handle, str, x, y,
@@ -430,6 +468,12 @@ int NEA_RichTextRender3DAlphaWithIndent(u32 slot, const char *str, s32 x, s32 y,
 
     ne_rich_textinfo_t *info = &NEA_RichTextInfo[slot];
     if (!info->active)
+        return 0;
+
+    // A slot can be active but have no font material yet (the metadata was
+    // loaded but the material load failed or hasn't happened). Draw nothing
+    // rather than handing a NULL material to the GPU setup.
+    if (info->material == NULL || info->handle == 0)
         return 0;
 
     NEA_MaterialUse(info->material);
