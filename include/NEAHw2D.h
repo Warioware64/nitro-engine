@@ -10,6 +10,8 @@
 /// @file   NEAHw2D.h
 /// @brief  NDS hardware 2D pipeline (backgrounds, OBJ sprites).
 
+#include "NEAFAT.h"
+
 /// @defgroup hw2d Hardware 2D
 ///
 /// Functions to use the NDS 2D hardware alongside the 3D engine.
@@ -99,6 +101,8 @@ typedef struct {
     int height;              ///< Height in pixels
     u16 *gfx_ptr;            ///< Tile graphics (tiled) or bitmap data (bitmap)
     u16 *map_ptr;            ///< Tile map (tiled only, NULL for bitmap)
+    size_t gfx_size;         ///< Bytes of VRAM reserved at gfx_ptr
+    size_t map_size;         ///< Bytes of VRAM reserved at map_ptr (0 if none)
     int scroll_x;            ///< Horizontal scroll
     int scroll_y;            ///< Vertical scroll
     bool visible;            ///< Whether the BG is visible
@@ -714,6 +718,129 @@ int NEA_Hw2DTextCtxPrintCodepoint(NEA_Hw2DTextCtx *ctx, uint32_t codepoint);
 /// @return 0 on success, -1 on error, +1 if the canvas filled up mid-string.
 int NEA_Hw2DTextCtxPrintf(NEA_Hw2DTextCtx *ctx, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
+
+// ---------------------------------------------------------------------------
+// Asynchronous loading
+// ---------------------------------------------------------------------------
+
+/// @name Asynchronous loading
+///
+/// Background versions of the NEA_Hw2D*FAT() loaders. The file is read by a
+/// worker thread and copied to VRAM by NEA_AsyncProcess() during the vertical
+/// blank, so the main loop keeps running while a background, sprite sheet or
+/// font is loaded. See @ref async for details.
+///
+/// Deleting the object a load is aimed at (or calling NEA_Hw2DSystemEnd())
+/// aborts it, and the handle then reports NEA_ASYNC_ERROR. The handle must
+/// still be released with NEA_AsyncRelease().
+///
+/// @{
+
+/// Asynchronously loads tile graphics into a tiled background.
+///
+/// @param bg   Tiled background.
+/// @param path Path to the tile graphics file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DBGLoadTilesFATAsync(NEA_Hw2DBG *bg, const char *path);
+
+/// Asynchronously loads a tile map into a tiled background.
+///
+/// @param bg   Tiled background.
+/// @param path Path to the map file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DBGLoadMapFATAsync(NEA_Hw2DBG *bg, const char *path);
+
+/// Asynchronously loads bitmap data into a bitmap background.
+///
+/// @param bg   Bitmap background.
+/// @param path Path to the bitmap file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DBGLoadBitmapFATAsync(NEA_Hw2DBG *bg, const char *path);
+
+/// Asynchronously loads a GRF file into a background.
+///
+/// The file is decompressed by the worker thread as well, so only the VRAM copy
+/// happens on the main thread. BlocksDS only.
+///
+/// @param bg           Background.
+/// @param path         Path to the GRF file.
+/// @param palette_slot Palette slot to load the palette into.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DBGLoadGRFFATAsync(NEA_Hw2DBG *bg, const char *path,
+                                         int palette_slot);
+
+/// Asynchronously loads sprite graphics into an OBJ.
+///
+/// @param obj  OBJ sprite.
+/// @param path Path to the graphics file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJLoadGfxFATAsync(NEA_Hw2DOBJ *obj, const char *path);
+
+/// Asynchronously loads an OBJ palette.
+///
+/// Unlike the other loaders here this one writes into the engine's OBJ palette
+/// region rather than into an object, so there is no object whose deletion
+/// aborts it. NEA_Hw2DSystemEnd() still does.
+///
+/// @param engine Engine whose OBJ palette to load into.
+/// @param path   Path to the palette file (RGB15 colors).
+/// @param slot   Palette slot (0-15, 16 colors each).
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJLoadPaletteFATAsync(NEA_Hw2DEngine engine,
+                                              const char *path, int slot);
+
+/// Asynchronously loads a GRF file into an OBJ sprite. BlocksDS only.
+///
+/// @param obj          OBJ sprite.
+/// @param path         Path to the GRF file.
+/// @param palette_slot Palette slot to load the palette into.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJLoadGRFFATAsync(NEA_Hw2DOBJ *obj, const char *path,
+                                          int palette_slot);
+
+/// Asynchronously loads sprite graphics into a shared OBJ asset.
+///
+/// @param asset Shared OBJ asset.
+/// @param path  Path to the graphics file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadGfxFATAsync(NEA_Hw2DOBJAsset *asset,
+                                               const char *path);
+
+/// Asynchronously loads a palette into a shared OBJ asset.
+///
+/// @param asset Shared OBJ asset.
+/// @param path  Path to the palette file (RGB15 colors).
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadPaletteFATAsync(NEA_Hw2DOBJAsset *asset,
+                                                   const char *path);
+
+/// Asynchronously loads a GRF file into a shared OBJ asset. BlocksDS only.
+///
+/// @param asset Shared OBJ asset.
+/// @param path  Path to the GRF file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadGRFFATAsync(NEA_Hw2DOBJAsset *asset,
+                                               const char *path);
+
+/// Asynchronously loads font metadata into a text context.
+///
+/// @param ctx  Text context.
+/// @param path Path to the '.fnt' metadata file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DTextCtxMetadataLoadFATAsync(NEA_Hw2DTextCtx *ctx,
+                                                   const char *path);
+
+/// Asynchronously loads a font bitmap from a GRF file into a text context.
+///
+/// BlocksDS only.
+///
+/// @param ctx  Text context.
+/// @param path Path to the GRF file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_Hw2DTextCtxBitmapLoadGRFAsync(NEA_Hw2DTextCtx *ctx,
+                                                 const char *path);
+
+/// @}
 
 /// @}
 

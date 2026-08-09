@@ -188,31 +188,69 @@ NEA_ColMesh *NEA_ColMeshLoadFAT(const char *path)
 {
     NEA_AssertPointer(path, "NULL path");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Can't open %s", path);
-        return NULL;
-    }
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *data = malloc(size);
+    void *data = NEA_FATLoadData(path);
     if (data == NULL)
-    {
-        NEA_DebugPrint("Not enough memory");
-        fclose(f);
         return NULL;
-    }
-
-    fread(data, 1, size, f);
-    fclose(f);
 
     NEA_ColMesh *mesh = NEA_ColMeshLoad(data);
     free(data);
     return mesh;
+}
+
+// Parameters of an asynchronous NEA_ColMeshLoadFATAsync() job.
+typedef struct {
+    NEA_ColMesh **out;
+} ne_async_colmesh_param;
+
+// Runs on the main thread during the vertical blank: parses the loaded file and
+// hands the resulting mesh to the caller's storage slot.
+static void ne_async_colmesh_finalize(NEA_AsyncFile *job)
+{
+    ne_async_colmesh_param *p = __NEA_AsyncParam(job);
+
+    // NEA_ColMeshLoad() copies every triangle into its own allocation and keeps
+    // no pointer into the file, so the async system frees the buffer as usual.
+    char *data = __NEA_AsyncBuffer(job, NULL);
+    if (data == NULL)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    NEA_ColMesh *mesh = NEA_ColMeshLoad(data);
+    if (mesh == NULL)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    *p->out = mesh;
+    __NEA_AsyncSetResult(job, 1);
+}
+
+NEA_AsyncFile *NEA_ColMeshLoadFATAsync(NEA_ColMesh **out, const char *path)
+{
+    NEA_AssertPointer(out, "NULL out pointer");
+    NEA_AssertPointer(path, "NULL path");
+
+    ne_async_colmesh_param *p = malloc(sizeof(ne_async_colmesh_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->out = out;
+
+    // The target is the storage slot itself: this loader creates the object
+    // instead of writing into an existing one.
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL,
+                                          ne_async_colmesh_finalize, NULL, p,
+                                          out);
+    if (job == NULL)
+        free(p);
+
+    return job;
 }
 
 void NEA_ColMeshSetDynamic(NEA_ColMesh *mesh, bool dynamic)

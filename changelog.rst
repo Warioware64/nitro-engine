@@ -1,6 +1,55 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+**Asynchronous asset loading everywhere it was missing.** The three modules
+that still blocked the main loop for the whole duration of a filesystem read
+now have ``*Async`` loaders alongside their synchronous ones, built on the same
+worker-thread + vertical-blank-finalize machinery as the texture and model
+loaders:
+
+- **NEAHw2D**: ``NEA_Hw2DBGLoadTiles/Map/Bitmap/GRFFATAsync()``,
+  ``NEA_Hw2DOBJLoadGfx/Palette/GRFFATAsync()``,
+  ``NEA_Hw2DOBJAssetLoadGfx/Palette/GRFFATAsync()``,
+  ``NEA_Hw2DTextCtxMetadataLoadFATAsync()`` and
+  ``NEA_Hw2DTextCtxBitmapLoadGRFAsync()``. GRF decompression runs on the worker
+  thread too, so only the VRAM copy lands on the main thread. Deleting a
+  background, sprite, asset or text context — or calling
+  ``NEA_Hw2DSystemEnd()`` — aborts any load aimed at it.
+- **NEACollision**: ``NEA_ColMeshLoadFATAsync()``.
+- **NEABoneCollision**: ``NEA_BoneCollisionLoadFATAsync()``.
+- **NEARichText**: ``NEA_RichTextMetadataLoadFATAsync()``.
+
+NSMW node-skin data was already covered by ``NEA_ModelLoadNSMWFATAsync()``.
+
+**Asynchronous file writing**: ``NEA_FATWriteDataAsync()`` writes a buffer from
+the worker thread, so a game can save without freezing the main loop. The write
+is atomic: the data goes to ``<path>.temp`` and is only renamed into place once
+all of it has reached the filesystem, so a failed or cancelled save leaves the
+previous file intact rather than truncated. The caller chooses whether the
+engine copies the buffer, takes ownership of it, or writes straight out of it
+(``NEA_ASYNC_WRITE_COPY`` / ``_TAKE`` / ``_BORROW``).
+
+The synchronous ``*FAT`` loaders in these modules now share the engine's file
+reader instead of each hand-rolling ``fopen``/``fread``, which also means they
+check for the read errors they used to ignore.
+
+**Fixed: oversized 2D assets corrupted a neighbouring background.**
+``NEA_Hw2DBGLoadTiles()``, ``NEA_Hw2DBGLoadMap()`` and
+``NEA_Hw2DBGLoadBitmap()`` copied the whole source into VRAM without checking it
+against the background's own allocation. Because the allocator hands out
+contiguous blocks, an asset larger than the background ran straight on into the
+next layer's tiles or map, which showed up as garbage in an unrelated
+background rather than as an error where the mistake was made. The copies are
+now clamped to the VRAM the background owns (reported by the new ``gfx_size``
+and ``map_size`` fields of ``NEA_Hw2DBG``) and the debug build prints the sizes
+involved. ``NEA_Hw2DBGLoadPalette()`` gained the same bound that
+``NEA_Hw2DOBJLoadPalette()`` already had, so a 4bpp palette padded out to 256
+entries can no longer run past the end of the palette region when loaded into a
+non-zero slot.
+
 Version 3.0.0 (2026-08-06)
 ---------------------------
 

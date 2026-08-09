@@ -48,7 +48,8 @@ int NEA_ScreenshotBMP(const char *filename);
 ///
 /// Loads files in the background using BlocksDS cooperative threads, so that
 /// the main loop (and therefore audio streaming and rendering) keeps running
-/// while a file is read from the filesystem.
+/// while a file is read from the filesystem. NEA_FATWriteDataAsync() does the
+/// same for saving a file.
 ///
 /// Loading happens in two phases. The file is first read into RAM by a worker
 /// thread that yields between chunks. Once the data is in RAM, a finalize step
@@ -103,6 +104,49 @@ typedef void (*NEA_AsyncCallback)(NEA_AsyncFile *handle, void *user);
 /// @param filename Path to the file.
 /// @return Handle to poll the operation, or NULL on error.
 NEA_AsyncFile *NEA_FATLoadDataAsync(const char *filename);
+
+/// What NEA_FATWriteDataAsync() does with the buffer it is given.
+typedef enum {
+    /// The engine takes a copy of the data. The caller may free or reuse its
+    /// buffer as soon as the function returns.
+    NEA_ASYNC_WRITE_COPY = 0,
+    /// The engine takes ownership of the buffer and free()s it when the write
+    /// ends. The caller must not touch, reuse or free it again. It must have
+    /// been allocated with malloc()/calloc()/realloc().
+    NEA_ASYNC_WRITE_TAKE,
+    /// The engine writes straight out of the caller's buffer without copying
+    /// it. The buffer must stay valid and unmodified until the handle reaches
+    /// NEA_ASYNC_DONE or NEA_ASYNC_ERROR, or until it is released.
+    NEA_ASYNC_WRITE_BORROW
+} NEA_AsyncWriteMode;
+
+/// Writes a buffer to a file in the background.
+///
+/// Useful for saving without interrupting the main loop: the data is written by
+/// a worker thread that yields between chunks, so audio and rendering keep
+/// running for the whole duration of the save.
+///
+/// The write is atomic from the point of view of the file: the data goes to
+/// "<filename>.temp" first and is only renamed over @p filename once all of it
+/// has reached the filesystem. If the write fails, or if the handle is released
+/// while it is still running, the temporary file is deleted and the previous
+/// contents of @p filename are left untouched. A file is therefore never seen
+/// in a half-written state, and a cancelled save can't destroy the last good
+/// one.
+///
+/// The returned handle must be released with NEA_AsyncRelease() once you are
+/// done with it.
+///
+/// If this function fails and returns NULL, ownership of @p data is not
+/// transferred: the caller still owns it in NEA_ASYNC_WRITE_TAKE mode too.
+///
+/// @param filename Path of the file to write.
+/// @param data Data to write.
+/// @param size Number of bytes to write.
+/// @param mode What to do with @p data, see @ref NEA_AsyncWriteMode.
+/// @return Handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_FATWriteDataAsync(const char *filename, const void *data,
+                                     size_t size, NEA_AsyncWriteMode mode);
 
 /// Returns the current state of an asynchronous load operation.
 ///
@@ -171,6 +215,15 @@ void NEA_AsyncProcess(void);
 
 // Internal API used by other Nitro Engine Advanced modules to implement
 // asynchronous texture and model loading. Don't use these functions directly.
+
+// Same as NEA_FATLoadData(), but it also returns the size of the file. Used by
+// the loaders that need to know how many bytes they got.
+char *__NEA_FATLoadDataSize(const char *filename, size_t *size);
+
+// Checks that a buffer really holds a complete GRF file. grfLoadMemEx() trusts
+// the lengths stored inside the file, so this must be called on any buffer that
+// didn't come from grfLoadPath() before decoding it.
+bool __NEA_GRFBufferIsSane(const void *buffer, size_t size);
 
 /// Second-stage worker function, run in the worker thread after the file read.
 typedef bool (*__NEA_AsyncWorkerFn)(NEA_AsyncFile *handle);

@@ -20,6 +20,10 @@
 // filesystem access and GRF decompression.
 #define NEA_ASYNC_STACK_SIZE (16 * 1024)
 
+// Extension appended to the destination path while an asynchronous write is in
+// progress. The file only takes its real name once it is complete.
+#define NEA_ASYNC_TEMP_SUFFIX ".temp"
+
 // Number of engine objects a single job can be registered against. Two is
 // enough for the GRF loader, which writes into a material and a palette.
 #define NEA_ASYNC_MAX_TARGETS 2
@@ -135,6 +139,11 @@ char *NEA_FATLoadData(const char *filename)
     return ne_fat_read_file(filename, NULL, NULL);
 }
 
+char *__NEA_FATLoadDataSize(const char *filename, size_t *size)
+{
+    return ne_fat_read_file(filename, size, NULL);
+}
+
 size_t NEA_FATFileSize(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
@@ -164,6 +173,13 @@ struct NEA_AsyncFile {
     char *filename;             // File to load (owned)
     char *buffer;               // File contents in RAM (owned if buffer_owned)
     size_t size;                // Size of buffer
+
+    // True if this job writes 'buffer' out to 'filename' instead of reading the
+    // file in. The data is written to 'temp_filename' and only renamed over
+    // 'filename' once it is complete, so an interrupted write can't destroy the
+    // previous contents of the file.
+    bool is_write;
+    char *temp_filename;        // "<filename>.temp" (owned, write jobs only)
 
     volatile NEA_AsyncState state;
     // Set by NEA_AsyncRelease() while in progress. The app has given up the
@@ -237,8 +253,73 @@ static bool ne_async_is_cancelled(const NEA_AsyncFile *job)
     return job->cancelled || job->aborted;
 }
 
-// Worker thread entrypoint. Reads the file and runs the optional second-stage
-// processing. Runs in its own cothread.
+// Writes the payload of a write job out to the filesystem, in chunks, yielding
+// to other cothreads between them.
+//
+// The data goes to a temporary file first and is only renamed over the real one
+// once all of it is on disk. That way a write that fails, or that is cancelled
+// half way through, leaves the previous contents of the file untouched instead
+// of replacing them with a truncated version.
+static bool ne_fat_write_file(NEA_AsyncFile *job)
+{
+    FILE *f = fopen(job->temp_filename, "wb");
+    if (f == NULL)
+    {
+        NEA_DebugPrint("%s could't be opened for writing", job->temp_filename);
+        return false;
+    }
+
+    size_t done = 0;
+    while (done < job->size)
+    {
+        if (ne_async_is_cancelled(job))
+            goto fail;
+
+        size_t chunk = job->size - done;
+        if (chunk > NEA_ASYNC_CHUNK_SIZE)
+            chunk = NEA_ASYNC_CHUNK_SIZE;
+
+        if (fwrite(job->buffer + done, 1, chunk, f) != chunk)
+        {
+            NEA_DebugPrint("Failed to write data of %s", job->temp_filename);
+            goto fail;
+        }
+
+        done += chunk;
+        cothread_yield();
+    }
+
+    // Only now is the data guaranteed to have reached the filesystem, so this
+    // is the last point at which the write can still fail without touching the
+    // file the app cares about.
+    if (fclose(f) != 0)
+    {
+        NEA_DebugPrint("Failed to flush %s", job->temp_filename);
+        remove(job->temp_filename);
+        return false;
+    }
+
+    // FAT rename() won't overwrite an existing target, so the old file has to go
+    // first. It may not exist at all, so its failure isn't an error.
+    remove(job->filename);
+
+    if (rename(job->temp_filename, job->filename) != 0)
+    {
+        NEA_DebugPrint("Failed to rename %s", job->temp_filename);
+        remove(job->temp_filename);
+        return false;
+    }
+
+    return true;
+
+fail:
+    fclose(f);
+    remove(job->temp_filename);
+    return false;
+}
+
+// Worker thread entrypoint. Reads the file (or writes it, for a write job) and
+// runs the optional second-stage processing. Runs in its own cothread.
 static int ne_async_worker_entry(void *arg)
 {
     NEA_AsyncFile *job = arg;
@@ -246,7 +327,19 @@ static int ne_async_worker_entry(void *arg)
     // Every exit path has to go through the end of this function, so that the
     // signal is sent exactly once and nothing waiting for this worker is left
     // blocked forever.
-    if (!ne_async_is_cancelled(job))
+    if (job->is_write)
+    {
+        if (!ne_async_is_cancelled(job))
+        {
+            // Write jobs have no finalize step, so NEA_AsyncProcess() turns this
+            // NEA_ASYNC_READY into NEA_ASYNC_DONE on the main thread.
+            if (ne_fat_write_file(job))
+                job->state = NEA_ASYNC_READY;
+            else if (!ne_async_is_cancelled(job))
+                job->state = NEA_ASYNC_ERROR;
+        }
+    }
+    else if (!ne_async_is_cancelled(job))
     {
         size_t size = 0;
         char *buffer = ne_fat_read_file(job->filename, &size, job);
@@ -375,15 +468,15 @@ static void ne_async_destroy(NEA_AsyncFile *job)
         free(job->buffer);
 
     free(job->param);
+    free(job->temp_filename);
     free(job->filename);
     free(job);
 }
 
-NEA_AsyncFile *__NEA_AsyncQueue(const char *filename,
-                                __NEA_AsyncWorkerFn worker_stage2,
-                                __NEA_AsyncFinalizeFn finalize,
-                                __NEA_AsyncFinalizeFn discard,
-                                void *param, void *target)
+// Allocates a job and puts it at the end of the queue. Shared by the read and
+// write entry points; everything specific to one of them is set by the caller
+// on the returned handle before the worker can pick it up.
+static NEA_AsyncFile *ne_async_queue_common(const char *filename)
 {
     NEA_AssertPointer(filename, "NULL filename pointer");
 
@@ -421,6 +514,20 @@ NEA_AsyncFile *__NEA_AsyncQueue(const char *filename,
     memcpy(job->filename, filename, len);
 
     job->state = NEA_ASYNC_PENDING;
+
+    return job;
+}
+
+NEA_AsyncFile *__NEA_AsyncQueue(const char *filename,
+                                __NEA_AsyncWorkerFn worker_stage2,
+                                __NEA_AsyncFinalizeFn finalize,
+                                __NEA_AsyncFinalizeFn discard,
+                                void *param, void *target)
+{
+    NEA_AsyncFile *job = ne_async_queue_common(filename);
+    if (job == NULL)
+        return NULL;
+
     job->worker_stage2 = worker_stage2;
     job->finalize = finalize;
     job->discard = discard;
@@ -431,6 +538,68 @@ NEA_AsyncFile *__NEA_AsyncQueue(const char *filename,
     ne_async_try_start();
 
     return job;
+}
+
+NEA_AsyncFile *NEA_FATWriteDataAsync(const char *filename, const void *data,
+                                     size_t size, NEA_AsyncWriteMode mode)
+{
+    NEA_AssertPointer(filename, "NULL filename pointer");
+    NEA_AssertPointer(data, "NULL data pointer");
+
+    if (data == NULL)
+        return NULL;
+
+    NEA_AsyncFile *job = ne_async_queue_common(filename);
+    if (job == NULL)
+        return NULL;
+
+    // The temporary name is built here, on the main thread, so that the worker
+    // never has to allocate and can't fail half way through the write.
+    size_t len = strlen(job->filename);
+    job->temp_filename = malloc(len + sizeof(NEA_ASYNC_TEMP_SUFFIX));
+    if (job->temp_filename == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        goto fail;
+    }
+    memcpy(job->temp_filename, job->filename, len);
+    memcpy(job->temp_filename + len, NEA_ASYNC_TEMP_SUFFIX,
+           sizeof(NEA_ASYNC_TEMP_SUFFIX));
+
+    if (mode == NEA_ASYNC_WRITE_COPY)
+    {
+        // Always allocate at least one byte: malloc(0) may return NULL, which
+        // would look like an out of memory error for an empty file.
+        job->buffer = malloc(size > 0 ? size : 1);
+        if (job->buffer == NULL)
+        {
+            NEA_DebugPrint("Not enough memory");
+            goto fail;
+        }
+        memcpy(job->buffer, data, size);
+        job->buffer_owned = true;
+    }
+    else
+    {
+        // TAKE and BORROW both write straight out of the caller's buffer. They
+        // only differ in who frees it, which is what buffer_owned decides.
+        job->buffer = (char *)data;
+        job->buffer_owned = (mode == NEA_ASYNC_WRITE_TAKE);
+    }
+
+    job->size = size;
+    job->is_write = true;
+
+    ne_async_append(job);
+    ne_async_try_start();
+
+    return job;
+
+fail:
+    free(job->temp_filename);
+    free(job->filename);
+    free(job);
+    return NULL;
 }
 
 // Drops everything a job owns except the handle itself, and marks it as failed.
@@ -610,6 +779,12 @@ char *NEA_AsyncGetData(NEA_AsyncFile *handle, size_t *size)
     // data internally: the finalize step still needs the buffer, and some of
     // them hand it over to the engine object. Never let it be stolen here.
     if (handle->finalize != NULL)
+        return NULL;
+
+    // A write job's buffer belongs to the caller, not to the async system.
+    // Handing it back would also clear buffer_owned and leak a COPY/TAKE
+    // buffer.
+    if (handle->is_write)
         return NULL;
 
     if (size != NULL)

@@ -13,6 +13,8 @@
 
 #include <nds.h>
 
+#include "NEAFAT.h"
+
 /// @defgroup collision Collision system
 ///
 /// Collision shapes and narrow-phase detection for AABB, Sphere, Capsule, and
@@ -269,6 +271,21 @@ NEA_ColMesh *NEA_ColMeshLoad(const void *data);
 /// @param path Path to the .colmesh file.
 /// @return Pointer to the loaded ColMesh, or NULL on error.
 NEA_ColMesh *NEA_ColMeshLoadFAT(const char *path);
+
+/// Asynchronously loads a collision mesh from a .colmesh file on the filesystem.
+///
+/// The file is read in the background and parsed by NEA_AsyncProcess() once it
+/// is in RAM. The resulting mesh is stored in @p out. See @ref async for
+/// details.
+///
+/// @p out must stay valid until the operation finishes, because the finalize
+/// step writes through it. If it is about to go out of scope, release the handle
+/// with NEA_AsyncRelease() first.
+///
+/// @param out Where to store the pointer to the loaded mesh.
+/// @param path Path to the .colmesh file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_ColMeshLoadFATAsync(NEA_ColMesh **out, const char *path);
 
 /// Set a ColMesh to dynamic mode (full transform support).
 ///

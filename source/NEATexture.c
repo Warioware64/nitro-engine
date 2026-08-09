@@ -402,7 +402,9 @@ void NEA_MaterialColorDelete(NEA_Material *tex)
 //
 // This bounds the outer walk only. The length of each individual chunk is still
 // up to the library to trust.
-static bool ne_grf_buffer_is_sane(const void *buffer, size_t size)
+//
+// Shared with the NEAHw2D asynchronous GRF loaders, hence the internal name.
+bool __NEA_GRFBufferIsSane(const void *buffer, size_t size)
 {
     // "RIFF" + size + "GRF ", which is the smallest possible valid header.
     if (buffer == NULL || size < 12)
@@ -807,7 +809,7 @@ static bool ne_async_grf_stage2(NEA_AsyncFile *job)
 
     // grfLoadMemEx() trusts the lengths inside the file, so check the buffer
     // really holds a complete GRF before letting it walk off the end.
-    if (!ne_grf_buffer_is_sane(raw, raw_size))
+    if (!__NEA_GRFBufferIsSane(raw, raw_size))
     {
         NEA_DebugPrint("Not a complete GRF file: %s", "async buffer");
         __NEA_AsyncFreeBuffer(job);

@@ -10,6 +10,8 @@
 /// @file  NEARichText.h
 /// @brief Rich text system.
 
+#include "NEAFAT.h"
+
 /// @defgroup text_system Text system
 ///
 /// Rich text drawing functions. It is possible to draw text as a series of
@@ -73,6 +75,20 @@ int NEA_RichTextEnd(u32 slot);
 /// @param path Path to a '.fnt' binary file.
 /// @return Returns 1 on success, 0 on failure.
 int NEA_RichTextMetadataLoadFAT(u32 slot, const char *path);
+
+/// Asynchronously loads font metadata from the specified file in the
+/// filesystem.
+///
+/// The file is read in the background and installed in the slot by
+/// NEA_AsyncProcess() once it is in RAM. See @ref async for details.
+///
+/// Ending the slot with NEA_RichTextEnd() aborts a load that is still in
+/// flight, which then reports NEA_ASYNC_ERROR.
+///
+/// @param slot The slot to use.
+/// @param path Path to a '.fnt' binary file.
+/// @return Async handle to poll the operation, or NULL on error.
+NEA_AsyncFile *NEA_RichTextMetadataLoadFATAsync(u32 slot, const char *path);
 
 /// Load font metadata from the buffer in RAM.
 ///

@@ -78,6 +78,11 @@ int NEA_RichTextEnd(u32 slot)
     if (!info->active)
         return 0;
 
+    // Any metadata load still in flight would install a font handle into this
+    // slot after it has been cleared, leaking it and leaving the slot looking
+    // loaded.
+    __NEA_AsyncCancelTarget(info);
+
     if (info->material != NULL)
         NEA_MaterialDelete(info->material);
     if (info->palette != NULL)
@@ -174,6 +179,71 @@ int NEA_RichTextMetadataLoadMemory(u32 slot, const void *data, size_t data_size)
     info->handle = handle;
 
     return 1;
+}
+
+// Parameters of an asynchronous NEA_RichTextMetadataLoadFATAsync() job.
+typedef struct {
+    u32 slot;
+} ne_async_richtext_param;
+
+// Runs on the main thread during the vertical blank: parses the font metadata
+// that has been read into RAM and installs it in the slot.
+static void ne_async_richtext_finalize(NEA_AsyncFile *job)
+{
+    ne_async_richtext_param *p = __NEA_AsyncParam(job);
+
+    size_t size = 0;
+    char *data = __NEA_AsyncBuffer(job, &size);
+    if (data == NULL)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    // The slot array can be reallocated by NEA_RichTextStartSystem() between the
+    // moment this job was queued and now, so the bounds are checked again here.
+    // NEA_RichTextMetadataLoadMemory() also re-checks that the slot is active.
+    if (p->slot >= NEA_NumRichTextSlots)
+    {
+        __NEA_AsyncSetResult(job, 0);
+        return;
+    }
+
+    // DSF_LoadFontMemory() copies everything it needs out of the buffer (this is
+    // what DSF_LoadFontFilesystem() relies on to free its own), so the async
+    // system can free it as usual.
+    int ret = NEA_RichTextMetadataLoadMemory(p->slot, data, size);
+    __NEA_AsyncSetResult(job, ret);
+}
+
+NEA_AsyncFile *NEA_RichTextMetadataLoadFATAsync(u32 slot, const char *path)
+{
+    NEA_AssertPointer(path, "NULL path pointer");
+
+    if (slot >= NEA_NumRichTextSlots)
+        return NULL;
+
+    ne_rich_textinfo_t *info = &NEA_RichTextInfo[slot];
+    if (!info->active)
+        return NULL;
+
+    ne_async_richtext_param *p = malloc(sizeof(ne_async_richtext_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return NULL;
+    }
+
+    p->slot = slot;
+
+    // The target is the slot itself, so that NEA_RichTextEnd() aborts the load.
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL,
+                                          ne_async_richtext_finalize, NULL, p,
+                                          info);
+    if (job == NULL)
+        free(p);
+
+    return job;
 }
 
 int NEA_RichTextMaterialLoadGRF(u32 slot, const char *path)

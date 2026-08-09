@@ -348,6 +348,32 @@ void NEA_Hw2DSystemEnd(void)
     if (!ne_hw2d_state.initialized)
         return;
 
+    // Abort every load still aimed at anything in the pools. This function
+    // clears them directly instead of going through the Delete() calls, which
+    // are what normally cancel the loads, so it has to do it itself before the
+    // slots are zeroed and the VRAM banks are released.
+    for (int i = 0; i < 4; i++)
+    {
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.bgs_main[i]);
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.bgs_sub[i]);
+    }
+    for (int i = 0; i < NEA_HW2D_MAX_OAM; i++)
+    {
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.objs_main[i]);
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.objs_sub[i]);
+    }
+    for (int i = 0; i < NEA_HW2D_MAX_ASSETS; i++)
+    {
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.assets_main[i]);
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.assets_sub[i]);
+    }
+    for (int i = 0; i < NEA_HW2D_MAX_TEXT_CTX; i++)
+        __NEA_AsyncCancelTarget(&ne_hw2d_state.text_ctx[i]);
+
+    // OBJ palette loads write into the engine's palette region rather than into
+    // an object, so they are registered against the 2D system itself.
+    __NEA_AsyncCancelTarget(&ne_hw2d_state);
+
     // Delete all active BGs
     for (int i = 0; i < 4; i++)
     {
@@ -668,6 +694,25 @@ NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
     bg->height = height;
     bg->gfx_ptr = bgGetGfxPtr(bg_id);
     bg->map_ptr = is_bitmap ? NULL : bgGetMapPtr(bg_id);
+
+    // How much VRAM this BG actually owns, so that the loaders can refuse to
+    // write past it into whatever the allocator handed to the next layer.
+    //
+    // A bitmap BG is bounded by the image itself rather than by the blocks it
+    // was rounded up to: the tail of the last 16 KB block isn't displayed, and
+    // treating it as usable would only hide an oversized file.
+    if (is_bitmap)
+    {
+        bg->gfx_size = (size_t)width * height
+                       * ((type == NEA_HW2D_BG_BITMAP_16) ? 2 : 1);
+        bg->map_size = 0;
+    }
+    else
+    {
+        bg->gfx_size = (size_t)tile_blocks_needed * 16384;
+        bg->map_size = (size_t)map_blocks_needed * 2048;
+    }
+
     bg->scroll_x = 0;
     bg->scroll_y = 0;
     bg->visible = true;
@@ -679,6 +724,11 @@ void NEA_Hw2DBGDelete(NEA_Hw2DBG *bg)
 {
     if (bg == NULL || !bg->used)
         return;
+
+    // This slot is about to be cleared and its VRAM handed back to the
+    // allocator, so any load still aimed at it must never reach its finalize
+    // step.
+    __NEA_AsyncCancelTarget(bg);
 
     // Return the BG's tile and map blocks to the free pool. Without this,
     // the allocator would treat them as used forever and repeated
@@ -710,6 +760,22 @@ void NEA_Hw2DBGDelete(NEA_Hw2DBG *bg)
     memset(bg, 0, sizeof(*bg));
 }
 
+// Clamps a copy to the VRAM a BG actually owns.
+//
+// The BG allocator hands out contiguous blocks, so the bytes just past the end
+// of one BG belong to another one. Copying a whole file in without checking
+// silently corrupts a neighbouring layer, which shows up as garbage in an
+// unrelated background rather than as an error at the point of the mistake.
+static size_t ne_hw2d_bg_clip(size_t size, size_t capacity, const char *what)
+{
+    if (size <= capacity)
+        return size;
+
+    NEA_DebugPrint("Hw2D %s data is %d bytes, VRAM holds %d; truncating",
+                   what, (int)size, (int)capacity);
+    return capacity;
+}
+
 int NEA_Hw2DBGLoadTiles(NEA_Hw2DBG *bg, const void *data, size_t size)
 {
     NEA_AssertPointer(bg, "NULL bg");
@@ -717,7 +783,7 @@ int NEA_Hw2DBGLoadTiles(NEA_Hw2DBG *bg, const void *data, size_t size)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->type <= NEA_HW2D_BG_TILED_8BPP, "Not a tiled BG");
 
-    memcpy(bg->gfx_ptr, data, size);
+    memcpy(bg->gfx_ptr, data, ne_hw2d_bg_clip(size, bg->gfx_size, "tile"));
     return 0;
 }
 
@@ -728,31 +794,14 @@ int NEA_Hw2DBGLoadTilesFAT(NEA_Hw2DBG *bg, const char *path)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->type <= NEA_HW2D_BG_TILED_8BPP, "Not a tiled BG");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
 
-    fread(buf, 1, size, f);
-    fclose(f);
-
-    memcpy(bg->gfx_ptr, buf, size);
+    int ret = NEA_Hw2DBGLoadTiles(bg, buf, size);
     free(buf);
-    return 0;
+    return ret;
 }
 
 int NEA_Hw2DBGLoadMap(NEA_Hw2DBG *bg, const void *data, size_t size)
@@ -762,7 +811,7 @@ int NEA_Hw2DBGLoadMap(NEA_Hw2DBG *bg, const void *data, size_t size)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->map_ptr != NULL, "Not a tiled BG");
 
-    memcpy(bg->map_ptr, data, size);
+    memcpy(bg->map_ptr, data, ne_hw2d_bg_clip(size, bg->map_size, "map"));
     return 0;
 }
 
@@ -773,31 +822,14 @@ int NEA_Hw2DBGLoadMapFAT(NEA_Hw2DBG *bg, const char *path)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->map_ptr != NULL, "Not a tiled BG");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
 
-    fread(buf, 1, size, f);
-    fclose(f);
-
-    memcpy(bg->map_ptr, buf, size);
+    int ret = NEA_Hw2DBGLoadMap(bg, buf, size);
     free(buf);
-    return 0;
+    return ret;
 }
 
 int NEA_Hw2DBGLoadPalette(NEA_Hw2DBG *bg, const void *data,
@@ -814,8 +846,21 @@ int NEA_Hw2DBGLoadPalette(NEA_Hw2DBG *bg, const void *data,
         pal_ptr = BG_PALETTE_SUB;
 
     // For 4bpp, each slot is 16 colors (32 bytes)
+    int first_color = 0;
     if (bg->type == NEA_HW2D_BG_TILED_4BPP)
-        pal_ptr += slot * 16;
+        first_color = slot * 16;
+
+    pal_ptr += first_color;
+
+    // The BG palette region holds 256 colors. Clamp the copy the same way
+    // NEA_Hw2DOBJLoadPalette() does, so a palette padded out to 256 entries
+    // (which grit and ptexconv both do for 4bpp) can't run off the end of the
+    // region when it is loaded into a non-zero slot.
+    int max_colors = 256 - first_color;
+    if (max_colors < 0)
+        max_colors = 0;
+    if (num_colors > max_colors)
+        num_colors = max_colors;
 
     memcpy(pal_ptr, data, num_colors * 2);
     return 0;
@@ -881,7 +926,7 @@ int NEA_Hw2DBGLoadBitmap(NEA_Hw2DBG *bg, const void *data, size_t size)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->type >= NEA_HW2D_BG_BITMAP_8, "Not a bitmap BG");
 
-    memcpy(bg->gfx_ptr, data, size);
+    memcpy(bg->gfx_ptr, data, ne_hw2d_bg_clip(size, bg->gfx_size, "bitmap"));
     return 0;
 }
 
@@ -892,31 +937,14 @@ int NEA_Hw2DBGLoadBitmapFAT(NEA_Hw2DBG *bg, const char *path)
     NEA_Assert(bg->used, "BG not active");
     NEA_Assert(bg->type >= NEA_HW2D_BG_BITMAP_8, "Not a bitmap BG");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
 
-    fread(buf, 1, size, f);
-    fclose(f);
-
-    memcpy(bg->gfx_ptr, buf, size);
+    int ret = NEA_Hw2DBGLoadBitmap(bg, buf, size);
     free(buf);
-    return 0;
+    return ret;
 }
 
 void *NEA_Hw2DBGGetBitmapPtr(const NEA_Hw2DBG *bg)
@@ -966,6 +994,83 @@ void NEA_Hw2DBGClearBitmap(NEA_Hw2DBG *bg, u32 value)
     dmaFillWords(fill, bg->gfx_ptr, total);
 }
 
+#ifdef NEA_BLOCKSDS
+// Applies the data decoded from a GRF file to a BG. The decoded buffers are not
+// freed by this function.
+//
+// Shared by NEA_Hw2DBGLoadGRFFAT() and its asynchronous version, which only
+// differ in where the decoding happens.
+static int ne_hw2d_bg_grf_apply(NEA_Hw2DBG *bg, const GRFHeader *header,
+                                void *gfxDst, size_t gfxSize,
+                                void *mapDst, size_t mapSize,
+                                void *palDst, size_t palSize,
+                                int palette_slot)
+{
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("No graphics found in GRF file");
+        return -1;
+    }
+
+    switch (bg->type)
+    {
+        case NEA_HW2D_BG_TILED_4BPP:
+            if (header->gfxAttr != 4 ||
+                (header->mapAttr != GRF_BGFMT_SBB_4BPP &&
+                 header->mapAttr != GRF_BGFMT_FLAT_4BPP))
+            {
+                NEA_DebugPrint("GRF format mismatch for tiled 4bpp BG");
+                return -1;
+            }
+            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
+            if (mapDst != NULL)
+                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
+            break;
+
+        case NEA_HW2D_BG_TILED_8BPP:
+            if (header->gfxAttr != 8 ||
+                (header->mapAttr != GRF_BGFMT_SBB_8BPP &&
+                 header->mapAttr != GRF_BGFMT_AFF_8BPP &&
+                 header->mapAttr != GRF_BGFMT_FLAT_8BPP))
+            {
+                NEA_DebugPrint("GRF format mismatch for tiled 8bpp BG");
+                return -1;
+            }
+            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
+            if (mapDst != NULL)
+                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
+            break;
+
+        case NEA_HW2D_BG_BITMAP_8:
+            if (header->gfxAttr != 8 || header->mapAttr != GRF_BGFMT_NO_DATA)
+            {
+                NEA_DebugPrint("GRF format mismatch for 8bpp bitmap BG");
+                return -1;
+            }
+            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
+            break;
+
+        case NEA_HW2D_BG_BITMAP_16:
+            if (header->gfxAttr != 16 || header->mapAttr != GRF_BGFMT_NO_DATA)
+            {
+                NEA_DebugPrint("GRF format mismatch for 16bpp bitmap BG");
+                return -1;
+            }
+            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
+            break;
+
+        default:
+            NEA_DebugPrint("Unknown BG type");
+            return -1;
+    }
+
+    if (palDst != NULL)
+        NEA_Hw2DBGLoadPalette(bg, palDst, palSize / 2, palette_slot);
+
+    return 0;
+}
+#endif // NEA_BLOCKSDS
+
 int NEA_Hw2DBGLoadGRFFAT(NEA_Hw2DBG *bg, const char *path, int palette_slot)
 {
 #ifndef NEA_BLOCKSDS
@@ -979,7 +1084,6 @@ int NEA_Hw2DBGLoadGRFFAT(NEA_Hw2DBG *bg, const char *path, int palette_slot)
     NEA_AssertPointer(path, "NULL path");
     NEA_Assert(bg->used, "BG not active");
 
-    int ret = -1;
     void *gfxDst = NULL;
     void *mapDst = NULL;
     void *palDst = NULL;
@@ -993,78 +1097,119 @@ int NEA_Hw2DBGLoadGRFFAT(NEA_Hw2DBG *bg, const char *path, int palette_slot)
     if (err != GRF_NO_ERROR)
     {
         NEA_DebugPrint("Couldn't load GRF file: %d", err);
-        goto cleanup;
+        free(gfxDst);
+        free(mapDst);
+        free(palDst);
+        return -1;
     }
 
-    if (gfxDst == NULL)
-    {
-        NEA_DebugPrint("No graphics found in GRF file");
-        goto cleanup;
-    }
+    int ret = ne_hw2d_bg_grf_apply(bg, &header, gfxDst, gfxSize,
+                                   mapDst, mapSize, palDst, palSize,
+                                   palette_slot);
 
-    switch (bg->type)
-    {
-        case NEA_HW2D_BG_TILED_4BPP:
-            if (header.gfxAttr != 4 ||
-                (header.mapAttr != GRF_BGFMT_SBB_4BPP &&
-                 header.mapAttr != GRF_BGFMT_FLAT_4BPP))
-            {
-                NEA_DebugPrint("GRF format mismatch for tiled 4bpp BG");
-                goto cleanup;
-            }
-            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
-            if (mapDst != NULL)
-                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
-            break;
-
-        case NEA_HW2D_BG_TILED_8BPP:
-            if (header.gfxAttr != 8 ||
-                (header.mapAttr != GRF_BGFMT_SBB_8BPP &&
-                 header.mapAttr != GRF_BGFMT_AFF_8BPP &&
-                 header.mapAttr != GRF_BGFMT_FLAT_8BPP))
-            {
-                NEA_DebugPrint("GRF format mismatch for tiled 8bpp BG");
-                goto cleanup;
-            }
-            NEA_Hw2DBGLoadTiles(bg, gfxDst, gfxSize);
-            if (mapDst != NULL)
-                NEA_Hw2DBGLoadMap(bg, mapDst, mapSize);
-            break;
-
-        case NEA_HW2D_BG_BITMAP_8:
-            if (header.gfxAttr != 8 || header.mapAttr != GRF_BGFMT_NO_DATA)
-            {
-                NEA_DebugPrint("GRF format mismatch for 8bpp bitmap BG");
-                goto cleanup;
-            }
-            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
-            break;
-
-        case NEA_HW2D_BG_BITMAP_16:
-            if (header.gfxAttr != 16 || header.mapAttr != GRF_BGFMT_NO_DATA)
-            {
-                NEA_DebugPrint("GRF format mismatch for 16bpp bitmap BG");
-                goto cleanup;
-            }
-            NEA_Hw2DBGLoadBitmap(bg, gfxDst, gfxSize);
-            break;
-
-        default:
-            NEA_DebugPrint("Unknown BG type");
-            goto cleanup;
-    }
-
-    if (palDst != NULL)
-        NEA_Hw2DBGLoadPalette(bg, palDst, palSize / 2, palette_slot);
-
-    ret = 0;
-
-cleanup:
     free(gfxDst);
     free(mapDst);
     free(palDst);
     return ret;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous BG loading
+// ---------------------------------------------------------------------------
+
+// What a plain (non-GRF) asynchronous BG load has to do with the data once it
+// is in RAM.
+typedef enum {
+    NE_ASYNC_BG_TILES,
+    NE_ASYNC_BG_MAP,
+    NE_ASYNC_BG_BITMAP
+} ne_async_bg_kind;
+
+// Parameters of an asynchronous BG load.
+typedef struct {
+    NEA_Hw2DBG *bg;
+    ne_async_bg_kind kind;
+} ne_async_bg_param;
+
+// Runs on the main thread during the vertical blank: copies the loaded data to
+// VRAM with the regular (synchronous) loader.
+static void ne_async_bg_finalize(NEA_AsyncFile *job)
+{
+    ne_async_bg_param *p = __NEA_AsyncParam(job);
+
+    size_t size = 0;
+    char *buffer = __NEA_AsyncBuffer(job, &size);
+
+    int ret;
+    switch (p->kind)
+    {
+        case NE_ASYNC_BG_TILES:
+            ret = NEA_Hw2DBGLoadTiles(p->bg, buffer, size);
+            break;
+        case NE_ASYNC_BG_MAP:
+            ret = NEA_Hw2DBGLoadMap(p->bg, buffer, size);
+            break;
+        default:
+            ret = NEA_Hw2DBGLoadBitmap(p->bg, buffer, size);
+            break;
+    }
+
+    // The Hw2D loaders return 0 on success, the async system wants 1.
+    __NEA_AsyncSetResult(job, ret == 0);
+}
+
+// Queues one of the three plain BG loads. They only differ in the loader the
+// finalize step calls.
+static NEA_AsyncFile *ne_async_bg_queue(NEA_Hw2DBG *bg, const char *path,
+                                        ne_async_bg_kind kind)
+{
+    ne_async_bg_param *p = malloc(sizeof(ne_async_bg_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Out of memory");
+        return NULL;
+    }
+
+    p->bg = bg;
+    p->kind = kind;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_bg_finalize,
+                                          NULL, p, bg);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
+NEA_AsyncFile *NEA_Hw2DBGLoadTilesFATAsync(NEA_Hw2DBG *bg, const char *path)
+{
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(bg->used, "BG not active");
+    NEA_Assert(bg->type <= NEA_HW2D_BG_TILED_8BPP, "Not a tiled BG");
+
+    return ne_async_bg_queue(bg, path, NE_ASYNC_BG_TILES);
+}
+
+NEA_AsyncFile *NEA_Hw2DBGLoadMapFATAsync(NEA_Hw2DBG *bg, const char *path)
+{
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(bg->used, "BG not active");
+    NEA_Assert(bg->map_ptr != NULL, "Not a tiled BG");
+
+    return ne_async_bg_queue(bg, path, NE_ASYNC_BG_MAP);
+}
+
+NEA_AsyncFile *NEA_Hw2DBGLoadBitmapFATAsync(NEA_Hw2DBG *bg, const char *path)
+{
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(bg->used, "BG not active");
+    NEA_Assert(bg->type >= NEA_HW2D_BG_BITMAP_8, "Not a bitmap BG");
+
+    return ne_async_bg_queue(bg, path, NE_ASYNC_BG_BITMAP);
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1322,8 @@ void NEA_Hw2DOBJDelete(NEA_Hw2DOBJ *obj)
     if (obj == NULL || !obj->used)
         return;
 
+    __NEA_AsyncCancelTarget(obj);
+
     OamState *oam = (obj->engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
 
     // Shared-asset OBJs don't own their gfx — just release the ref count.
@@ -1220,36 +1367,14 @@ int NEA_Hw2DOBJLoadGfxFAT(NEA_Hw2DOBJ *obj, const char *path)
     NEA_AssertPointer(path, "NULL path");
     NEA_Assert(obj->used, "OBJ not active");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
 
-    fread(buf, 1, size, f);
-    fclose(f);
-
-    size_t copy = (size < (size_t)obj->gfx_size) ? size : (size_t)obj->gfx_size;
-    ne_vram_copy(obj->gfx, buf, copy);
-    obj->num_frames = size / obj->gfx_size;
-    if (obj->num_frames < 1)
-        obj->num_frames = 1;
-
+    int ret = NEA_Hw2DOBJLoadGfx(obj, buf, size);
     free(buf);
-    return 0;
+    return ret;
 }
 
 int NEA_Hw2DOBJLoadPalette(NEA_Hw2DEngine engine, const void *data,
@@ -1279,27 +1404,10 @@ int NEA_Hw2DOBJLoadPaletteFAT(NEA_Hw2DEngine engine, const char *path, int slot)
 {
     NEA_AssertPointer(path, "NULL path");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
-
-    fread(buf, 1, size, f);
-    fclose(f);
 
     // RGB15 palettes are 2 bytes per color.
     int ret = NEA_Hw2DOBJLoadPalette(engine, buf, size / 2, slot);
@@ -1308,57 +1416,39 @@ int NEA_Hw2DOBJLoadPaletteFAT(NEA_Hw2DEngine engine, const char *path, int slot)
     return ret;
 }
 
-int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
+#ifdef NEA_BLOCKSDS
+// Applies the data decoded from a GRF file to an OBJ sprite. The decoded buffers
+// are not freed by this function.
+//
+// Shared by NEA_Hw2DOBJLoadGRFFAT() and its asynchronous version.
+static int ne_hw2d_obj_grf_apply(NEA_Hw2DOBJ *obj, const GRFHeader *header,
+                                 void *gfxDst, size_t gfxSize,
+                                 void *palDst, size_t palSize,
+                                 int palette_slot)
 {
-#ifndef NEA_BLOCKSDS
-    (void)obj;
-    (void)path;
-    (void)palette_slot;
-    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
-    return -1;
-#else
-    NEA_AssertPointer(obj, "NULL obj");
-    NEA_AssertPointer(path, "NULL path");
-    NEA_Assert(obj->used, "OBJ not active");
-
-    int ret = -1;
-    void *gfxDst = NULL;
-    void *palDst = NULL;
-    size_t gfxSize = 0;
-    size_t palSize = 0;
-
-    GRFHeader header = { 0 };
-    GRFError err = grfLoadPath(path, &header, &gfxDst, &gfxSize,
-                               NULL, NULL, &palDst, &palSize);
-    if (err != GRF_NO_ERROR)
-    {
-        NEA_DebugPrint("Couldn't load GRF file: %d", err);
-        goto cleanup;
-    }
-
     if (gfxDst == NULL)
     {
         NEA_DebugPrint("No graphics found in GRF file");
-        goto cleanup;
+        return -1;
     }
 
     int expected_bpp = (obj->color == NEA_OBJ_COLOR_16) ? 4 : 8;
-    if (header.gfxAttr != expected_bpp)
+    if (header->gfxAttr != expected_bpp)
     {
         NEA_DebugPrint("GRF color depth mismatch for OBJ sprite");
-        goto cleanup;
+        return -1;
     }
 
     // The OBJ's hardware size is fixed at creation; the GRF must match it.
     // Without this check a mismatch silently over-reads the GRF buffer (decl
     // larger) or loads a cropped image (decl smaller), which renders as a
     // wrong-size / wrong-ratio sprite.
-    if (oamDimensionsToSize(header.gfxWidth, header.gfxHeight)
+    if (oamDimensionsToSize(header->gfxWidth, header->gfxHeight)
         != ne_hw2d_obj_size(obj->nea_size))
     {
         NEA_DebugPrint("OBJ GRF size mismatch: file is %dx%d",
-                       (int)header.gfxWidth, (int)header.gfxHeight);
-        goto cleanup;
+                       (int)header->gfxWidth, (int)header->gfxHeight);
+        return -1;
     }
 
     NEA_Hw2DOBJLoadGfx(obj, gfxDst, gfxSize);
@@ -1385,9 +1475,42 @@ int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
         NEA_Hw2DOBJLoadPalette(obj->engine, palDst, num_colors, palette_slot);
     }
 
-    ret = 0;
+    return 0;
+}
+#endif // NEA_BLOCKSDS
 
-cleanup:
+int NEA_Hw2DOBJLoadGRFFAT(NEA_Hw2DOBJ *obj, const char *path, int palette_slot)
+{
+#ifndef NEA_BLOCKSDS
+    (void)obj;
+    (void)path;
+    (void)palette_slot;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return -1;
+#else
+    NEA_AssertPointer(obj, "NULL obj");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(obj->used, "OBJ not active");
+
+    void *gfxDst = NULL;
+    void *palDst = NULL;
+    size_t gfxSize = 0;
+    size_t palSize = 0;
+
+    GRFHeader header = { 0 };
+    GRFError err = grfLoadPath(path, &header, &gfxDst, &gfxSize,
+                               NULL, NULL, &palDst, &palSize);
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't load GRF file: %d", err);
+        free(gfxDst);
+        free(palDst);
+        return -1;
+    }
+
+    int ret = ne_hw2d_obj_grf_apply(obj, &header, gfxDst, gfxSize,
+                                    palDst, palSize, palette_slot);
+
     free(gfxDst);
     free(palDst);
     return ret;
@@ -1655,6 +1778,8 @@ void NEA_Hw2DOBJAssetDelete(NEA_Hw2DOBJAsset *asset)
         return;
     }
 
+    __NEA_AsyncCancelTarget(asset);
+
     OamState *oam = (asset->engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
     if (asset->gfx)
         oamFreeGfx(oam, asset->gfx);
@@ -1690,27 +1815,10 @@ int NEA_Hw2DOBJAssetLoadGfxFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     NEA_AssertPointer(path, "NULL path");
     NEA_Assert(asset->used, "Asset not active");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
-
-    fread(buf, 1, size, f);
-    fclose(f);
 
     int ret = NEA_Hw2DOBJAssetLoadGfx(asset, buf, size);
     free(buf);
@@ -1768,27 +1876,10 @@ int NEA_Hw2DOBJAssetLoadPaletteFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     NEA_AssertPointer(path, "NULL path");
     NEA_Assert(asset->used, "Asset not active");
 
-    FILE *f = fopen(path, "rb");
-    if (f == NULL)
-    {
-        NEA_DebugPrint("Failed to open: %s", path);
-        return -1;
-    }
-
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    void *buf = malloc(size);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
-    {
-        fclose(f);
-        NEA_DebugPrint("Out of memory");
         return -1;
-    }
-
-    fread(buf, 1, size, f);
-    fclose(f);
 
     // RGB15 palettes are 2 bytes per color.
     int ret = NEA_Hw2DOBJAssetLoadPalette(asset, buf, size / 2);
@@ -1796,6 +1887,53 @@ int NEA_Hw2DOBJAssetLoadPaletteFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     free(buf);
     return ret;
 }
+
+#ifdef NEA_BLOCKSDS
+// Applies the data decoded from a GRF file to a shared OBJ asset. The decoded
+// buffers are not freed by this function.
+//
+// Shared by NEA_Hw2DOBJAssetLoadGRFFAT() and its asynchronous version.
+static int ne_hw2d_asset_grf_apply(NEA_Hw2DOBJAsset *asset,
+                                   const GRFHeader *header,
+                                   void *gfxDst, size_t gfxSize,
+                                   void *palDst, size_t palSize)
+{
+    if (gfxDst == NULL)
+    {
+        NEA_DebugPrint("No graphics found in GRF file");
+        return -1;
+    }
+
+    int expected_bpp = (asset->color == NEA_OBJ_COLOR_16) ? 4 : 8;
+    if (header->gfxAttr != expected_bpp)
+    {
+        NEA_DebugPrint("GRF color depth mismatch for OBJ asset");
+        return -1;
+    }
+
+    // The asset's hardware size is fixed at creation; the GRF must match it.
+    // Without this check a mismatch silently over-reads the GRF buffer (decl
+    // larger) or loads a cropped image (decl smaller), which renders as a
+    // wrong-size / wrong-ratio sprite.
+    if (oamDimensionsToSize(header->gfxWidth, header->gfxHeight)
+        != ne_hw2d_obj_size(asset->size))
+    {
+        NEA_DebugPrint("OBJ asset GRF size mismatch: file is %dx%d",
+                       (int)header->gfxWidth, (int)header->gfxHeight);
+        return -1;
+    }
+
+    NEA_Hw2DOBJAssetLoadGfx(asset, gfxDst, gfxSize);
+
+    if (palDst != NULL)
+    {
+        if (NEA_Hw2DOBJAssetLoadPalette(asset, palDst, palSize / 2) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+#endif // NEA_BLOCKSDS
 
 int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
 {
@@ -1809,7 +1947,6 @@ int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     NEA_AssertPointer(path, "NULL path");
     NEA_Assert(asset->used, "Asset not active");
 
-    int ret = -1;
     void *gfxDst = NULL;
     void *palDst = NULL;
     size_t gfxSize = 0;
@@ -1821,45 +1958,14 @@ int NEA_Hw2DOBJAssetLoadGRFFAT(NEA_Hw2DOBJAsset *asset, const char *path)
     if (err != GRF_NO_ERROR)
     {
         NEA_DebugPrint("Couldn't load GRF file: %d", err);
-        goto cleanup;
+        free(gfxDst);
+        free(palDst);
+        return -1;
     }
 
-    if (gfxDst == NULL)
-    {
-        NEA_DebugPrint("No graphics found in GRF file");
-        goto cleanup;
-    }
+    int ret = ne_hw2d_asset_grf_apply(asset, &header, gfxDst, gfxSize,
+                                      palDst, palSize);
 
-    int expected_bpp = (asset->color == NEA_OBJ_COLOR_16) ? 4 : 8;
-    if (header.gfxAttr != expected_bpp)
-    {
-        NEA_DebugPrint("GRF color depth mismatch for OBJ asset");
-        goto cleanup;
-    }
-
-    // The asset's hardware size is fixed at creation; the GRF must match it.
-    // Without this check a mismatch silently over-reads the GRF buffer (decl
-    // larger) or loads a cropped image (decl smaller), which renders as a
-    // wrong-size / wrong-ratio sprite.
-    if (oamDimensionsToSize(header.gfxWidth, header.gfxHeight)
-        != ne_hw2d_obj_size(asset->size))
-    {
-        NEA_DebugPrint("OBJ asset GRF size mismatch: file is %dx%d",
-                       (int)header.gfxWidth, (int)header.gfxHeight);
-        goto cleanup;
-    }
-
-    NEA_Hw2DOBJAssetLoadGfx(asset, gfxDst, gfxSize);
-
-    if (palDst != NULL)
-    {
-        if (NEA_Hw2DOBJAssetLoadPalette(asset, palDst, palSize / 2) != 0)
-            goto cleanup;
-    }
-
-    ret = 0;
-
-cleanup:
     free(gfxDst);
     free(palDst);
     return ret;
@@ -2175,6 +2281,8 @@ void NEA_Hw2DTextCtxDelete(NEA_Hw2DTextCtx *ctx)
     if (ctx == NULL || !ctx->used)
         return;
 
+    __NEA_AsyncCancelTarget(ctx);
+
     DSF_RendererFree(ctx->renderer);
 
     if (ctx->owns_font_handle && ctx->font_handle != 0)
@@ -2271,6 +2379,66 @@ int NEA_Hw2DTextCtxBitmapSet(NEA_Hw2DTextCtx *ctx,
     return 0;
 }
 
+#ifdef NEA_BLOCKSDS
+// Applies the data decoded from a GRF file to a text context as its font bitmap.
+//
+// On success the context takes ownership of both decoded buffers, and they are
+// cleared in the caller's variables so that its cleanup leaves them alone. On
+// failure they are left untouched and the caller still owns them.
+//
+// Shared by NEA_Hw2DTextCtxBitmapLoadGRF() and its asynchronous version.
+static int ne_hw2d_textctx_grf_apply(NEA_Hw2DTextCtx *ctx,
+                                     const GRFHeader *header,
+                                     void **gfxDst,
+                                     void **palDst, size_t palSize)
+{
+    if (*gfxDst == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: no gfx in GRF");
+        return -1;
+    }
+
+    // Validate the GRF's color depth against the ctx's BG format.
+    bool ok = (ctx->fmt == DSF_BMP_RGBA   && header->gfxAttr == 16)
+           || (ctx->fmt == DSF_BMP_RGB256 && header->gfxAttr == 8);
+    if (!ok)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: GRF/BG fmt mismatch "
+                       "(gfxAttr=%u)", header->gfxAttr);
+        return -1;
+    }
+
+    // 8bpp requires a palette; 16bpp ignores it.
+    if (ctx->fmt == DSF_BMP_RGB256 && *palDst == NULL)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: 8bpp font needs palette");
+        return -1;
+    }
+
+    dsf_error derr = DSF_FontTextureSet(ctx->font_handle, *gfxDst,
+                                         header->gfxWidth, header->gfxHeight,
+                                         ctx->fmt);
+    if (derr != DSF_NO_ERROR)
+    {
+        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: FontTextureSet %d", derr);
+        return -1;
+    }
+
+    ne_hw2d_text_copy_pal(ctx, *palDst, palSize);
+
+    // Release any previously-owned buffers, take ownership of the new ones.
+    free(ctx->owned_bitmap);
+    free(ctx->owned_palette);
+    ctx->owned_bitmap = *gfxDst;
+    ctx->owned_palette = *palDst;
+    ctx->bitmap_set = true;
+
+    *gfxDst = NULL;
+    *palDst = NULL;
+    return 0;
+}
+#endif // NEA_BLOCKSDS
+
 int NEA_Hw2DTextCtxBitmapLoadGRF(NEA_Hw2DTextCtx *ctx, const char *path)
 {
 #ifndef NEA_BLOCKSDS
@@ -2297,53 +2465,14 @@ int NEA_Hw2DTextCtxBitmapLoadGRF(NEA_Hw2DTextCtx *ctx, const char *path)
         free(palDst);
         return -1;
     }
-    if (gfxDst == NULL)
-    {
-        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: no gfx in GRF");
-        free(palDst);
-        return -1;
-    }
 
-    // Validate the GRF's color depth against the ctx's BG format.
-    bool ok = (ctx->fmt == DSF_BMP_RGBA   && header.gfxAttr == 16)
-           || (ctx->fmt == DSF_BMP_RGB256 && header.gfxAttr == 8);
-    if (!ok)
-    {
-        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: GRF/BG fmt mismatch "
-                       "(gfxAttr=%u)", header.gfxAttr);
-        free(gfxDst);
-        free(palDst);
-        return -1;
-    }
+    int ret = ne_hw2d_textctx_grf_apply(ctx, &header, &gfxDst,
+                                        &palDst, palSize);
 
-    // 8bpp requires a palette; 16bpp ignores it.
-    if (ctx->fmt == DSF_BMP_RGB256 && palDst == NULL)
-    {
-        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: 8bpp font needs palette");
-        free(gfxDst);
-        return -1;
-    }
-
-    dsf_error derr = DSF_FontTextureSet(ctx->font_handle, gfxDst,
-                                         header.gfxWidth, header.gfxHeight,
-                                         ctx->fmt);
-    if (derr != DSF_NO_ERROR)
-    {
-        NEA_DebugPrint("NEA_Hw2DTextCtxBitmapLoadGRF: FontTextureSet %d", derr);
-        free(gfxDst);
-        free(palDst);
-        return -1;
-    }
-
-    ne_hw2d_text_copy_pal(ctx, palDst, palSize);
-
-    // Release any previously-owned buffers, take ownership of the new ones.
-    free(ctx->owned_bitmap);
-    free(ctx->owned_palette);
-    ctx->owned_bitmap = gfxDst;
-    ctx->owned_palette = palDst;
-    ctx->bitmap_set = true;
-    return 0;
+    // Both are NULL if the context took them over.
+    free(gfxDst);
+    free(palDst);
+    return ret;
 #endif
 }
 
@@ -2617,4 +2746,411 @@ int NEA_Hw2DTextCtxPrintf(NEA_Hw2DTextCtx *ctx, const char *fmt, ...)
     dsf_error err = DSF_StringRender(ctx->font_handle, ctx->renderer, buf);
     free(buf);
     return ne_hw2d_text_map_err(err, "Printf");
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous OBJ, asset and text context loading
+// ---------------------------------------------------------------------------
+
+// What kind of plain (non-GRF) asynchronous load this is.
+typedef enum {
+    NE_ASYNC_HW2D_OBJ_GFX,
+    NE_ASYNC_HW2D_OBJ_PALETTE,
+    NE_ASYNC_HW2D_ASSET_GFX,
+    NE_ASYNC_HW2D_ASSET_PALETTE,
+    NE_ASYNC_HW2D_TEXTCTX_METADATA
+} ne_async_hw2d_kind;
+
+// Parameters of a plain asynchronous OBJ / asset / text context load.
+typedef struct {
+    ne_async_hw2d_kind kind;
+    union {
+        NEA_Hw2DOBJ *obj;
+        NEA_Hw2DOBJAsset *asset;
+        NEA_Hw2DTextCtx *ctx;
+    } target;
+    NEA_Hw2DEngine engine;  // NE_ASYNC_HW2D_OBJ_PALETTE only
+    int palette_slot;       // NE_ASYNC_HW2D_OBJ_PALETTE only
+} ne_async_hw2d_param;
+
+// Runs on the main thread during the vertical blank: hands the loaded data to
+// the regular (synchronous) loader.
+static void ne_async_hw2d_finalize(NEA_AsyncFile *job)
+{
+    ne_async_hw2d_param *p = __NEA_AsyncParam(job);
+
+    size_t size = 0;
+    char *buffer = __NEA_AsyncBuffer(job, &size);
+
+    int ret;
+    switch (p->kind)
+    {
+        case NE_ASYNC_HW2D_OBJ_GFX:
+            ret = NEA_Hw2DOBJLoadGfx(p->target.obj, buffer, size);
+            break;
+
+        case NE_ASYNC_HW2D_OBJ_PALETTE:
+            // RGB15 palettes are 2 bytes per color.
+            ret = NEA_Hw2DOBJLoadPalette(p->engine, buffer, size / 2,
+                                         p->palette_slot);
+            break;
+
+        case NE_ASYNC_HW2D_ASSET_GFX:
+            ret = NEA_Hw2DOBJAssetLoadGfx(p->target.asset, buffer, size);
+            break;
+
+        case NE_ASYNC_HW2D_ASSET_PALETTE:
+            ret = NEA_Hw2DOBJAssetLoadPalette(p->target.asset, buffer,
+                                              size / 2);
+            break;
+
+        default:
+            ret = NEA_Hw2DTextCtxMetadataLoadMemory(p->target.ctx, buffer,
+                                                    size);
+            break;
+    }
+
+    // The Hw2D loaders return 0 on success, the async system wants 1.
+    __NEA_AsyncSetResult(job, ret == 0);
+}
+
+// Queues a plain asynchronous load. 'target' is the object the finalize step
+// writes into, so that deleting it aborts the load; it is NULL for the OBJ
+// palette loader, which writes into the global OBJ palette region instead.
+static NEA_AsyncFile *ne_async_hw2d_queue(const char *path,
+                                          const ne_async_hw2d_param *params,
+                                          void *target)
+{
+    ne_async_hw2d_param *p = malloc(sizeof(ne_async_hw2d_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Out of memory");
+        return NULL;
+    }
+
+    *p = *params;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, NULL, ne_async_hw2d_finalize,
+                                          NULL, p, target);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJLoadGfxFATAsync(NEA_Hw2DOBJ *obj, const char *path)
+{
+    NEA_AssertPointer(obj, "NULL obj");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(obj->used, "OBJ not active");
+
+    ne_async_hw2d_param params = { 0 };
+    params.kind = NE_ASYNC_HW2D_OBJ_GFX;
+    params.target.obj = obj;
+
+    return ne_async_hw2d_queue(path, &params, obj);
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJLoadPaletteFATAsync(NEA_Hw2DEngine engine,
+                                              const char *path, int slot)
+{
+    NEA_AssertPointer(path, "NULL path");
+
+    ne_async_hw2d_param params = { 0 };
+    params.kind = NE_ASYNC_HW2D_OBJ_PALETTE;
+    params.engine = engine;
+    params.palette_slot = slot;
+
+    // There is no object to hang this load off: it writes into the engine's OBJ
+    // palette region. Target the 2D system itself, so that NEA_Hw2DSystemEnd()
+    // aborts it before the VRAM banks are released.
+    return ne_async_hw2d_queue(path, &params, &ne_hw2d_state);
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadGfxFATAsync(NEA_Hw2DOBJAsset *asset,
+                                               const char *path)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    ne_async_hw2d_param params = { 0 };
+    params.kind = NE_ASYNC_HW2D_ASSET_GFX;
+    params.target.asset = asset;
+
+    return ne_async_hw2d_queue(path, &params, asset);
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadPaletteFATAsync(NEA_Hw2DOBJAsset *asset,
+                                                   const char *path)
+{
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    ne_async_hw2d_param params = { 0 };
+    params.kind = NE_ASYNC_HW2D_ASSET_PALETTE;
+    params.target.asset = asset;
+
+    return ne_async_hw2d_queue(path, &params, asset);
+}
+
+NEA_AsyncFile *NEA_Hw2DTextCtxMetadataLoadFATAsync(NEA_Hw2DTextCtx *ctx,
+                                                   const char *path)
+{
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    ne_async_hw2d_param params = { 0 };
+    params.kind = NE_ASYNC_HW2D_TEXTCTX_METADATA;
+    params.target.ctx = ctx;
+
+    return ne_async_hw2d_queue(path, &params, ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous GRF loading
+// ---------------------------------------------------------------------------
+
+#ifdef NEA_BLOCKSDS
+
+// Which kind of object an asynchronous GRF load targets.
+typedef enum {
+    NE_ASYNC_GRF_BG,
+    NE_ASYNC_GRF_OBJ,
+    NE_ASYNC_GRF_ASSET,
+    NE_ASYNC_GRF_TEXTCTX
+} ne_async_grf_kind;
+
+// Parameters of an asynchronous GRF load. The decoded buffers are produced by
+// the worker thread and consumed (or freed) on the main thread.
+typedef struct {
+    ne_async_grf_kind kind;
+    union {
+        NEA_Hw2DBG *bg;
+        NEA_Hw2DOBJ *obj;
+        NEA_Hw2DOBJAsset *asset;
+        NEA_Hw2DTextCtx *ctx;
+    } target;
+    int palette_slot;
+
+    GRFHeader header;
+    void *gfxDst;       // Decoded buffers (owned)
+    void *mapDst;
+    void *palDst;
+    size_t gfxSize;
+    size_t mapSize;
+    size_t palSize;
+} ne_async_hw2d_grf_param;
+
+// Runs in the worker thread: decodes the GRF file from the RAM buffer. This is
+// the expensive part (decompression), which is why it doesn't run on the main
+// thread like the finalize step does.
+static bool ne_async_hw2d_grf_stage2(NEA_AsyncFile *job)
+{
+    ne_async_hw2d_grf_param *p = __NEA_AsyncParam(job);
+
+    size_t raw_size = 0;
+    char *raw = __NEA_AsyncBuffer(job, &raw_size);
+
+    // grfLoadMemEx() trusts the lengths inside the file, so check the buffer
+    // really holds a complete GRF before letting it walk off the end.
+    if (!__NEA_GRFBufferIsSane(raw, raw_size))
+    {
+        NEA_DebugPrint("Not a complete GRF file: %s", "async buffer");
+        __NEA_AsyncFreeBuffer(job);
+        return false;
+    }
+
+    // Only BGs can use a map; asking for one everywhere else would decode a
+    // chunk that is then thrown away.
+    bool wants_map = (p->kind == NE_ASYNC_GRF_BG);
+
+    GRFError err = grfLoadMemEx(raw, &p->header,
+                                &p->gfxDst, &p->gfxSize,
+                                wants_map ? &p->mapDst : NULL,
+                                wants_map ? &p->mapSize : NULL,
+                                &p->palDst, &p->palSize,
+                                NULL, NULL, NULL, NULL);
+
+    // The raw GRF file isn't needed once it has been decoded.
+    __NEA_AsyncFreeBuffer(job);
+
+    if (err != GRF_NO_ERROR)
+    {
+        NEA_DebugPrint("Couldn't decode GRF file: %d", err);
+        return false;
+    }
+
+    return true;
+}
+
+static void ne_async_hw2d_grf_finalize(NEA_AsyncFile *job)
+{
+    ne_async_hw2d_grf_param *p = __NEA_AsyncParam(job);
+
+    int ret;
+    switch (p->kind)
+    {
+        case NE_ASYNC_GRF_BG:
+            ret = ne_hw2d_bg_grf_apply(p->target.bg, &p->header,
+                                       p->gfxDst, p->gfxSize,
+                                       p->mapDst, p->mapSize,
+                                       p->palDst, p->palSize,
+                                       p->palette_slot);
+            break;
+
+        case NE_ASYNC_GRF_OBJ:
+            ret = ne_hw2d_obj_grf_apply(p->target.obj, &p->header,
+                                        p->gfxDst, p->gfxSize,
+                                        p->palDst, p->palSize,
+                                        p->palette_slot);
+            break;
+
+        case NE_ASYNC_GRF_ASSET:
+            ret = ne_hw2d_asset_grf_apply(p->target.asset, &p->header,
+                                          p->gfxDst, p->gfxSize,
+                                          p->palDst, p->palSize);
+            break;
+
+        default:
+            // On success the context takes over gfxDst and palDst and clears
+            // them here, so the frees below leave them alone.
+            ret = ne_hw2d_textctx_grf_apply(p->target.ctx, &p->header,
+                                            &p->gfxDst, &p->palDst,
+                                            p->palSize);
+            break;
+    }
+
+    // The Hw2D loaders return 0 on success, the async system wants 1.
+    __NEA_AsyncSetResult(job, ret == 0);
+
+    free(p->gfxDst);
+    free(p->mapDst);
+    free(p->palDst);
+    p->gfxDst = NULL;
+    p->mapDst = NULL;
+    p->palDst = NULL;
+}
+
+// Runs when a job is dropped before its finalize step, so that the buffers the
+// worker decoded aren't leaked.
+static void ne_async_hw2d_grf_discard(NEA_AsyncFile *job)
+{
+    ne_async_hw2d_grf_param *p = __NEA_AsyncParam(job);
+    free(p->gfxDst);
+    free(p->mapDst);
+    free(p->palDst);
+}
+
+static NEA_AsyncFile *ne_async_hw2d_grf_queue(
+        const char *path, const ne_async_hw2d_grf_param *params, void *target)
+{
+    ne_async_hw2d_grf_param *p = calloc(1, sizeof(ne_async_hw2d_grf_param));
+    if (p == NULL)
+    {
+        NEA_DebugPrint("Out of memory");
+        return NULL;
+    }
+
+    *p = *params;
+
+    NEA_AsyncFile *job = __NEA_AsyncQueue(path, ne_async_hw2d_grf_stage2,
+                                          ne_async_hw2d_grf_finalize,
+                                          ne_async_hw2d_grf_discard, p, target);
+    if (job == NULL)
+        free(p);
+
+    return job;
+}
+
+#endif // NEA_BLOCKSDS
+
+NEA_AsyncFile *NEA_Hw2DBGLoadGRFFATAsync(NEA_Hw2DBG *bg, const char *path,
+                                         int palette_slot)
+{
+#ifndef NEA_BLOCKSDS
+    (void)bg;
+    (void)path;
+    (void)palette_slot;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return NULL;
+#else
+    NEA_AssertPointer(bg, "NULL bg");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(bg->used, "BG not active");
+
+    ne_async_hw2d_grf_param params = { 0 };
+    params.kind = NE_ASYNC_GRF_BG;
+    params.target.bg = bg;
+    params.palette_slot = palette_slot;
+
+    return ne_async_hw2d_grf_queue(path, &params, bg);
+#endif
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJLoadGRFFATAsync(NEA_Hw2DOBJ *obj, const char *path,
+                                          int palette_slot)
+{
+#ifndef NEA_BLOCKSDS
+    (void)obj;
+    (void)path;
+    (void)palette_slot;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return NULL;
+#else
+    NEA_AssertPointer(obj, "NULL obj");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(obj->used, "OBJ not active");
+
+    ne_async_hw2d_grf_param params = { 0 };
+    params.kind = NE_ASYNC_GRF_OBJ;
+    params.target.obj = obj;
+    params.palette_slot = palette_slot;
+
+    return ne_async_hw2d_grf_queue(path, &params, obj);
+#endif
+}
+
+NEA_AsyncFile *NEA_Hw2DOBJAssetLoadGRFFATAsync(NEA_Hw2DOBJAsset *asset,
+                                               const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)asset;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return NULL;
+#else
+    NEA_AssertPointer(asset, "NULL asset");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(asset->used, "Asset not active");
+
+    ne_async_hw2d_grf_param params = { 0 };
+    params.kind = NE_ASYNC_GRF_ASSET;
+    params.target.asset = asset;
+
+    return ne_async_hw2d_grf_queue(path, &params, asset);
+#endif
+}
+
+NEA_AsyncFile *NEA_Hw2DTextCtxBitmapLoadGRFAsync(NEA_Hw2DTextCtx *ctx,
+                                                 const char *path)
+{
+#ifndef NEA_BLOCKSDS
+    (void)ctx;
+    (void)path;
+    NEA_DebugPrint("%s only supported in BlocksDS", __func__);
+    return NULL;
+#else
+    NEA_AssertPointer(ctx, "NULL ctx");
+    NEA_AssertPointer(path, "NULL path");
+    NEA_Assert(ctx->used, "ctx not active");
+
+    ne_async_hw2d_grf_param params = { 0 };
+    params.kind = NE_ASYNC_GRF_TEXTCTX;
+    params.target.ctx = ctx;
+
+    return ne_async_hw2d_grf_queue(path, &params, ctx);
+#endif
 }
