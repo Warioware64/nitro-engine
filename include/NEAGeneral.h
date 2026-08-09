@@ -472,7 +472,10 @@ typedef enum {
     ///
     /// Does nothing unless the project links `-lNEA_box3d` and has created a
     /// world with NEA_Phys3DWorldInit(); see NEAPhysics3D.h.
-    NEA_UPDATE_PHYS3D = BIT(10)
+    NEA_UPDATE_PHYS3D = BIT(10),
+    /// Advances background tasks and runs the completion callbacks of the ones
+    /// that have finished (calls NEA_ThreadProcess()).
+    NEA_UPDATE_TASKS = BIT(11)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

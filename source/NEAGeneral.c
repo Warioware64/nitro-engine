@@ -77,6 +77,10 @@ void NEA_End(void)
     // Stop any background asset loading before tearing down video hardware.
     __NEA_AsyncEnd();
 
+    // Same for background tasks: a completion callback that ran after this
+    // point would be writing into VRAM banks that have been released.
+    NEA_ThreadSystemEnd();
+
     NEA_ParticleSystemEnd();
 
     vramSetBankA(VRAM_A_LCD);
@@ -1743,6 +1747,11 @@ static int NEA_FPS;
 
 void NEA_VBLFunc(void)
 {
+    // Before the early return, and before anything else: this interrupt is the
+    // only code that still runs when a background task stops yielding, so it is
+    // the only place a stalled task can be noticed at all.
+    __NEA_ThreadStallCheck();
+
     if (ne_execution_mode == NEA_ModeUninitialized)
         return;
 
@@ -2032,6 +2041,11 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     // now, during the vertical blank, where it is safe to touch VRAM.
     if (flags & NEA_UPDATE_ASSETS)
         NEA_AsyncProcess();
+
+    // Same for the completion callbacks of background tasks. This also opens a
+    // new per-frame budget for the workers.
+    if (flags & NEA_UPDATE_TASKS)
+        NEA_ThreadProcess();
 
     // Advance particle emitters once per frame.
     if (flags & NEA_UPDATE_PARTICLES)

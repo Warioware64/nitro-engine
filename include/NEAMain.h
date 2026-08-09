@@ -48,6 +48,7 @@ extern "C" {
 #include "NEARichText.h"
 #include "NEAText.h"
 #include "NEATexture.h"
+#include "NEAThread.h"
 #include "NEABoneCollision.h"
 #include "NEAScene.h"
 #include "NEASound.h"

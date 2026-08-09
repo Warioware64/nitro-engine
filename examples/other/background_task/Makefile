@@ -1,0 +1,3 @@
+NITROFSDIR	:= 
+
+include ../../Makefile.example

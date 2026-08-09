@@ -4,6 +4,35 @@ Changelog
 Unreleased
 ----------
 
+**NEAThread: a background task system.** ``NEA_TaskSubmit()`` runs a unit of
+work on a pooled worker thread and calls an optional completion callback on the
+main thread during the vertical blank, which is the only place a task's results
+may safely reach VRAM. Tasks can report progress, be cancelled, and are torn
+down with the engine.
+
+Be clear about what this is for: the threads underneath are BlocksDS cooperative
+threads on the ARM9, so there is one CPU, no preemption, and **nothing runs in
+parallel**. A task takes as long as the same work run inline. What it buys is
+that the game keeps drawing, keeps streaming audio and keeps reading the pad
+while the work happens, and that the player can cancel it.
+
+- ``NEA_ThreadSystemReset(workers, stack_size)`` reserves every worker stack up
+  front and never grows, so the cost is fixed and visible at startup rather than
+  appearing gradually during play. After it succeeds, submitting can only fail
+  because too many tasks are live.
+- Pass ``NEA_UPDATE_TASKS`` to ``NEA_WaitForVBL()`` to run completion callbacks.
+- A **per-frame budget** stops the workers once they have used their slice of
+  the frame, so background work costs loading time instead of frame rate.
+  ``NEA_ThreadSetFrameBudget(0)`` removes the limit for loading screens.
+- Debug builds **name a task that runs several frames without yielding**, which
+  turns the classic cooperative-threading mistake from a mysterious frame-rate
+  drop into a message identifying the culprit. They also track **stack
+  high-water marks** (``NEA_ThreadStackPeak()``) so stack sizes can be chosen
+  from measurement.
+
+The asynchronous asset loader is unchanged and still has its own workers; the
+two systems coexist.
+
 **Asynchronous asset loading everywhere it was missing.** The three modules
 that still blocked the main loop for the whole duration of a filesystem read
 now have ``*Async`` loaders alongside their synchronous ones, built on the same
