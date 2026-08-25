@@ -1000,6 +1000,20 @@ static void ne_process_common(void)
 
     MATRIX_CONTROL = GL_PROJECTION;
     MATRIX_IDENTITY = 0;
+
+    // Sub-pixel jitter for temporal accumulation, applied here and not after
+    // gluPerspectivef32(): the DS matrix unit post-multiplies, so translating
+    // an identity projection first and then multiplying the frustum in gives
+    // T * P. That is a pre-multiply, which shifts the image by a constant
+    // amount in normalized device coordinates. Doing it the other way round
+    // would translate in view space, where the screen-space shift would depend
+    // on depth and the jitter would smear the scene instead of sampling it.
+    //
+    // Weak reference: only linked if the project calls into NEAPostFX.h.
+    extern void __NEA_PostFXApplyJitter(void) __attribute__((weak));
+    if (__NEA_PostFXApplyJitter)
+        __NEA_PostFXApplyJitter();
+
     gluPerspectivef32(fov * DEGREES_IN_CIRCLE / 360, NEA_screenratio,
                       ne_znear, ne_zfar);
 

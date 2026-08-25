@@ -520,6 +520,70 @@ void NEA_PostFXScanlineGenerateCircle(int center_y, int radius);
 /// @param enable true to drive the register from the table.
 void NEA_PostFXScanlineEnable(NEA_ScanlineTarget target, bool enable);
 
+// ---------------------------------------------------------------------------
+// Sub-pixel jitter and temporal accumulation
+// ---------------------------------------------------------------------------
+
+/// Maximum number of jitter samples in a pattern.
+#define NEA_JITTER_MAX_SAMPLES 8
+
+/// Enables sub-pixel camera jitter.
+///
+/// Shifts the projection by a fraction of a pixel each frame, cycling through a
+/// short repeating pattern. On its own this only makes the image shimmer; it is
+/// useful **combined with the capture pipeline**, whose frame blending averages
+/// the jittered samples together and softens the DS's hard polygon edges.
+///
+/// Enable NEA_PostFXCaptureInit() / NEA_PostFXCaptureEnable() first and use a
+/// decay around 8, which averages roughly evenly over the recent frames. With
+/// capture off this does nothing useful.
+///
+/// @section postfx_jitter_ghosting There are no motion vectors
+///
+/// This is the honest limitation, not a bug to be fixed later. Real temporal
+/// antialiasing reprojects the history buffer using per-pixel motion vectors so
+/// that moving objects line up between frames. The DS has nothing of the sort,
+/// so the history is simply the previous screen. Anything that moves quickly --
+/// the camera especially -- smears instead of resolving.
+///
+/// The practical answer is to turn jitter off while things move. This function
+/// is a single boolean write and is cheap to call every frame, so drive it from
+/// your camera's angular velocity:
+///
+/// ```c
+/// NEA_PostFXJitterEnable(camera_turn_rate < threshold);
+/// ```
+///
+/// It is best suited to a slow or still camera: inspecting a room, an aiming
+/// mode, a pause screen.
+///
+/// Cost: one matrix translate per frame. No VRAM of its own -- but it is only
+/// worth using with the capture pipeline, which costs two banks.
+///
+/// Measured effect, comparing captured frames of a still scene with jitter on
+/// and off: the number of distinct grey levels on the rendered image roughly
+/// doubles (33 -> 63) while mean brightness is unchanged, which is the
+/// signature of genuine sub-pixel edge coverage rather than a blur.
+///
+/// @param enable true to jitter the projection.
+void NEA_PostFXJitterEnable(bool enable);
+
+/// Replaces the jitter sample pattern.
+///
+/// Offsets are in **pixels**, as f32 (1.19.12) values, so half a pixel is
+/// floattof32(0.5). They are converted to normalized device coordinates
+/// internally with a multiply and a shift; there is no division.
+///
+/// The default is the standard 4-sample rotated grid, which is what you want
+/// unless you are experimenting.
+///
+/// @param offsets_xy Array of `count * 2` f32 values: x0, y0, x1, y1, ...
+/// @param count Number of samples (1 - NEA_JITTER_MAX_SAMPLES).
+void NEA_PostFXJitterSetPattern(const int32_t *offsets_xy, int count);
+
+/// Returns true if jitter is currently enabled.
+bool NEA_PostFXJitterIsEnabled(void);
+
 /// @}
 
 #endif // NEA_POSTFX_H__

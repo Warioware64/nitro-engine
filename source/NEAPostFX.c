@@ -925,3 +925,74 @@ void NEA_PostFXScanlineEnable(NEA_ScanlineTarget target, bool enable)
     ne_scanline_on[target] = enable ? 1 : 0;
     ne_scanline_refresh_hook();
 }
+
+//-----------------------------------------------------------------------------
+// Sub-pixel jitter and temporal accumulation
+//-----------------------------------------------------------------------------
+
+static bool ne_jitter_enabled = false;
+static int ne_jitter_index = 0;
+static int ne_jitter_count = 4;
+
+// Offsets in f32 pixels. The default is the standard 4-sample rotated grid
+// (+/- 1/8 and 3/8 of a pixel), which spreads the samples more evenly than an
+// axis-aligned 2x2 box.
+static int32_t ne_jitter_offsets[NEA_JITTER_MAX_SAMPLES * 2] = {
+    -1536,  -512,   // -3/8, -1/8
+      512, -1536,   //  1/8, -3/8
+     1536,   512,   //  3/8,  1/8
+     -512,  1536,   // -1/8,  3/8
+};
+
+void NEA_PostFXJitterEnable(bool enable)
+{
+    ne_jitter_enabled = enable;
+
+    if (!enable)
+        ne_jitter_index = 0;
+}
+
+bool NEA_PostFXJitterIsEnabled(void)
+{
+    return ne_jitter_enabled;
+}
+
+void NEA_PostFXJitterSetPattern(const int32_t *offsets_xy, int count)
+{
+    if (offsets_xy == NULL || count < 1)
+        return;
+
+    if (count > NEA_JITTER_MAX_SAMPLES)
+        count = NEA_JITTER_MAX_SAMPLES;
+
+    for (int i = 0; i < count * 2; i++)
+        ne_jitter_offsets[i] = offsets_xy[i];
+
+    ne_jitter_count = count;
+    ne_jitter_index = 0;
+}
+
+// Called from ne_process_common() between loading the identity projection and
+// multiplying in the frustum, so the translation ends up pre-multiplied.
+void __NEA_PostFXApplyJitter(void)
+{
+    if (!ne_jitter_enabled)
+        return;
+
+    int32_t px = ne_jitter_offsets[ne_jitter_index * 2];
+    int32_t py = ne_jitter_offsets[ne_jitter_index * 2 + 1];
+
+    ne_jitter_index++;
+    if (ne_jitter_index >= ne_jitter_count)
+        ne_jitter_index = 0;
+
+    // Pixels -> normalized device coordinates. The NDC range is 2 units across
+    // 256 columns and 192 rows, so x scales by 1/128 (a shift) and y by 1/96
+    // (a multiply by 1/96 in 16.16, which is 683). No division either way.
+    int32_t nx = px >> 7;
+    int32_t ny = (int32_t)(((int64_t)py * 683) >> 16);
+
+    MATRIX_TRANSLATE = nx;
+    MATRIX_TRANSLATE = ny;
+    MATRIX_TRANSLATE = 0;
+}
