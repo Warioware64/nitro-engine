@@ -56,7 +56,8 @@
 typedef enum {
     NEA_POSTFX_BLEND_NONE = 0, ///< Nobody. BLDCNT is disabled.
     NEA_POSTFX_BLEND_GLOW,     ///< NEA_PostFXGlowEnable()
-    NEA_POSTFX_BLEND_FLASH     ///< NEA_PostFXFlashSet()
+    NEA_POSTFX_BLEND_FLASH,    ///< NEA_PostFXFlashSet()
+    NEA_POSTFX_BLEND_VIGNETTE  ///< NEA_PostFXVignetteEnable()
 } NEA_PostFXBlendOwner;
 
 /// Returns which effect currently owns the blend unit.
@@ -162,6 +163,139 @@ void NEA_PostFXGlowSetIntensity(int intensity);
 ///
 /// @param enable true to show the glow, false to hide it.
 void NEA_PostFXGlowEnable(bool enable);
+
+// ---------------------------------------------------------------------------
+// Mosaic
+// ---------------------------------------------------------------------------
+
+/// Sets the mosaic (pixelation) block size for the main engine.
+///
+/// **Mosaic does not work on the 3D layer.** GBATEK, "DS 3D Final 2D Output":
+/// "All other bits in BG0CNT have no effect on 3D, namely, mosaic cannot be
+/// used on the 3D layer." Only 2D backgrounds and sprites can be pixelated, so
+/// this is for HUDs, 2D overlays and full-screen 2D transitions. To pixelate
+/// the rendered 3D scene you have to capture it to a bitmap background first.
+///
+/// A size of 0 means no pixelation. Sizes are in pixels: 3 means each 4x1,
+/// 1x4 or 4x4 block takes the color of its top-left pixel.
+///
+/// Costs nothing: one register write, no VRAM, no blend unit. Composes freely
+/// with every other effect in this module.
+///
+/// @param bg_h Horizontal BG mosaic size (0 - 15).
+/// @param bg_v Vertical BG mosaic size (0 - 15).
+/// @param obj_h Horizontal sprite mosaic size (0 - 15).
+/// @param obj_v Vertical sprite mosaic size (0 - 15).
+void NEA_PostFXMosaicSet(int bg_h, int bg_v, int obj_h, int obj_v);
+
+/// Enables or disables mosaic on one main-engine background layer.
+///
+/// Layer 0 is the 3D layer, where this has no effect (see
+/// NEA_PostFXMosaicSet()); asking for it prints a debug message.
+///
+/// @param bg_layer BG layer (1 - 3).
+/// @param enable true to pixelate this layer.
+void NEA_PostFXMosaicLayerEnable(int bg_layer, bool enable);
+
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
+
+/// Hardware window regions on the main engine.
+typedef enum {
+    NEA_POSTFX_WIN0 = 0, ///< Window 0. Highest priority where windows overlap.
+    NEA_POSTFX_WIN1 = 1, ///< Window 1. Medium priority.
+    NEA_POSTFX_WINOBJ = 2 ///< OBJ window, shaped by sprites. Lowest priority.
+} NEA_PostFXWindow;
+
+/// Layer mask bits for NEA_PostFXWindowSetLayers().
+#define NEA_POSTFX_LAYER_BG0    (1 << 0) ///< The 3D layer
+#define NEA_POSTFX_LAYER_BG1    (1 << 1)
+#define NEA_POSTFX_LAYER_BG2    (1 << 2)
+#define NEA_POSTFX_LAYER_BG3    (1 << 3)
+#define NEA_POSTFX_LAYER_OBJ    (1 << 4)
+#define NEA_POSTFX_LAYER_ALL    (0x1F)
+
+/// Sets the rectangle covered by window 0 or 1.
+///
+/// Coordinates are inclusive pixel coordinates on a 256x192 screen. The
+/// hardware stores the right and bottom edges as "coordinate plus one" in an
+/// 8 bit field, so a window whose right edge is column 255 has to write 256,
+/// which wraps to 0. That wrap is believed to be interpreted as "full width",
+/// but GBATEK only documents the GBA's 240-pixel behaviour, so a full-width
+/// window is the one case worth checking on hardware.
+///
+/// Has no effect for NEA_POSTFX_WINOBJ, whose shape comes from sprites.
+///
+/// @param win NEA_POSTFX_WIN0 or NEA_POSTFX_WIN1.
+/// @param x1 Left edge (0 - 255).
+/// @param y1 Top edge (0 - 191).
+/// @param x2 Right edge, inclusive (0 - 255).
+/// @param y2 Bottom edge, inclusive (0 - 191).
+void NEA_PostFXWindowSetRect(NEA_PostFXWindow win, int x1, int y1,
+                            int x2, int y2);
+
+/// Chooses which layers are drawn inside a window, and whether the blend unit
+/// applies there.
+///
+/// The `color_effect` flag is the interesting one: it gates the color special
+/// effect per region, which is what makes a vignette cost zero BG layers -- set
+/// a fade to black globally, then switch the effect *off* inside the window and
+/// only the surrounding area darkens. NEA_PostFXVignetteEnable() does exactly
+/// that.
+///
+/// @param win Which window to configure.
+/// @param layer_mask OR of NEA_POSTFX_LAYER_*, or NEA_POSTFX_LAYER_ALL.
+/// @param color_effect true to let the blend unit act inside this region.
+void NEA_PostFXWindowSetLayers(NEA_PostFXWindow win, u16 layer_mask,
+                              bool color_effect);
+
+/// Chooses which layers are drawn outside every window.
+///
+/// @param layer_mask OR of NEA_POSTFX_LAYER_*, or NEA_POSTFX_LAYER_ALL.
+/// @param color_effect true to let the blend unit act outside all windows.
+void NEA_PostFXWindowSetOutsideLayers(u16 layer_mask, bool color_effect);
+
+/// Turns a window region on or off.
+///
+/// Enabling any window automatically enables the "outside" region too, so
+/// remember to configure it with NEA_PostFXWindowSetOutsideLayers() or
+/// everything outside the window will keep its default layer set.
+///
+/// Costs nothing: one DISPCNT bit, no VRAM, no BG layer.
+///
+/// @param win Which window.
+/// @param enable true to enable the region.
+void NEA_PostFXWindowEnable(NEA_PostFXWindow win, bool enable);
+
+/// Darkens everything outside a rectangle, leaving the inside untouched.
+///
+/// Built on window 0 plus the blend unit's brightness-decrease mode: the fade
+/// is enabled globally and then disabled inside the window. Costs **no BG
+/// layer and no VRAM**, which is what makes it worth doing this way instead of
+/// drawing a pre-rendered vignette overlay.
+///
+/// The lit rectangle defaults to the middle half of the screen; call
+/// NEA_PostFXWindowSetRect(NEA_POSTFX_WIN0, ...) afterwards to move or resize
+/// it. A round flashlight cone needs the window's left and right edges rewritten
+/// per scanline, which is what the HBlank scanline system is for.
+///
+/// Takes ownership of the blend unit (see @ref postfx_blend_unit).
+///
+/// @note GBATEK raises, and then disowns, a doubt about this technique: "If the
+/// 3D screen has highest priority, then alpha-blending is always enabled,
+/// regardless of the Window Control register's color effect enable flag ...
+/// **not sure if that is true**". Tested under melonDS with the 3D layer at
+/// priority 0, the window's color-effect bit *is* honoured and the fade stops
+/// at the window edge, which is what this function relies on. Two caveats
+/// remain: that was an emulator rather than hardware, and GBATEK's claim is
+/// specifically about *alpha blending* while this uses brightness decrease. If
+/// you combine a window with NEA_PostFXGlow* (which does alpha blend) and the
+/// glow ignores the window, that untested case is the reason.
+///
+/// @param enable true to enable the vignette.
+/// @param strength How dark the outside gets, 0 (none) to 16 (black).
+void NEA_PostFXVignetteEnable(bool enable, int strength);
 
 /// @}
 

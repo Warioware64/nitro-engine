@@ -23,6 +23,12 @@ NEA_PostFXBlendOwner NEA_PostFXBlendOwner_Get(void)
 // the blend unit it would simply hide the scene instead of tinting it.
 static void ne_glow_on_blend_lost(void);
 
+// The vignette leaves WININ bit 5 clear so the fade is suppressed inside the
+// window. That gating applies to whatever owns the blend unit, so if the
+// vignette loses it the window has to go away too, or the incoming effect
+// silently stops working inside that rectangle.
+static void ne_vignette_on_blend_lost(void);
+
 static void ne_postfx_take_blend_unit(NEA_PostFXBlendOwner owner)
 {
     if (ne_postfx_blend_owner != NEA_POSTFX_BLEND_NONE
@@ -33,6 +39,8 @@ static void ne_postfx_take_blend_unit(NEA_PostFXBlendOwner owner)
 
         if (ne_postfx_blend_owner == NEA_POSTFX_BLEND_GLOW)
             ne_glow_on_blend_lost();
+        else if (ne_postfx_blend_owner == NEA_POSTFX_BLEND_VIGNETTE)
+            ne_vignette_on_blend_lost();
     }
 
     ne_postfx_blend_owner = owner;
@@ -315,4 +323,202 @@ void NEA_PostFXGlowEnable(bool enable)
         NEA_Hw2DBGSetVisible(ne_glow_bg, false);
         ne_postfx_release_blend_unit(NEA_POSTFX_BLEND_GLOW);
     }
+}
+
+//-----------------------------------------------------------------------------
+// Mosaic
+//-----------------------------------------------------------------------------
+
+void NEA_PostFXMosaicSet(int bg_h, int bg_v, int obj_h, int obj_v)
+{
+    if (bg_h < 0) bg_h = 0;
+    if (bg_h > 15) bg_h = 15;
+    if (bg_v < 0) bg_v = 0;
+    if (bg_v > 15) bg_v = 15;
+    if (obj_h < 0) obj_h = 0;
+    if (obj_h > 15) obj_h = 15;
+    if (obj_v < 0) obj_v = 0;
+    if (obj_v > 15) obj_v = 15;
+
+    REG_MOSAIC = (u16)(bg_h | (bg_v << 4) | (obj_h << 8) | (obj_v << 12));
+}
+
+void NEA_PostFXMosaicLayerEnable(int bg_layer, bool enable)
+{
+    if (bg_layer == 0)
+    {
+        // GBATEK: "mosaic cannot be used on the 3D layer". Setting the bit in
+        // BG0CNT would be silently ignored by the hardware, so say so instead.
+        NEA_DebugPrint("Mosaic has no effect on the 3D layer (BG0)");
+        return;
+    }
+
+    if (bg_layer < 1 || bg_layer > 3)
+    {
+        NEA_DebugPrint("Invalid mosaic BG layer %d", bg_layer);
+        return;
+    }
+
+    vu16 *cnt;
+    switch (bg_layer)
+    {
+        case 1:  cnt = &REG_BG1CNT; break;
+        case 2:  cnt = &REG_BG2CNT; break;
+        default: cnt = &REG_BG3CNT; break;
+    }
+
+    if (enable)
+        *cnt |= BIT(6);
+    else
+        *cnt &= ~BIT(6);
+}
+
+//-----------------------------------------------------------------------------
+// Windows
+//-----------------------------------------------------------------------------
+
+// WININ holds window 0 in bits 0-7 and window 1 in bits 8-15; WINOUT holds the
+// outside region in bits 0-7 and the OBJ window in bits 8-15. Both halves have
+// the same layout: layer enables in bits 0-4, color effect enable in bit 5.
+#define NE_WIN_COLOR_EFFECT_BIT BIT(5)
+
+static u16 ne_win_field(u16 layer_mask, bool color_effect)
+{
+    u16 v = layer_mask & 0x1F;
+    if (color_effect)
+        v |= NE_WIN_COLOR_EFFECT_BIT;
+    return v;
+}
+
+void NEA_PostFXWindowSetRect(NEA_PostFXWindow win, int x1, int y1,
+                            int x2, int y2)
+{
+    if (win == NEA_POSTFX_WINOBJ)
+    {
+        NEA_DebugPrint("The OBJ window's shape comes from sprites, not a rect");
+        return;
+    }
+
+    if (x1 < 0) x1 = 0;
+    if (x1 > 255) x1 = 255;
+    if (x2 < x1) x2 = x1;
+    if (x2 > 255) x2 = 255;
+    if (y1 < 0) y1 = 0;
+    if (y1 > 191) y1 = 191;
+    if (y2 < y1) y2 = y1;
+    if (y2 > 191) y2 = 191;
+
+    // The hardware wants the right/bottom edge plus one. A right edge of 255
+    // therefore writes 256, which wraps to 0 in the 8 bit field; that is
+    // believed to read as "full width", but see the header note.
+    u16 h = (u16)((x1 << 8) | ((x2 + 1) & 0xFF));
+    u16 v = (u16)((y1 << 8) | ((y2 + 1) & 0xFF));
+
+    if (win == NEA_POSTFX_WIN0)
+    {
+        REG_WIN0H = h;
+        REG_WIN0V = v;
+    }
+    else
+    {
+        REG_WIN1H = h;
+        REG_WIN1V = v;
+    }
+}
+
+void NEA_PostFXWindowSetLayers(NEA_PostFXWindow win, u16 layer_mask,
+                              bool color_effect)
+{
+    u16 field = ne_win_field(layer_mask, color_effect);
+
+    switch (win)
+    {
+        case NEA_POSTFX_WIN0:
+            REG_WININ = (REG_WININ & 0xFF00) | field;
+            break;
+        case NEA_POSTFX_WIN1:
+            REG_WININ = (REG_WININ & 0x00FF) | (field << 8);
+            break;
+        case NEA_POSTFX_WINOBJ:
+            REG_WINOUT = (REG_WINOUT & 0x00FF) | (field << 8);
+            break;
+    }
+}
+
+void NEA_PostFXWindowSetOutsideLayers(u16 layer_mask, bool color_effect)
+{
+    u16 field = ne_win_field(layer_mask, color_effect);
+    REG_WINOUT = (REG_WINOUT & 0xFF00) | field;
+}
+
+void NEA_PostFXWindowEnable(NEA_PostFXWindow win, bool enable)
+{
+    u32 bit;
+    switch (win)
+    {
+        case NEA_POSTFX_WIN0:   bit = DISPLAY_WIN0_ON; break;
+        case NEA_POSTFX_WIN1:   bit = DISPLAY_WIN1_ON; break;
+        default:                bit = DISPLAY_SPR_WIN_ON; break;
+    }
+
+    if (enable)
+        REG_DISPCNT |= bit;
+    else
+        REG_DISPCNT &= ~bit;
+}
+
+//-----------------------------------------------------------------------------
+// Vignette
+//-----------------------------------------------------------------------------
+
+static bool ne_vignette_enabled = false;
+
+static void ne_vignette_on_blend_lost(void)
+{
+    if (!ne_vignette_enabled)
+        return;
+
+    NEA_PostFXWindowEnable(NEA_POSTFX_WIN0, false);
+    ne_vignette_enabled = false;
+}
+
+void NEA_PostFXVignetteEnable(bool enable, int strength)
+{
+    if (!enable)
+    {
+        if (ne_vignette_enabled)
+        {
+            NEA_PostFXWindowEnable(NEA_POSTFX_WIN0, false);
+            ne_vignette_enabled = false;
+        }
+        ne_postfx_release_blend_unit(NEA_POSTFX_BLEND_VIGNETTE);
+        return;
+    }
+
+    if (strength < 0)
+        strength = 0;
+    if (strength > 16)
+        strength = 16;
+
+    ne_postfx_take_blend_unit(NEA_POSTFX_BLEND_VIGNETTE);
+
+    if (!ne_vignette_enabled)
+    {
+        // Default lit area: the middle half of the screen. The caller can move
+        // it afterwards with NEA_PostFXWindowSetRect().
+        NEA_PostFXWindowSetRect(NEA_POSTFX_WIN0, 64, 48, 191, 143);
+        ne_vignette_enabled = true;
+    }
+
+    // Everything is drawn in both regions; the only difference is that the
+    // brightness-decrease effect is switched off inside the window. That is
+    // what makes this cost no BG layer at all.
+    NEA_PostFXWindowSetLayers(NEA_POSTFX_WIN0, NEA_POSTFX_LAYER_ALL, false);
+    NEA_PostFXWindowSetOutsideLayers(NEA_POSTFX_LAYER_ALL, true);
+    NEA_PostFXWindowEnable(NEA_POSTFX_WIN0, true);
+
+    REG_BLDCNT = BLEND_SRC_BG0 | BLEND_SRC_BG1 | BLEND_SRC_BG2
+               | BLEND_SRC_BG3 | BLEND_SRC_SPRITE | BLEND_SRC_BACKDROP
+               | BLEND_FADE_BLACK;
+    REG_BLDY = strength;
 }
