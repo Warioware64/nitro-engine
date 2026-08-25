@@ -9,6 +9,8 @@
 
 #include <nds.h>
 
+#include "NEATexture.h" // NEA_VRAMBankFlags
+
 /// @file NEAPostFX.h
 /// @brief PPU-native post-process and compositing effects.
 
@@ -57,7 +59,8 @@ typedef enum {
     NEA_POSTFX_BLEND_NONE = 0, ///< Nobody. BLDCNT is disabled.
     NEA_POSTFX_BLEND_GLOW,     ///< NEA_PostFXGlowEnable()
     NEA_POSTFX_BLEND_FLASH,    ///< NEA_PostFXFlashSet()
-    NEA_POSTFX_BLEND_VIGNETTE  ///< NEA_PostFXVignetteEnable()
+    NEA_POSTFX_BLEND_VIGNETTE, ///< NEA_PostFXVignetteEnable()
+    NEA_POSTFX_BLEND_CAPTURE   ///< NEA_PostFXCaptureEnable()
 } NEA_PostFXBlendOwner;
 
 /// Returns which effect currently owns the blend unit.
@@ -296,6 +299,114 @@ void NEA_PostFXWindowEnable(NEA_PostFXWindow win, bool enable);
 /// @param enable true to enable the vignette.
 /// @param strength How dark the outside gets, 0 (none) to 16 (black).
 void NEA_PostFXVignetteEnable(bool enable, int strength);
+
+// ---------------------------------------------------------------------------
+// Frame capture: motion blur and afterimage
+// ---------------------------------------------------------------------------
+
+/// Decay presets for NEA_PostFXMotionBlurPreset().
+typedef enum {
+    /// Short trails that disappear in a few frames. Reads as motion blur.
+    NEA_POSTFX_BLUR_FAST = 0,
+    /// Long-lived smear. Reads as a camera with a slow shutter.
+    NEA_POSTFX_BLUR_MEDIUM,
+    /// Very slow decay: moving objects leave persistent ghosts behind them.
+    NEA_POSTFX_BLUR_GHOST
+} NEA_PostFXBlurPreset;
+
+/// Sets up the frame capture pipeline used by motion blur and afterimage.
+///
+/// Each frame the composited output is captured into one VRAM bank while the
+/// previous frame's capture is displayed from the other as a bitmap background
+/// and blended with the live 3D image. Because what gets captured is the
+/// *blended* result, the history decays exponentially rather than being a
+/// single stale frame.
+///
+/// @section postfx_capture_cost What this costs
+///
+/// **Two VRAM banks, 256 KB, half of the A-D pool.** That is by far the most
+/// expensive thing in this module and it comes straight out of the 3D texture
+/// budget, so call NEA_TextureSystemReset() with the two banks you are *not*
+/// giving to the capture (e.g. NEA_VRAM_AB if capture gets C and D) before
+/// loading any textures. This function checks that the requested banks are not
+/// already owned by the texture system and fails rather than corrupting it.
+///
+/// It also takes the blend unit and BG2, and switches the main engine to video
+/// mode 5 so BG2 can be a direct-color bitmap.
+///
+/// Per frame it costs a bank re-map and three register writes, done from
+/// NEA_PostFXUpdate(). There is no per-pixel CPU work at all: the PPU does the
+/// blending and the capture unit does the write-back.
+///
+/// @section postfx_capture_limits Limits
+///
+/// - **Requires NEA_ModeSingle3D.** The dual 3D and two-pass modes already own
+///   DISPCAPCNT and ping-pong VRAM_C/D themselves; there is no room to share.
+/// - Capture is main-engine only; the sub screen is unaffected.
+/// - The captured image is 15 bit color, so long ghost trails band slightly.
+/// - Texture uploads call vramSetPrimaryBanks() to reach texture VRAM, which
+///   briefly re-maps the capture banks too. Uploading textures mid-gameplay can
+///   therefore corrupt one frame of history. Load textures up front, or accept
+///   a one-frame glitch.
+///
+/// @param banks Exactly two of NEA_VRAM_A / B / C / D.
+/// @return 1 on success, 0 on error.
+int NEA_PostFXCaptureInit(NEA_VRAMBankFlags banks);
+
+/// Tears the capture pipeline down and returns the main engine to mode 0.
+///
+/// Does not give the VRAM banks back to the texture system; call
+/// NEA_TextureSystemReset() yourself if you want them back.
+void NEA_PostFXCaptureEnd(void);
+
+/// Returns the VRAM banks currently owned by the capture pipeline.
+///
+/// NEA_TextureSystemReset() calls this through a weak reference so it never
+/// hands a capture bank out for textures.
+///
+/// @return Bitmask of NEA_VRAM_A / B / C / D, or 0 if capture is not running.
+NEA_VRAMBankFlags NEA_PostFXGetCaptureBanks(void);
+
+/// Turns motion blur on or off.
+///
+/// Enabling takes ownership of the blend unit (see @ref postfx_blend_unit) and
+/// requires NEA_UPDATE_POSTFX to be passed to NEA_WaitForVBL(), which is what
+/// drives the per-frame bank swap.
+///
+/// @param enable true to start blending frames together.
+void NEA_PostFXCaptureEnable(bool enable);
+
+/// Sets how much of the previous frame survives into the next one.
+///
+/// The composite is `out = history*decay/16 + current*(16-decay)/16`, so 0
+/// disables the effect entirely and 16 would freeze the image. Useful values
+/// are roughly 4 (a hint of smear) to 13 (long ghosting).
+///
+/// @param decay 0 - 15.
+void NEA_PostFXMotionBlurSetDecay(int decay);
+
+/// Applies one of the named decay presets.
+///
+/// @param preset Which preset to use.
+void NEA_PostFXMotionBlurPreset(NEA_PostFXBlurPreset preset);
+
+/// Pixelates the captured 3D image.
+///
+/// This is the workaround for mosaic not working on the 3D layer: once the
+/// scene has been captured into a bitmap background, that background is an
+/// ordinary 2D layer and the mosaic hardware applies to it normally. It only
+/// works while the capture pipeline is running.
+///
+/// Note that this pixelates the *blended* image, so with a non-zero decay the
+/// trails are pixelated too.
+///
+/// @param h Horizontal block size (0 - 15, 0 disables).
+/// @param v Vertical block size (0 - 15, 0 disables).
+void NEA_PostFXCaptureMosaic(int h, int v);
+
+/// Per-frame work for the capture effects. Called by NEA_WaitForVBL() when
+/// NEA_UPDATE_POSTFX is passed; you do not normally call this yourself.
+void NEA_PostFXUpdate(void);
 
 /// @}
 

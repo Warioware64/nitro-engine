@@ -1409,6 +1409,11 @@ int NEA_TextureSystemReset(int max_textures, int max_palettes,
     if (NEA_Hw2DGetClaimedBanks)
         bank_flags &= ~NEA_Hw2DGetClaimedBanks();
 
+    // Same for the PostFX frame capture, which owns two of A-D while running.
+    extern NEA_VRAMBankFlags NEA_PostFXGetCaptureBanks(void) __attribute__((weak));
+    if (NEA_PostFXGetCaptureBanks)
+        bank_flags &= ~NEA_PostFXGetCaptureBanks();
+
     // VRAM_C and VRAM_D can't be used in dual 3D mode (they are used for
     // framebuffers). In two-pass FIFO/DMA modes, only VRAM_D is reserved (for
     // capture), so VRAM_C is available for textures. In two-pass FB mode,

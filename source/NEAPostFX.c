@@ -522,3 +522,230 @@ void NEA_PostFXVignetteEnable(bool enable, int strength)
                | BLEND_FADE_BLACK;
     REG_BLDY = strength;
 }
+
+//-----------------------------------------------------------------------------
+// Frame capture: motion blur and afterimage
+//-----------------------------------------------------------------------------
+
+static bool ne_capture_inited = false;
+static bool ne_capture_enabled = false;
+static int ne_capture_decay = 8;
+static int ne_capture_bank[2] = { -1, -1 }; // 0=A, 1=B, 2=C, 3=D
+static int ne_capture_write = 0;            // which slot is the capture target
+static u32 ne_capture_saved_mode = 0;
+
+// Maps a bank index to its LCD / main-BG-slot-0 configuration. Both slots have
+// to be able to play either role, which is why this is a table rather than the
+// hardcoded C/D pair that the two-pass modes use.
+static void ne_capture_set_bank(int bank, bool as_bg)
+{
+    switch (bank)
+    {
+        case 0: vramSetBankA(as_bg ? VRAM_A_MAIN_BG_0x06000000 : VRAM_A_LCD); break;
+        case 1: vramSetBankB(as_bg ? VRAM_B_MAIN_BG_0x06000000 : VRAM_B_LCD); break;
+        case 2: vramSetBankC(as_bg ? VRAM_C_MAIN_BG_0x06000000 : VRAM_C_LCD); break;
+        default: vramSetBankD(as_bg ? VRAM_D_MAIN_BG_0x06000000 : VRAM_D_LCD); break;
+    }
+}
+
+// DCAP_BANK_VRAM_A..D happen to be 0..3, the same order as our bank indices.
+static u32 ne_capture_dcap_bank(int bank)
+{
+    return (u32)bank & 3;
+}
+
+NEA_VRAMBankFlags NEA_PostFXGetCaptureBanks(void)
+{
+    if (!ne_capture_inited)
+        return 0;
+
+    return (NEA_VRAMBankFlags)((1 << ne_capture_bank[0])
+                             | (1 << ne_capture_bank[1]));
+}
+
+int NEA_PostFXCaptureInit(NEA_VRAMBankFlags banks)
+{
+    if (NEA_CurrentExecutionMode() != NEA_ModeSingle3D)
+    {
+        // Dual 3D and two-pass already drive DISPCAPCNT and swap VRAM_C/D every
+        // frame for their own compositing. Sharing is not possible.
+        NEA_DebugPrint("PostFX capture needs single 3D mode");
+        return 0;
+    }
+
+    // Exactly two of A-D. One bank cannot both hold the history and receive the
+    // new capture in the same frame.
+    int found = 0;
+    int idx[2] = { -1, -1 };
+    for (int i = 0; i < 4; i++)
+    {
+        if (banks & (1 << i))
+        {
+            if (found < 2)
+                idx[found] = i;
+            found++;
+        }
+    }
+
+    if (found != 2)
+    {
+        NEA_DebugPrint("PostFX capture needs exactly 2 banks of A-D, got %d",
+                      found);
+        return 0;
+    }
+
+    NEA_PostFXCaptureEnd();
+
+    ne_capture_bank[0] = idx[0];
+    ne_capture_bank[1] = idx[1];
+    ne_capture_write = 0;
+
+    ne_capture_saved_mode = REG_DISPCNT;
+
+    // BG2 as a 16 bit direct-color bitmap reading from 0x06000000, which is
+    // whichever bank is currently mapped to main BG slot 0. Identity affine
+    // transform: the scanline distortion system is what changes these later.
+    REG_BG2CNT = BG_BMP16_256x256 | BG_BMP_BASE(0) | BG_PRIORITY(0);
+    REG_BG2PA = 1 << 8;
+    REG_BG2PB = 0;
+    REG_BG2PC = 0;
+    REG_BG2PD = 1 << 8;
+    REG_BG2X = 0;
+    REG_BG2Y = 0;
+
+    // Mode 5 is what makes BG2 an extended-affine bitmap layer. Preserve the
+    // window enables, which live in the same register and which the vignette
+    // may already have set up.
+    u32 win_bits = ne_capture_saved_mode
+                 & (DISPLAY_WIN0_ON | DISPLAY_WIN1_ON | DISPLAY_SPR_WIN_ON);
+
+    videoSetMode(MODE_5_3D | DISPLAY_BG2_ACTIVE | win_bits);
+
+    // History layer in front of the live 3D image: alpha blending needs the
+    // 1st target to be the topmost pixel.
+    REG_BG0CNT = (REG_BG0CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(1);
+
+    ne_capture_set_bank(ne_capture_bank[0], false); // capture destination
+    ne_capture_set_bank(ne_capture_bank[1], true);  // displayed history
+
+    ne_capture_inited = true;
+    ne_capture_enabled = false;
+
+    return 1;
+}
+
+void NEA_PostFXCaptureEnd(void)
+{
+    if (!ne_capture_inited)
+        return;
+
+    NEA_PostFXCaptureEnable(false);
+
+    REG_DISPCAPCNT = 0;
+
+    ne_capture_set_bank(ne_capture_bank[0], false);
+    ne_capture_set_bank(ne_capture_bank[1], false);
+
+    videoSetMode(ne_capture_saved_mode);
+    REG_BG0CNT = (REG_BG0CNT & ~BG_PRIORITY(3)) | BG_PRIORITY(0);
+
+    ne_capture_bank[0] = -1;
+    ne_capture_bank[1] = -1;
+    ne_capture_inited = false;
+}
+
+void NEA_PostFXMotionBlurSetDecay(int decay)
+{
+    if (decay < 0)
+        decay = 0;
+    if (decay > 15)
+        decay = 15;
+
+    ne_capture_decay = decay;
+}
+
+void NEA_PostFXMotionBlurPreset(NEA_PostFXBlurPreset preset)
+{
+    switch (preset)
+    {
+        case NEA_POSTFX_BLUR_FAST:   NEA_PostFXMotionBlurSetDecay(5); break;
+        case NEA_POSTFX_BLUR_MEDIUM: NEA_PostFXMotionBlurSetDecay(9); break;
+        default:                     NEA_PostFXMotionBlurSetDecay(13); break;
+    }
+}
+
+void NEA_PostFXCaptureMosaic(int h, int v)
+{
+    if (!ne_capture_inited)
+    {
+        NEA_DebugPrint("Capture mosaic needs the capture pipeline running");
+        return;
+    }
+
+    // Once the 3D image lives in a bitmap background it is an ordinary 2D
+    // layer, so the mosaic hardware applies to it -- which is the only way to
+    // pixelate the rendered scene at all.
+    NEA_PostFXMosaicSet(h, v, 0, 0);
+    NEA_PostFXMosaicLayerEnable(2, (h > 0) || (v > 0));
+}
+
+void NEA_PostFXCaptureEnable(bool enable)
+{
+    if (!ne_capture_inited)
+    {
+        if (enable)
+            NEA_DebugPrint("Call NEA_PostFXCaptureInit() first");
+        return;
+    }
+
+    if (enable)
+    {
+        ne_capture_enabled = true;
+        ne_postfx_take_blend_unit(NEA_POSTFX_BLEND_CAPTURE);
+    }
+    else
+    {
+        ne_capture_enabled = false;
+        REG_DISPCAPCNT = 0;
+        ne_postfx_release_blend_unit(NEA_POSTFX_BLEND_CAPTURE);
+    }
+}
+
+void NEA_PostFXUpdate(void)
+{
+    if (!ne_capture_inited || !ne_capture_enabled)
+        return;
+
+    // Another effect took the blend unit; stop compositing rather than fighting
+    // over BLDCNT every frame.
+    if (ne_postfx_blend_owner != NEA_POSTFX_BLEND_CAPTURE)
+        return;
+
+    // Swap roles: last frame's capture destination becomes this frame's
+    // displayed history, and the bank that was on screen is written into.
+    ne_capture_write ^= 1;
+
+    int write_bank = ne_capture_bank[ne_capture_write];
+    int show_bank = ne_capture_bank[ne_capture_write ^ 1];
+
+    ne_capture_set_bank(write_bank, false);
+    ne_capture_set_bank(show_bank, true);
+
+    // History (BG2, in front) over the live 3D image (BG0, behind):
+    //   out = history*EVA + current*EVB
+    // with EVA = decay. Capturing that composite is what makes the decay
+    // exponential instead of a single stale frame.
+    REG_BLDCNT = BLEND_SRC_BG2 | BLEND_ALPHA
+               | BLEND_DST_BG0 | BLEND_DST_BACKDROP;
+    REG_BLDALPHA = (u16)((ne_capture_decay & 0x1F)
+                        | (((16 - ne_capture_decay) & 0x1F) << 8));
+
+    // Capture the composited screen (not DCAP_SRC_A_3DONLY: the whole point is
+    // to feed the blend result back in). Capture begins at the next line 0 and
+    // the enable bit clears itself at line 192.
+    REG_DISPCAPCNT = DCAP_BANK(ne_capture_dcap_bank(write_bank))
+                   | DCAP_SIZE(DCAP_SIZE_256x192)
+                   | DCAP_MODE(DCAP_MODE_A)
+                   | DCAP_SRC_A(DCAP_SRC_A_COMPOSITED)
+                   | DCAP_ENABLE;
+}

@@ -2106,6 +2106,13 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if (flags & NEA_UPDATE_PARTICLES)
         NEA_ParticleUpdateAll();
 
+    // Weak reference: the post-process effects are only linked when the user
+    // calls any NEA_PostFX* function. This runs after the vertical blank wait
+    // because the capture effects re-map VRAM banks, which is only safe here.
+    extern void NEA_PostFXUpdate(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_POSTFX) && NEA_PostFXUpdate)
+        NEA_PostFXUpdate();
+
     ne_cpucount = 0;
 }
 
