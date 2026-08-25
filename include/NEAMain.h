@@ -55,6 +55,7 @@ extern "C" {
 #include "NEAAnimMat.h"
 #include "NEAHw2D.h"
 #include "NEAParticle.h"
+#include "NEAPostFX.h"
 
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (2)

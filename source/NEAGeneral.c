@@ -1000,6 +1000,20 @@ static void ne_process_common(void)
 
     MATRIX_CONTROL = GL_PROJECTION;
     MATRIX_IDENTITY = 0;
+
+    // Sub-pixel jitter for temporal accumulation, applied here and not after
+    // gluPerspectivef32(): the DS matrix unit post-multiplies, so translating
+    // an identity projection first and then multiplying the frustum in gives
+    // T * P. That is a pre-multiply, which shifts the image by a constant
+    // amount in normalized device coordinates. Doing it the other way round
+    // would translate in view space, where the screen-space shift would depend
+    // on depth and the jitter would smear the scene instead of sampling it.
+    //
+    // Weak reference: only linked if the project calls into NEAPostFX.h.
+    extern void __NEA_PostFXApplyJitter(void) __attribute__((weak));
+    if (__NEA_PostFXApplyJitter)
+        __NEA_PostFXApplyJitter();
+
     gluPerspectivef32(fov * DEGREES_IN_CIRCLE / 360, NEA_screenratio,
                       ne_znear, ne_zfar);
 
@@ -1689,6 +1703,61 @@ void NEA_ClippingPlanesSetI(int znear, int zfar)
     ne_zfar = zfar;
 }
 
+// Converts a view-space distance to the 15 bit depth value that the fog unit
+// compares against. This lives here rather than in NEAPolygon.c because it
+// needs the clipping planes and the depth buffer mode, which are both owned by
+// this file.
+//
+// The two depth buffer modes store completely different things, which is the
+// whole reason this helper exists:
+//
+//   W-buffering: the buffer holds the view distance directly, in 12.3 fixed
+//                point, so the conversion is a shift.
+//
+//   Z-buffering (the NEA default): the buffer holds the usual perspective depth
+//                depth = zfar * (d - znear) / (d * (zfar - znear))
+//                which is wildly non-linear. With the default 0.1/40 planes,
+//                everything from 2 units outwards lands in 0x7000..0x7FFF,
+//                which is why hand-picked fog offsets always look like 0x7C00.
+//
+// This is a setup-time helper. It uses 64 bit maths and a division, neither of
+// which belongs in a per-frame path, so call it when fog settings change and
+// keep the result.
+u32 NEA_FogDepthFromDistance(int32_t distance)
+{
+    if (distance <= 0)
+        return 0;
+
+    if (ne_depth_buffer_mode == NEA_WBUFFER)
+    {
+        // f32 (1.19.12) -> 12.3 is a shift right by 9.
+        int32_t depth = distance >> 9;
+        if (depth > 0x7FFF)
+            depth = 0x7FFF;
+        return (u32)depth;
+    }
+
+    if (distance <= ne_znear)
+        return 0;
+    if (distance >= ne_zfar)
+        return 0x7FFF;
+
+    int64_t num = (int64_t)ne_zfar * (int64_t)(distance - ne_znear);
+    int64_t den = (int64_t)distance * (int64_t)(ne_zfar - ne_znear);
+
+    if (den == 0)
+        return 0x7FFF;
+
+    int64_t depth = (num * 0x7FFF) / den;
+
+    if (depth < 0)
+        depth = 0;
+    if (depth > 0x7FFF)
+        depth = 0x7FFF;
+
+    return (u32)depth;
+}
+
 void NEA_AntialiasEnable(bool value)
 {
     if (value)
@@ -1895,6 +1964,20 @@ void NEA_SpecialEffectPause(bool pause)
     NEA_effectpause = pause;
 }
 
+// Per-scanline hook for NEAPostFX. A plain function pointer rather than a weak
+// symbol: this runs 192 times a frame, so the NULL check has to be a load and a
+// branch, not a call into a stub.
+static void (*ne_hbl_postfx_hook)(int vcount) = NULL;
+
+void __NEA_SetHBLPostFXHook(void (*hook)(int vcount))
+{
+    ne_hbl_postfx_hook = hook;
+}
+
+// In ITCM: this runs on every one of the 192 visible scanlines, so leaving it
+// in main RAM means it competes for the 8 KiB instruction cache with whatever
+// the frame is actually doing, and the per-line cost becomes unpredictable.
+ITCM_CODE ARM_CODE
 void NEA_HBLFunc(void)
 {
     if (ne_execution_mode == NEA_ModeUninitialized)
@@ -1910,6 +1993,9 @@ void NEA_HBLFunc(void)
     int vcount = REG_VCOUNT;
     if (vcount == 262)
         vcount = 0;
+
+    if (ne_hbl_postfx_hook != NULL)
+        ne_hbl_postfx_hook(vcount);
 
     switch (NEA_Effect)
     {
@@ -2050,6 +2136,13 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     // Advance particle emitters once per frame.
     if (flags & NEA_UPDATE_PARTICLES)
         NEA_ParticleUpdateAll();
+
+    // Weak reference: the post-process effects are only linked when the user
+    // calls any NEA_PostFX* function. This runs after the vertical blank wait
+    // because the capture effects re-map VRAM banks, which is only safe here.
+    extern void NEA_PostFXUpdate(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_POSTFX) && NEA_PostFXUpdate)
+        NEA_PostFXUpdate();
 
     ne_cpucount = 0;
 }

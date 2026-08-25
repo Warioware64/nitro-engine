@@ -140,6 +140,133 @@ void NEA_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth)
     }
 }
 
+// Fog density curves
+// ------------------
+//
+// The hardware fog unit (GBATEK "FOG_TABLE") has 32 density entries covering
+// depth boundaries
+//
+//     FogDepthBoundary[n] = FOG_OFFSET + FOG_STEP * (n + 1)   , n = 0..31
+//     FOG_STEP            = 0x400 >> FOG_SHIFT
+//
+// so the band covers FOG_OFFSET .. FOG_OFFSET + (0x8000 >> FOG_SHIFT). Density
+// is linearly interpolated between entries, and the blend is
+//
+//     out = (fog * density + pixel * (128 - density)) / 128
+//
+// Entry 0 must stay at zero: GBATEK documents a hardware glitch where the fog
+// alpha is treated as 0x1F in the region before the first density boundary,
+// which is only invisible because density[0] is normally 0.
+//
+// None of the curve maths below divides. The tables are built once per
+// configuration call, never per frame.
+
+// Picks the largest FOG_SHIFT whose 32 bands still span `range` depth units.
+// Larger shift means tighter bands, so this is the finest resolution that still
+// reaches as far as the caller asked for.
+static u32 ne_fog_shift_for_range(int range)
+{
+    if (range <= 0)
+        return 10;
+
+    // span(shift) = 0x8000 >> shift. Find the largest shift with span >= range.
+    for (u32 shift = 10; shift > 0; shift--)
+    {
+        if ((0x8000 >> shift) >= (u32)range)
+            return shift;
+    }
+
+    return 0;
+}
+
+static void ne_fog_build_table(NEA_FogCurve curve, u8 table[32])
+{
+    // Entry 0 is always zero, see the glitch note above.
+    table[0] = 0;
+
+    for (int i = 1; i < 32; i++)
+    {
+        int density;
+
+        switch (curve)
+        {
+            case NEA_FOG_SQUARED:
+            {
+                // t^2, where t = i/31. 127/(31*31) = 0.13215 ~= 4331/32768.
+                density = (i * i * 4331) >> 15;
+                break;
+            }
+            case NEA_FOG_EXP:
+            {
+                // 1 - (7/8)^i, approached iteratively so there is no pow().
+                // Dense close to the camera, which is what a smoke-filled or
+                // dust-filled interior looks like.
+                density = 0;
+                for (int k = 0; k < i; k++)
+                    density += (127 - density + 7) >> 3;
+                break;
+            }
+            case NEA_FOG_SMOOTHSTEP:
+            {
+                // 3t^2 - 2t^3 in 1.12 fixed point. t = i/31 ~= i * 132 / 4096.
+                int t  = i * 132;
+                int t2 = (t * t) >> 12;
+                int t3 = (t2 * t) >> 12;
+                int s  = 3 * t2 - 2 * t3;
+                density = (s * 127) >> 12;
+                break;
+            }
+            case NEA_FOG_LINEAR:
+            default:
+            {
+                // t, where t = i/31. 127/31 = 4.0968 ~= 4196/1024.
+                density = (i * 4196) >> 10;
+                break;
+            }
+        }
+
+        // Entries are 7 bit
+        if (density > 127)
+            density = 127;
+        if (density < 0)
+            density = 0;
+
+        table[i] = (u8)density;
+    }
+}
+
+void NEA_FogEnableCurve(NEA_FogCurve curve, u32 color, u32 alpha,
+                       u32 near_depth, u32 far_depth)
+{
+    NEA_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
+
+    if (far_depth <= near_depth)
+    {
+        NEA_DebugPrint("Fog far depth is not beyond near depth");
+        return;
+    }
+
+    if (near_depth > 0x7FFF)
+        near_depth = 0x7FFF;
+    if (far_depth > 0x7FFF)
+        far_depth = 0x7FFF;
+
+    NEA_FogDisable();
+
+    u32 shift = ne_fog_shift_for_range((int)(far_depth - near_depth));
+
+    GFX_CONTROL |= GL_FOG | ((shift & 0xF) << 8);
+
+    GFX_FOG_COLOR = color | (alpha << 16);
+    GFX_FOG_OFFSET = near_depth;
+
+    u8 table[32];
+    ne_fog_build_table(curve, table);
+
+    for (int i = 0; i < 32; i++)
+        GFX_FOG_TABLE[i] = table[i];
+}
+
 // The GFX_CLEAR_COLOR register is write-only. This holds a copy of its value in
 // order for the code to be able to modify individual fields.
 static u32 ne_clearcolor = 0;

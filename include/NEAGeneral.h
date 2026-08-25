@@ -475,7 +475,14 @@ typedef enum {
     NEA_UPDATE_PHYS3D = BIT(10),
     /// Advances background tasks and runs the completion callbacks of the ones
     /// that have finished (calls NEA_ThreadProcess()).
-    NEA_UPDATE_TASKS = BIT(11)
+    NEA_UPDATE_TASKS = BIT(11),
+    /// Advances the PPU post-process effects that need per-frame work
+    /// (calls NEA_PostFXUpdate()).
+    ///
+    /// Only the capture-based effects need this; glow, flash, mosaic and
+    /// windows are pure register state and keep working without it. Does
+    /// nothing unless the project calls into NEAPostFX.h.
+    NEA_UPDATE_POSTFX = BIT(12)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

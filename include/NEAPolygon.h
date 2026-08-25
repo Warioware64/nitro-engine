@@ -346,7 +346,7 @@ static inline void NEA_ClearBMPScroll(u32 x, u32 y)
 /// The values must be determined by trial and error.
 ///
 /// The depth is the distance to the start of the fog from the camera. Use the
-/// helpers float_to_12d3() or int_to_12d3().
+/// helpers floatto12d3() or intto12d3().
 ///
 /// @param shift Distance between fog bands (1 - 15).
 /// @param color Fog color.
@@ -354,6 +354,81 @@ static inline void NEA_ClearBMPScroll(u32 x, u32 y)
 /// @param mass Mass of fog.
 /// @param depth Start point of fog (0 - 7FFFh)
 void NEA_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth);
+
+/// Shape of the fog density ramp used by NEA_FogEnableCurve().
+///
+/// All four ramps start at zero density at the near distance and rise to full
+/// density at the far distance. They differ in how the density is distributed
+/// in between, which is what gives a scene its atmosphere.
+typedef enum {
+    /// Density rises evenly with distance. The original NEA_FogEnable()
+    /// behaviour, and the right default for outdoor or neutral scenes.
+    NEA_FOG_LINEAR = 0,
+
+    /// Density rises slowly at first, then quickly. Keeps near geometry crisp
+    /// while still burying the far wall. Good for large open interiors.
+    NEA_FOG_SQUARED,
+
+    /// Density rises quickly and then flattens out. Everything past the middle
+    /// of the range is nearly fully fogged, which reads as thick smoke or dust.
+    /// The heaviest of the four.
+    NEA_FOG_EXP,
+
+    /// Eased in and out (3t^2 - 2t^3). The band boundaries are least visible
+    /// with this ramp, so use it when linear fog looks stepped.
+    NEA_FOG_SMOOTHSTEP
+} NEA_FogCurve;
+
+/// Enables fog with a density curve and an explicit near/far depth.
+///
+/// This is a friendlier alternative to NEA_FogEnable(): instead of the
+/// trial-and-error `shift`/`mass` pair, you say where the fog starts, where it
+/// becomes opaque, and what shape the ramp has in between. The hardware fog
+/// shift is derived from the range for you (the tightest bands that still reach
+/// `far_depth`).
+///
+/// **Depths are raw 15 bit depth-buffer values (0 - 0x7FFF), not world units.**
+/// What they mean depends on the depth buffer mode:
+///
+/// - Z-buffering (the NEA default): depth is the usual non-linear perspective
+///   depth. With the default 0.1/40 clipping planes almost the whole visible
+///   scene lands in 0x7000 - 0x7FFF, which is why hand-tuned fog offsets always
+///   look like 0x7C00.
+/// - W-buffering (NEA_SetDepthBufferMode(NEA_WBUFFER)): depth is the view
+///   distance in 12.3 fixed point, so intto12d3() works.
+///
+/// Rather than working this out by hand, use NEA_FogDepthFromDistance() to turn
+/// a world-space distance into the right value for the current mode.
+///
+/// The range the hardware can express is quantised to powers of two, so the
+/// effective far depth is `near_depth + (0x8000 >> shift)`, which is at least
+/// the `far_depth` you asked for and less than twice the requested range.
+///
+/// Costs nothing per frame: this builds the 32-entry density table once and
+/// uploads it. Call it again to change the look. Uses no VRAM.
+///
+/// @param curve Shape of the density ramp.
+/// @param color Fog color.
+/// @param alpha Alpha value (0 - 31).
+/// @param near_depth Depth at which fog starts (0 - 0x7FFF).
+/// @param far_depth Depth at which fog is fully opaque (0 - 0x7FFF).
+void NEA_FogEnableCurve(NEA_FogCurve curve, u32 color, u32 alpha,
+                       u32 near_depth, u32 far_depth);
+
+/// Converts a view-space distance into a depth value usable as a fog boundary.
+///
+/// Honours the current depth buffer mode (NEA_SetDepthBufferMode()) and the
+/// current clipping planes (NEA_ClippingPlanesSetI()), so the result stays
+/// correct if either changes. Feed the results straight into
+/// NEA_FogEnableCurve().
+///
+/// This is a setup-time helper: it uses 64 bit maths and a division. Call it
+/// when fog settings change, not every frame.
+///
+/// @param distance View-space distance from the camera, in f32 (1.19.12).
+///                 Use floattof32() or inttof32().
+/// @return The matching 15 bit depth value (0 - 0x7FFF).
+u32 NEA_FogDepthFromDistance(int32_t distance);
 
 /// Enable or disable the background fog.
 ///
