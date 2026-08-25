@@ -408,6 +408,118 @@ void NEA_PostFXCaptureMosaic(int h, int v);
 /// NEA_UPDATE_POSTFX is passed; you do not normally call this yourself.
 void NEA_PostFXUpdate(void);
 
+// ---------------------------------------------------------------------------
+// Per-scanline distortion (HBlank driven)
+// ---------------------------------------------------------------------------
+
+/// What a per-scanline table drives.
+typedef enum {
+    /// Horizontal scroll of the 3D layer, via REG_BG0HOFS.
+    ///
+    /// The only per-scanline distortion that works on the 3D image **without**
+    /// the capture pipeline, because BG0HOFS is the only transform the 3D layer
+    /// supports. GBATEK: "Vertical scrolling (and rotation/scaling) cannot be
+    /// used on the 3D layer." Good for heat haze and underwater warp.
+    NEA_SCANLINE_BG0HOFS = 0,
+
+    /// Horizontal offset of the captured scene, via REG_BG2X.
+    ///
+    /// Requires the capture pipeline (NEA_PostFXCaptureInit()). Because the
+    /// captured image is an ordinary affine bitmap background, this can shift
+    /// it by sub-pixel amounts and does not wrap the way BG0HOFS does.
+    NEA_SCANLINE_BG2X,
+
+    /// Half-width of window 0 per scanline, via REG_WIN0H.
+    ///
+    /// This is what turns the rectangular vignette window into a flashlight
+    /// cone or a round iris: each entry is the half-width of the lit region on
+    /// that line, measured from the centre set with
+    /// NEA_PostFXScanlineSetWindowCenter(). Entries of 0 or less close the
+    /// window completely on that line.
+    NEA_SCANLINE_WIN0H,
+
+    NEA_SCANLINE_TARGET_COUNT
+} NEA_ScanlineTarget;
+
+/// Number of table entries: one per visible scanline.
+#define NEA_SCANLINE_ENTRIES 192
+
+/// Installs a caller-provided table of per-scanline values.
+///
+/// The table is copied into the module's own static storage, so the caller's
+/// buffer does not need to stay alive. Nothing is allocated.
+///
+/// @param target Which register the table drives.
+/// @param table Array of NEA_SCANLINE_ENTRIES values, or NULL to zero it.
+void NEA_PostFXScanlineSetTable(NEA_ScanlineTarget target, const s16 *table);
+
+/// Fills a table with a sine wave.
+///
+/// Uses libnds' sinLerp(), so there is no floating point and no division. This
+/// walks all 192 entries, which costs on the order of 4000 cycles -- cheap
+/// enough to call every frame (about 0.3% of a 66 MHz frame), which is what
+/// NEA_PostFXScanlineAdvancePhase() does to animate the warp.
+///
+/// @param target Which table to fill.
+/// @param amplitude Peak displacement in pixels.
+/// @param freq How many sine periods span the screen, in 1/16 units
+///             (16 = one period top to bottom).
+/// @param phase Starting phase (0 - 511).
+void NEA_PostFXScanlineGenerateSine(NEA_ScanlineTarget target, int amplitude,
+                                   int freq, int phase);
+
+/// Advances the phase of a previously generated sine table and refills it.
+///
+/// Call once per frame to animate a heat haze. Only valid for tables built
+/// with NEA_PostFXScanlineGenerateSine().
+///
+/// @param target Which table to advance.
+/// @param delta Phase increment (0 - 511 wraps).
+void NEA_PostFXScanlineAdvancePhase(NEA_ScanlineTarget target, int delta);
+
+/// Sets the horizontal centre used by NEA_SCANLINE_WIN0H.
+///
+/// @param x Screen column the lit region is centred on (0 - 255).
+void NEA_PostFXScanlineSetWindowCenter(int x);
+
+/// Fills the NEA_SCANLINE_WIN0H table with a circular iris.
+///
+/// Produces the half-width of a circle of the given radius centred on
+/// `center_y`, which reads as a flashlight cone or an iris-in transition when
+/// combined with NEA_PostFXVignetteEnable(). Uses a plain integer square root,
+/// no division and no floating point.
+///
+/// @param center_y Vertical centre of the circle (0 - 191).
+/// @param radius Circle radius in pixels.
+void NEA_PostFXScanlineGenerateCircle(int center_y, int radius);
+
+/// Enables or disables one per-scanline table.
+///
+/// Each target is independent, so a heat haze and a flashlight cone can run at
+/// the same time. Enabling any of them installs the HBlank hook.
+///
+/// @section postfx_scanline_cost Cost
+///
+/// No VRAM and no BG layer. The cost is CPU time in the HBlank interrupt, paid
+/// 192 times a frame. The handler itself is a table index and one or two
+/// register writes per enabled target, and it lives in ITCM so it does not
+/// compete for the instruction cache -- but the interrupt entry and exit around
+/// it dominate, and that overhead is libnds', not NEA's.
+///
+/// A scanline is 2130 master cycles (~63.6 us) of which HBlank is 99 dots
+/// (~17.7 us, about 1188 ARM9 cycles at 66 MHz and 2376 at 133 MHz). The
+/// per-scanline example measures the real figure with a hardware timer and
+/// prints it. Measured under melonDS it is **32 of 594 ticks (5%) with one
+/// table active and 42 ticks (7%) with two**, so roughly 10 ticks per extra
+/// target on top of a fixed ~22 tick interrupt overhead. That is a large
+/// margin, but it was measured in an emulator: melonDS does not model
+/// interrupt entry cost exactly, and an original DS has half the cycle budget
+/// of a DSi. Re-run the example on hardware before relying on that headroom.
+///
+/// @param target Which table.
+/// @param enable true to drive the register from the table.
+void NEA_PostFXScanlineEnable(NEA_ScanlineTarget target, bool enable);
+
 /// @}
 
 #endif // NEA_POSTFX_H__

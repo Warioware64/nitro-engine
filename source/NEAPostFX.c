@@ -749,3 +749,179 @@ void NEA_PostFXUpdate(void)
                    | DCAP_SRC_A(DCAP_SRC_A_COMPOSITED)
                    | DCAP_ENABLE;
 }
+
+//-----------------------------------------------------------------------------
+// Per-scanline distortion (HBlank driven)
+//-----------------------------------------------------------------------------
+
+// Static storage, sized at compile time: 3 tables of 192 entries is 1152 bytes.
+static s16 ne_scanline_table[NEA_SCANLINE_TARGET_COUNT][NEA_SCANLINE_ENTRIES];
+static u8 ne_scanline_on[NEA_SCANLINE_TARGET_COUNT];
+static int ne_scanline_win_center = 128;
+
+// Remembered sine parameters so AdvancePhase() can refill without the caller
+// having to keep them.
+static s16 ne_scanline_amp[NEA_SCANLINE_TARGET_COUNT];
+static s16 ne_scanline_freq[NEA_SCANLINE_TARGET_COUNT];
+static s16 ne_scanline_phase[NEA_SCANLINE_TARGET_COUNT];
+
+extern void __NEA_SetHBLPostFXHook(void (*hook)(int vcount));
+
+// Runs on every visible scanline. Kept in ITCM and in ARM mode: at 192 calls a
+// frame the instruction fetch path matters more than code size, and a cache
+// miss here shows up as a visible tear rather than as a slow frame.
+ITCM_CODE ARM_CODE
+static void ne_postfx_hbl(int vcount)
+{
+    if ((unsigned)vcount >= NEA_SCANLINE_ENTRIES)
+        return;
+
+    if (ne_scanline_on[NEA_SCANLINE_BG0HOFS])
+        REG_BG0HOFS = (u16)ne_scanline_table[NEA_SCANLINE_BG0HOFS][vcount];
+
+    if (ne_scanline_on[NEA_SCANLINE_BG2X])
+    {
+        // BG2X is 20.8 fixed point. Writing it mid-frame updates the internal
+        // register for the following lines; BG2Y keeps auto-incrementing by
+        // BG2PD on its own, so the image still advances a row per scanline.
+        REG_BG2X = ((s32)ne_scanline_table[NEA_SCANLINE_BG2X][vcount]) << 8;
+    }
+
+    if (ne_scanline_on[NEA_SCANLINE_WIN0H])
+    {
+        int half = ne_scanline_table[NEA_SCANLINE_WIN0H][vcount];
+
+        if (half <= 0)
+        {
+            // Closed on this line. x1 == x2 leaves an empty window.
+            REG_WIN0H = 0;
+        }
+        else
+        {
+            int x1 = ne_scanline_win_center - half;
+            int x2 = ne_scanline_win_center + half;
+
+            if (x1 < 0)
+                x1 = 0;
+            if (x2 > 255)
+                x2 = 255;
+
+            REG_WIN0H = (u16)((x1 << 8) | ((x2 + 1) & 0xFF));
+        }
+    }
+}
+
+static void ne_scanline_refresh_hook(void)
+{
+    for (int i = 0; i < NEA_SCANLINE_TARGET_COUNT; i++)
+    {
+        if (ne_scanline_on[i])
+        {
+            __NEA_SetHBLPostFXHook(ne_postfx_hbl);
+            return;
+        }
+    }
+
+    __NEA_SetHBLPostFXHook(NULL);
+}
+
+void NEA_PostFXScanlineSetTable(NEA_ScanlineTarget target, const s16 *table)
+{
+    if ((unsigned)target >= NEA_SCANLINE_TARGET_COUNT)
+        return;
+
+    if (table == NULL)
+    {
+        for (int i = 0; i < NEA_SCANLINE_ENTRIES; i++)
+            ne_scanline_table[target][i] = 0;
+        return;
+    }
+
+    for (int i = 0; i < NEA_SCANLINE_ENTRIES; i++)
+        ne_scanline_table[target][i] = table[i];
+}
+
+void NEA_PostFXScanlineGenerateSine(NEA_ScanlineTarget target, int amplitude,
+                                   int freq, int phase)
+{
+    if ((unsigned)target >= NEA_SCANLINE_TARGET_COUNT)
+        return;
+
+    ne_scanline_amp[target] = (s16)amplitude;
+    ne_scanline_freq[target] = (s16)freq;
+    ne_scanline_phase[target] = (s16)(phase & 0x1FF);
+
+    for (int y = 0; y < NEA_SCANLINE_ENTRIES; y++)
+    {
+        // freq is in 1/16 periods per screen: 16 means one full period over the
+        // 192 lines. (y * freq) >> 4 keeps that in the 0-511 angle space
+        // without a division.
+        int angle = (((y * freq) >> 4) + phase) & 0x1FF;
+
+        // sinLerp() takes a 0-0x7FFF angle and returns f32 (4096 = 1.0).
+        int32_t s = sinLerp(angle << 6);
+
+        ne_scanline_table[target][y] = (s16)((s * amplitude) >> 12);
+    }
+}
+
+void NEA_PostFXScanlineAdvancePhase(NEA_ScanlineTarget target, int delta)
+{
+    if ((unsigned)target >= NEA_SCANLINE_TARGET_COUNT)
+        return;
+
+    int phase = (ne_scanline_phase[target] + delta) & 0x1FF;
+
+    NEA_PostFXScanlineGenerateSine(target, ne_scanline_amp[target],
+                                  ne_scanline_freq[target], phase);
+}
+
+void NEA_PostFXScanlineSetWindowCenter(int x)
+{
+    if (x < 0)
+        x = 0;
+    if (x > 255)
+        x = 255;
+
+    ne_scanline_win_center = x;
+}
+
+void NEA_PostFXScanlineGenerateCircle(int center_y, int radius)
+{
+    // half_width(y) = sqrt(r^2 - (y - cy)^2). sqrt32() is libnds' integer
+    // square root, so this stays free of both division and floating point.
+    int r2 = radius * radius;
+
+    for (int y = 0; y < NEA_SCANLINE_ENTRIES; y++)
+    {
+        int dy = y - center_y;
+        int d2 = dy * dy;
+
+        if (d2 >= r2)
+        {
+            ne_scanline_table[NEA_SCANLINE_WIN0H][y] = 0;
+            continue;
+        }
+
+        ne_scanline_table[NEA_SCANLINE_WIN0H][y] = (s16)sqrt32(r2 - d2);
+    }
+}
+
+void NEA_PostFXScanlineEnable(NEA_ScanlineTarget target, bool enable)
+{
+    if ((unsigned)target >= NEA_SCANLINE_TARGET_COUNT)
+        return;
+
+    if (!enable && ne_scanline_on[target])
+    {
+        // Put the register back where the rest of the engine expects it,
+        // otherwise the last scanline's value sticks for the whole screen.
+        if (target == NEA_SCANLINE_BG0HOFS)
+            REG_BG0HOFS = 0;
+        else if (target == NEA_SCANLINE_BG2X)
+            REG_BG2X = 0;
+    }
+
+    ne_scanline_on[target] = enable ? 1 : 0;
+    ne_scanline_refresh_hook();
+}

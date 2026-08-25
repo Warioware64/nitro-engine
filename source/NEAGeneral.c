@@ -1950,6 +1950,20 @@ void NEA_SpecialEffectPause(bool pause)
     NEA_effectpause = pause;
 }
 
+// Per-scanline hook for NEAPostFX. A plain function pointer rather than a weak
+// symbol: this runs 192 times a frame, so the NULL check has to be a load and a
+// branch, not a call into a stub.
+static void (*ne_hbl_postfx_hook)(int vcount) = NULL;
+
+void __NEA_SetHBLPostFXHook(void (*hook)(int vcount))
+{
+    ne_hbl_postfx_hook = hook;
+}
+
+// In ITCM: this runs on every one of the 192 visible scanlines, so leaving it
+// in main RAM means it competes for the 8 KiB instruction cache with whatever
+// the frame is actually doing, and the per-line cost becomes unpredictable.
+ITCM_CODE ARM_CODE
 void NEA_HBLFunc(void)
 {
     if (ne_execution_mode == NEA_ModeUninitialized)
@@ -1965,6 +1979,9 @@ void NEA_HBLFunc(void)
     int vcount = REG_VCOUNT;
     if (vcount == 262)
         vcount = 0;
+
+    if (ne_hbl_postfx_hook != NULL)
+        ne_hbl_postfx_hook(vcount);
 
     switch (NEA_Effect)
     {
