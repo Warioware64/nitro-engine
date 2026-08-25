@@ -1689,6 +1689,61 @@ void NEA_ClippingPlanesSetI(int znear, int zfar)
     ne_zfar = zfar;
 }
 
+// Converts a view-space distance to the 15 bit depth value that the fog unit
+// compares against. This lives here rather than in NEAPolygon.c because it
+// needs the clipping planes and the depth buffer mode, which are both owned by
+// this file.
+//
+// The two depth buffer modes store completely different things, which is the
+// whole reason this helper exists:
+//
+//   W-buffering: the buffer holds the view distance directly, in 12.3 fixed
+//                point, so the conversion is a shift.
+//
+//   Z-buffering (the NEA default): the buffer holds the usual perspective depth
+//                depth = zfar * (d - znear) / (d * (zfar - znear))
+//                which is wildly non-linear. With the default 0.1/40 planes,
+//                everything from 2 units outwards lands in 0x7000..0x7FFF,
+//                which is why hand-picked fog offsets always look like 0x7C00.
+//
+// This is a setup-time helper. It uses 64 bit maths and a division, neither of
+// which belongs in a per-frame path, so call it when fog settings change and
+// keep the result.
+u32 NEA_FogDepthFromDistance(int32_t distance)
+{
+    if (distance <= 0)
+        return 0;
+
+    if (ne_depth_buffer_mode == NEA_WBUFFER)
+    {
+        // f32 (1.19.12) -> 12.3 is a shift right by 9.
+        int32_t depth = distance >> 9;
+        if (depth > 0x7FFF)
+            depth = 0x7FFF;
+        return (u32)depth;
+    }
+
+    if (distance <= ne_znear)
+        return 0;
+    if (distance >= ne_zfar)
+        return 0x7FFF;
+
+    int64_t num = (int64_t)ne_zfar * (int64_t)(distance - ne_znear);
+    int64_t den = (int64_t)distance * (int64_t)(ne_zfar - ne_znear);
+
+    if (den == 0)
+        return 0x7FFF;
+
+    int64_t depth = (num * 0x7FFF) / den;
+
+    if (depth < 0)
+        depth = 0;
+    if (depth > 0x7FFF)
+        depth = 0x7FFF;
+
+    return (u32)depth;
+}
+
 void NEA_AntialiasEnable(bool value)
 {
     if (value)
