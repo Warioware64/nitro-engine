@@ -64,7 +64,8 @@ typedef enum {
     NEA_DL_CPU,          ///< Send all data to the GPU with CPU copy loop.
     NEA_DL_DMA_GFX_FIFO, ///< Default. DMA in GFX FIFO mode (incompatible with safe dual 3D)
     NEA_DL_NDMA_GFX_FIFO,///< DSi-only NDMA in GFX FIFO mode (safe with dual 3D DMA and two-pass). Opt-in via NEA_DisplayListEnableNDMA(); never selected automatically.
-    // TODO: Support DMA without GFX FIFO DMA mode, using GFX FIFO IRQ instead.
+    NEA_DL_DMA_GFX_IRQ,  ///< DMA in immediate mode, block-fed using the GFX FIFO IRQ (safe with dual 3D DMA and two-pass, works on DS).
+    NEA_DL_NDMA_GFX_IRQ, ///< DSi-only NDMA in immediate mode, block-fed using the GFX FIFO IRQ. Falls back to NEA_DL_DMA_GFX_IRQ on DS.
 } NEA_DisplayListDrawFunction;
 
 /// Sends a display list to the GPU by using the DMA in GFX FIFO mode.
@@ -102,6 +103,38 @@ void NEA_DisplayListDrawNDMA_GFX_FIFO(const void *list);
 /// @param enable true to use NDMA on DSi, false to use the legacy DMA / CPU path.
 void NEA_DisplayListEnableNDMA(bool enable);
 
+/// Sends a display list to the GPU by using DMA gated by the GFX FIFO IRQ.
+///
+/// Unlike NEA_DisplayListDrawDMA_GFX_FIFO(), this function doesn't use the DMA
+/// GFX FIFO start mode. It pushes the list in small blocks with plain immediate
+/// mode transfers, and only starts a block when the GFX FIFO reports enough free
+/// space. Because of that, the DMA channel is never left waiting for the GPU and
+/// this function is safe in the modes that keep a legacy DMA channel running
+/// continuously (safe dual 3D and the two-pass modes), where it replaces the
+/// much slower CPU copy loop. It works on both DS and DSi.
+///
+/// When there is no space left in the GFX FIFO, this function waits for the
+/// geometry FIFO interrupt instead of busy-waiting. The first call installs a
+/// handler for IRQ_GEOMETRY_FIFO, which will overwrite any handler set by the
+/// application for that interrupt. NEA_End() removes it again.
+///
+/// @param list Pointer to the display list
+void NEA_DisplayListDrawDMA_GFX_IRQ(const void *list);
+
+/// Sends a display list to the GPU by using the DSi NDMA gated by the GFX FIFO
+/// IRQ.
+///
+/// This is the NDMA version of NEA_DisplayListDrawDMA_GFX_IRQ(), with the same
+/// properties and the same use of IRQ_GEOMETRY_FIFO. On a DS (not DSi) this
+/// function falls back to NEA_DisplayListDrawDMA_GFX_IRQ().
+///
+/// Note that on DSi NEA_DisplayListDrawNDMA_GFX_FIFO() is normally faster, as
+/// the GFX FIFO start mode lets the hardware pace the transfer. Use this one if
+/// you don't want an NDMA channel to be held by a FIFO mode transfer.
+///
+/// @param list Pointer to the display list
+void NEA_DisplayListDrawNDMA_GFX_IRQ(const void *list);
+
 /// Sends a display list to the GPU by using a CPU copy loop.
 ///
 /// @param list Pointer to the display list
@@ -112,10 +145,17 @@ void NEA_DisplayListDrawCPU(const void *list);
 /// Important note: NEA_DL_DMA_GFX_FIFO isn't compatible with safe dual 3D mode
 /// because it uses DMA in horizontal blanking start mode. There is a hardware
 /// bug that makes it unreliable to have both DMA channels active at the same
-/// time in HBL start and GFX FIFO mode.
+/// time in HBL start and GFX FIFO mode. Use NEA_DL_DMA_GFX_IRQ (or
+/// NEA_DL_NDMA_GFX_IRQ / NEA_DL_NDMA_GFX_FIFO on DSi) in that case: they don't
+/// use the GFX FIFO start mode, so they aren't affected by the bug. They are
+/// the default in the modes that keep a DMA channel running continuously.
 ///
 /// @param type Copy type to use.
 void NEA_DisplayListSetDefaultFunction(NEA_DisplayListDrawFunction type);
+
+/// Internal use. Releases IRQ_GEOMETRY_FIFO if any of the IRQ-driven display
+/// list paths has claimed it. Called by NEA_End().
+void __NEA_GfxFifoIrqEnd(void);
 
 /// Draw a display list using the selected default function.
 ///

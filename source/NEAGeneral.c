@@ -81,6 +81,10 @@ void NEA_End(void)
     // point would be writing into VRAM banks that have been released.
     NEA_ThreadSystemEnd();
 
+    // Release IRQ_GEOMETRY_FIFO if any of the IRQ-driven display list paths
+    // has claimed it, so that it isn't left hooked after shutdown.
+    __NEA_GfxFifoIrqEnd();
+
     NEA_ParticleSystemEnd();
 
     vramSetBankA(VRAM_A_LCD);
@@ -451,10 +455,11 @@ static NEA_DisplayListDrawFunction ne_gxfifo_dl_default(void)
 
 // Display-list path for modes that keep a legacy DMA channel running
 // continuously (safe dual 3D, two-pass): NDMA when enabled on DSi (a separate
-// engine, no deadlock), else the CPU copy loop.
+// engine, no deadlock), else DMA in immediate mode fed in blocks through the
+// GFX FIFO IRQ, which never holds a DMA channel and works on DS too.
 static NEA_DisplayListDrawFunction ne_continuous_dl_default(void)
 {
-    return ne_use_ndma() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_CPU;
+    return ne_use_ndma() ? NEA_DL_NDMA_GFX_FIFO : NEA_DL_DMA_GFX_IRQ;
 }
 
 // Re-select the default display-list draw function for the current mode. Lets
@@ -640,7 +645,8 @@ int NEA_InitDual3D_DMA(void)
     // Safe dual 3D keeps legacy DMA 2 running in HBL mode, which would deadlock
     // the legacy DMA GFX FIFO path. NDMA on DSi (when enabled via
     // NEA_DisplayListEnableNDMA()) is a separate engine unaffected by that;
-    // otherwise fall back to CPU.
+    // otherwise use the GFX FIFO IRQ path, which doesn't use the GFX FIFO DMA
+    // start mode and doesn't wait for the other DMA channels.
     NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
@@ -705,7 +711,8 @@ int NEA_Init3D_TwoPass(void)
     // continuously (DMA_DISP_FIFO | DMA_REPEAT), so dmaBusy(2) is always true
     // and that wait deadlocks. NDMA on DSi (when enabled via
     // NEA_DisplayListEnableNDMA()) is a separate engine that isn't affected;
-    // otherwise use CPU.
+    // otherwise use the GFX FIFO IRQ path, which only waits for its own
+    // channel.
     NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
@@ -813,7 +820,8 @@ int NEA_Init3D_TwoPass_DMA(void)
     // legacy DMA channels to be idle. DMA 2 is active during HBL periods, which
     // would cause stalls/deadlocks. NDMA on DSi (when enabled via
     // NEA_DisplayListEnableNDMA()) is a separate engine that isn't affected;
-    // otherwise use CPU.
+    // otherwise use the GFX FIFO IRQ path, which only waits for its own
+    // channel.
     NEA_DisplayListSetDefaultFunction(ne_continuous_dl_default());
 
     NEA_UpdateInput();
