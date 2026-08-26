@@ -165,16 +165,13 @@ DEPS		:= $(OBJS:.o=.d) $(OBJS_BOX3D:.o=.d)
 # Targets
 # -------
 
-.PHONY: all clean install arm7 itcm-report
+.PHONY: all clean install itcm-report
 
 ifeq ($(NEA_NO_BOX3D),1)
 all: $(ARCHIVE)
 else
 all: $(ARCHIVE) $(ARCHIVE_BOX3D)
 endif
-
-arm7:
-	$(V)+$(MAKE) -C arm7 -f Makefile.blocksds --no-print-directory
 
 # Print what each ITCM group costs and what the current selection adds up to.
 #
@@ -266,17 +263,15 @@ $(ARCHIVE_BOX3D): $(OBJS_BOX3D)
 	@$(MKDIR) -p $(@D)
 	$(V)$(AR) rcs $@ $(OBJS_BOX3D)
 
-install: all arm7
+install: all
 	@echo "  INSTALL $(BLOCKSDSEXT)/$(INSTALLNAME)/"
 	$(V)$(RM) $(BLOCKSDSEXT)/$(INSTALLNAME)/
 	$(V)$(INSTALL) -d $(BLOCKSDSEXT)/$(INSTALLNAME)/ \
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/img2ds \
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/md5_to_dsma \
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/obj2dl \
-					  $(BLOCKSDSEXT)/$(INSTALLNAME)/blender_addon \
-	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/arm7
+					  $(BLOCKSDSEXT)/$(INSTALLNAME)/blender_addon
 	$(V)$(CP) -r include lib $(BLOCKSDSEXT)/$(INSTALLNAME)/
-	$(V)$(CP) arm7/arm7_nea.elf arm7/arm7_nea_maxmod.elf $(BLOCKSDSEXT)/$(INSTALLNAME)/arm7/
 	$(V)$(CP) -r blender_addon/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/blender_addon
 	$(V)$(CP) -r tools/img2ds/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/img2ds
 	$(V)$(CP) -r tools/md5_to_dsma/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/md5_to_dsma
@@ -286,7 +281,6 @@ install: all arm7
 clean:
 	@echo "  CLEAN"
 	$(V)$(RM) $(ARCHIVE) $(ARCHIVE_BOX3D) build_debug build_release
-	$(V)+$(MAKE) -C arm7 -f Makefile.blocksds clean --no-print-directory
 
 # Rules
 # -----

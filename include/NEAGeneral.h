@@ -464,8 +464,8 @@ typedef enum {
     NEA_UPDATE_SOUND = BIT(4),
     /// Updates animated material instances.
     NEA_UPDATE_ANIM_MAT = BIT(5),
-    /// Synchronizes ARM7 rigid body physics state.
-    NEA_UPDATE_RIGIDBODY = BIT(6),
+    // BIT(6) is unused: it belonged to the removed ARM7 rigid body system.
+    // Left as a gap so that the flags below keep their values.
     /// Flushes hardware 2D OAM data for sprites.
     NEA_UPDATE_HW2D = BIT(7),
     /// Advances asynchronous asset loads (calls NEA_AsyncProcess()).
@@ -496,7 +496,7 @@ typedef enum {
 ///
 /// In two-pass modes this runs twice per displayed frame (once per half). The
 /// scene-state flags (NEA_UPDATE_ANIMATIONS, NEA_UPDATE_PHYSICS,
-/// NEA_UPDATE_ANIM_MAT, NEA_UPDATE_RIGIDBODY, NEA_UPDATE_PARTICLES) are applied
+/// NEA_UPDATE_ANIM_MAT, NEA_UPDATE_PARTICLES) are applied
 /// automatically only at the complete-frame boundary, so you can pass them
 /// unconditionally without shearing the two halves. Sound, async asset finalize,
 /// GUI and HW2D keep running every hardware frame.

@@ -354,8 +354,7 @@ void NEA_Phys3DBodySetModel(NEA_Phys3DBody *body, NEA_Model *model)
 
 /// Push one body transform into its model.
 ///
-/// The transpose is the one NEA_RigidBodySync already proves out
-/// (NEARigidBody.c): b3MakeMatrixFromQuat returns row-major, m4x3 is
+/// The transpose matters: b3MakeMatrixFromQuat returns row-major, m4x3 is
 /// column-major, and m->x/y/z has to be written as well or the user-facing
 /// position queries go stale while the drawn model moves.
 static void nea_phys3d_apply_transform(NEA_Model *m, b3WorldTransform xf)

@@ -4,6 +4,35 @@ Changelog
 Unreleased
 ----------
 
+**The scene system and the ARM7 rigid body system were removed.** Both were
+designed badly enough to be unusable in practice, and neither was load-bearing:
+nothing inside the engine ever called into the scene system, and the rigid body
+system reached it through a single weak reference in ``NEA_WaitForVBL()``.
+
+- Gone from the library: ``NEAScene.c/h`` (the ``.neascene`` node hierarchy with
+  tags and trigger zones) and ``NEARigidBody.c/h`` with ``NEA_RB_IPC.h`` (OBB
+  bodies solved on the ARM7 over FIFO). ``NEAMain.h`` no longer includes
+  ``NEAScene.h``.
+- ``NEA_UPDATE_RIGIDBODY`` is gone from ``NEA_UpdateFlags``. Its ``BIT(6)`` is
+  left as a **gap** on purpose, so every other update flag keeps the value it
+  had -- code passing the surviving flags is unaffected.
+- **The whole ``arm7/`` subproject went with it.** It existed only to carry the
+  ARM7 solver, so ``arm7_nea.elf`` and ``arm7_nea_maxmod.elf`` are no longer
+  built or installed, and ``make install`` no longer creates
+  ``$(BLOCKSDSEXT)/nitro-engine-advanced/arm7/``. A project that set
+  ``ARM7ELF := .../arm7/arm7_nea.elf`` must go back to the stock
+  ``$(BLOCKSDS)/sys/default_arm7/arm7.elf``, which already supports Maxmod --
+  that is what every other example was using all along.
+- The authoring side went too: ``tools/neascene_export/`` and the ``.neascene``
+  half of the Blender addon (node panel, trigger overlay, scene export operator
+  and binary writer -- about 580 lines). The MD5, animated material, per-bone
+  collision and texture VRAM parts of the addon are untouched.
+- Examples removed: the four under ``examples/loading/scene_*`` and
+  ``examples/physics/rigid_body``.
+
+Box3D (``NEAPhysics3D``) is a separate ARM9 engine and is **not** affected; it
+remains the answer for rotating bodies, stacking and contact events.
+
 **Both mesh exporters gained ``--smooth-normals``.** Neither could produce smooth
 shading from geometry, and ``md5_to_dsma.py`` could not produce it at all: both
 its skinning paths computed one normal per triangle and handed it to all three

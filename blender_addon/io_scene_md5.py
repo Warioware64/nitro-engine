@@ -244,75 +244,6 @@ class NEA_OT_AutoFitCollision(bpy.types.Operator):
         return {'FINISHED'}
 
 
-###
-### Scene management system
-###
-
-class NEA_SceneNodeProps(bpy.types.PropertyGroup):
-    """Per-object scene node properties for NEA scene export."""
-    node_type: EnumProperty(
-        items=[
-            ('auto', 'Auto', 'Detect type automatically (mesh/camera/empty)'),
-            ('empty', 'Empty', 'Group/transform node'),
-            ('mesh', 'Mesh', 'Renderable mesh node'),
-            ('camera', 'Camera', 'Camera node'),
-            ('trigger', 'Trigger', 'Collision zone with callbacks'),
-        ],
-        name="Node Type",
-        description="Scene node type for NEA export",
-        default='auto',
-    )
-    tags: StringProperty(
-        name="Tags",
-        description="Comma-separated tags (max 3, 15 chars each)",
-        default="",
-    )
-    is_active_camera: BoolProperty(
-        name="Active Camera",
-        description="Set this camera as the active scene camera",
-        default=False,
-    )
-    visible: BoolProperty(
-        name="Visible",
-        description="Node and its children are visible on load",
-        default=True,
-    )
-    script_id: IntProperty(
-        name="Script ID",
-        description="Identifier for trigger scripts (0-255)",
-        min=0, max=255, default=0,
-    )
-    trigger_shape: EnumProperty(
-        items=[
-            ('sphere', 'Sphere', 'Spherical trigger zone'),
-            ('aabb', 'AABB', 'Axis-aligned bounding box trigger zone'),
-        ],
-        name="Trigger Shape",
-        description="Collision shape for trigger zone",
-        default='sphere',
-    )
-    trigger_radius: FloatProperty(
-        name="Radius",
-        description="Trigger sphere radius",
-        default=1.0, min=0.01,
-    )
-    trigger_half_x: FloatProperty(
-        name="Half X",
-        description="AABB half-extent on X axis",
-        default=1.0, min=0.01,
-    )
-    trigger_half_y: FloatProperty(
-        name="Half Y",
-        description="AABB half-extent on Y axis",
-        default=1.0, min=0.01,
-    )
-    trigger_half_z: FloatProperty(
-        name="Half Z",
-        description="AABB half-extent on Z axis",
-        default=1.0, min=0.01,
-    )
-
-
 class NEA_AddonPreferences(bpy.types.AddonPreferences):
     """Addon preferences for NEA tools (Edit > Preferences > Add-ons)."""
     bl_idname = __name__
@@ -338,496 +269,6 @@ class NEA_AddonPreferences(bpy.types.AddonPreferences):
             else:
                 layout.label(text="'tools/' not found at this path",
                              icon='ERROR')
-
-
-class NEA_SceneSettings(bpy.types.PropertyGroup):
-    """Per-scene settings for NEA scene export."""
-    scene_name: StringProperty(
-        name="Scene Name",
-        description="Default file name for export (without extension)",
-        default="level",
-    )
-    scale: FloatProperty(
-        name="Scale",
-        description="Scale factor for position values",
-        default=1.0, min=0.01, max=1000.0,
-    )
-
-
-# Trigger zone viewport overlay draw handler
-_trigger_draw_handler = None
-
-
-def _draw_trigger_overlays():
-    """GPU draw callback for trigger zone wireframe visualization."""
-    import gpu
-    from gpu_extras.batch import batch_for_shader
-
-    context = bpy.context
-    scene = context.scene
-    if not getattr(scene, 'nea_show_triggers', False):
-        return
-
-    lines = []
-
-    for obj in scene.objects:
-        props = obj.nea_scene_node
-        resolved = props.node_type
-        if resolved == 'auto' and obj.type == 'EMPTY':
-            resolved = 'empty'
-        if resolved != 'trigger':
-            continue
-
-        center = obj.matrix_world.translation
-
-        if props.trigger_shape == 'sphere':
-            for axis in ('X', 'Y', 'Z'):
-                pts = _make_circle_points(center, props.trigger_radius, axis)
-                for i in range(len(pts) - 1):
-                    lines.extend([pts[i][:], pts[i + 1][:]])
-
-        elif props.trigger_shape == 'aabb':
-            hx = props.trigger_half_x
-            hy = props.trigger_half_y
-            hz = props.trigger_half_z
-            corners = []
-            for sx in (-1, 1):
-                for sy in (-1, 1):
-                    for sz in (-1, 1):
-                        corners.append(
-                            (center + mu.Vector((sx * hx, sy * hy, sz * hz)))[:])
-            edges = [
-                (0, 1), (2, 3), (4, 5), (6, 7),
-                (0, 2), (1, 3), (4, 6), (5, 7),
-                (0, 4), (1, 5), (2, 6), (3, 7),
-            ]
-            for a, b in edges:
-                lines.extend([corners[a], corners[b]])
-
-    if not lines:
-        return
-
-    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-    shader.bind()
-    shader.uniform_float("color", (0.2, 1.0, 0.2, 0.8))
-    batch.draw(shader)
-
-
-class NEA_OT_ToggleTriggerOverlay(bpy.types.Operator):
-    """Toggle trigger zone wireframe overlay in the 3D viewport"""
-    bl_idname = "nea.toggle_trigger_overlay"
-    bl_label = "Toggle Trigger Overlay"
-
-    def execute(self, context):
-        global _trigger_draw_handler
-        scene = context.scene
-        scene.nea_show_triggers = not scene.nea_show_triggers
-
-        if scene.nea_show_triggers and _trigger_draw_handler is None:
-            _trigger_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
-                _draw_trigger_overlays, (), 'WINDOW', 'POST_VIEW')
-        elif not scene.nea_show_triggers and _trigger_draw_handler is not None:
-            bpy.types.SpaceView3D.draw_handler_remove(
-                _trigger_draw_handler, 'WINDOW')
-            _trigger_draw_handler = None
-
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-
-        return {'FINISHED'}
-
-
-def _resolve_node_type(obj):
-    """Determine the NEA node type for a Blender object."""
-    ntype = obj.nea_scene_node.node_type
-    if ntype != 'auto':
-        return ntype
-    if obj.type == 'CAMERA':
-        return 'camera'
-    if obj.type == 'MESH':
-        return 'mesh'
-    return 'empty'
-
-
-def _collect_scene_nodes(context, scale):
-    """Walk Blender's view layer objects and build the scene JSON dict."""
-    import json
-
-    # Gather all root-level and parented objects (skip armatures, lights, etc.
-    # that don't map to scene nodes unless they are cameras)
-    allowed_types = {'MESH', 'EMPTY', 'CAMERA'}
-    objects = [o for o in context.view_layer.objects
-               if o.type in allowed_types]
-
-    # Build index map: object -> index
-    obj_list = list(objects)
-    obj_index = {o: i for i, o in enumerate(obj_list)}
-
-    nodes = []
-    assets = []
-    materials = []
-    active_camera_idx = 0xFFFF
-
-    for i, obj in enumerate(obj_list):
-        props = obj.nea_scene_node
-        ntype = _resolve_node_type(obj)
-
-        # Parent index
-        parent_idx = 0xFF
-        if obj.parent and obj.parent in obj_index:
-            parent_idx = obj_index[obj.parent]
-
-        # Position (in Blender coords, Y-up -> NDS: x, z, -y swap not needed
-        # since the engine expects Blender-exported values)
-        loc = obj.location * scale
-        pos = [loc.x, loc.z, -loc.y]
-
-        # Rotation (convert Blender euler to 0-511 range for NDS)
-        euler = obj.rotation_euler
-        rx = int(round(euler.x / (2 * math.pi) * 512)) & 0x1FF
-        ry = int(round(euler.z / (2 * math.pi) * 512)) & 0x1FF
-        rz = int(round(-euler.y / (2 * math.pi) * 512)) & 0x1FF
-
-        # Scale
-        scl = obj.scale
-        scl_out = [scl.x, scl.z, scl.y]
-
-        # Tags
-        tag_list = []
-        if props.tags.strip():
-            tag_list = [t.strip()[:15] for t in props.tags.split(',')
-                        if t.strip()][:3]
-
-        node = {
-            'name': obj.name[:23],
-            'type': ntype,
-            'parent_idx': parent_idx,
-            'visible': props.visible,
-            'position': pos,
-            'rotation': [rx, ry, rz],
-            'scale': scl_out,
-            'tags': tag_list,
-        }
-
-        # Type-specific data
-        if ntype == 'mesh':
-            node['mesh'] = {
-                'asset_index': 0,
-                'material_index': 0xFFFF,
-                'is_animated': False,
-            }
-        elif ntype == 'camera':
-            # Compute look-at direction from camera's forward vector
-            forward = obj.matrix_world.to_3x3() @ mu.Vector((0, 0, -1))
-            up_vec = obj.matrix_world.to_3x3() @ mu.Vector((0, 1, 0))
-            to = [
-                (loc.x + forward.x) * scale,
-                (loc.z + forward.z) * scale,
-                -(loc.y + forward.y) * scale,
-            ]
-            up = [up_vec.x, up_vec.z, -up_vec.y]
-            node['camera'] = {'to': to, 'up': up}
-
-            if props.is_active_camera:
-                active_camera_idx = i
-        elif ntype == 'trigger':
-            trig = {
-                'shape': props.trigger_shape,
-                'script_id': props.script_id,
-            }
-            if props.trigger_shape == 'sphere':
-                trig['radius'] = props.trigger_radius * scale
-            elif props.trigger_shape == 'aabb':
-                trig['half_x'] = props.trigger_half_x * scale
-                trig['half_y'] = props.trigger_half_y * scale
-                trig['half_z'] = props.trigger_half_z * scale
-            node['trigger'] = trig
-
-        nodes.append(node)
-
-    return {
-        'nodes': nodes,
-        'assets': assets,
-        'materials': materials,
-        'active_camera_idx': active_camera_idx,
-    }
-
-
-def _float_to_f32(val):
-    """Convert a float to NDS 20.12 fixed-point (signed int32).
-
-    Uses the same pattern as display_list.py float_to_v16.
-    """
-    res = int(val * (1 << 12))
-    if res < -0x80000000:
-        raise OverflowError(f"{val} too small for f32: {res:#010x}")
-    if res > 0x7FFFFFFF:
-        raise OverflowError(f"{val} too big for f32: {res:#010x}")
-    if res < 0:
-        res = 0x100000000 + res
-    return res
-
-
-def _pack_fixed_string(s, length):
-    """Pack a string into a fixed-length null-padded bytes object."""
-    encoded = s.encode('utf-8')[:length - 1]
-    return encoded + b'\x00' * (length - len(encoded))
-
-
-def _write_neascene_binary(output_path, nodes, assets, mat_refs,
-                           active_camera_idx):
-    """Write a binary .neascene file directly (no external tool needed).
-
-    Binary layout matches NEAScene.c parser expectations:
-        Header 16 B, Assets 64 B each, MatRefs 80 B each, Nodes 128 B each.
-    """
-    import struct
-
-    NSCN_MAGIC = 0x4E53434E
-    NSCN_VERSION = 1
-    NODE_SIZE = 128
-    NODE_NAME_LEN = 24
-    TAG_LEN = 16
-    MAX_TAGS = 6
-
-    type_map = {'empty': 0, 'mesh': 1, 'camera': 2, 'trigger': 3}
-
-    with open(output_path, 'wb') as f:
-        # --- Header (16 bytes) ---
-        f.write(struct.pack('<IIHHHH',
-                            NSCN_MAGIC, NSCN_VERSION,
-                            len(nodes), len(assets), len(mat_refs),
-                            active_camera_idx))
-
-        # --- Asset table (64 bytes each) ---
-        for asset in assets:
-            data = _pack_fixed_string(asset.get('path', ''), 48)
-            data += struct.pack('<B', asset.get('type', 0))
-            data += b'\x00' * 15
-            f.write(data)
-
-        # --- Material ref table (80 bytes each) ---
-        for mat in mat_refs:
-            f.write(_pack_fixed_string(mat.get('name', ''), 32))
-            f.write(_pack_fixed_string(mat.get('tex_path', ''), 48))
-
-        # --- Node table (128 bytes each) ---
-        for node in nodes:
-            buf = bytearray(NODE_SIZE)
-
-            # Name (24 bytes at offset 0)
-            buf[0:NODE_NAME_LEN] = _pack_fixed_string(
-                node.get('name', ''), NODE_NAME_LEN)
-
-            # Type, parent, num_tags, flags (offset 24-27)
-            ntype = type_map.get(node.get('type', 'empty'), 0)
-            buf[24] = ntype
-            buf[25] = node.get('parent_idx', 0xFF) & 0xFF
-
-            tags = node.get('tags', [])[:MAX_TAGS]
-            buf[26] = len(tags)
-
-            flags = 1 if node.get('visible', True) else 0
-            buf[27] = flags
-
-            # Position (f32 x3 at offset 28)
-            pos = node.get('position', [0.0, 0.0, 0.0])
-            struct.pack_into('<III', buf, 28,
-                             _float_to_f32(pos[0]),
-                             _float_to_f32(pos[1]),
-                             _float_to_f32(pos[2]))
-
-            # Rotation (int16 x3 at offset 40, +2 padding)
-            rot = node.get('rotation', [0, 0, 0])
-            struct.pack_into('<hhhh', buf, 40,
-                             rot[0] & 0x1FF, rot[1] & 0x1FF,
-                             rot[2] & 0x1FF, 0)
-
-            # Scale (f32 x3 at offset 48)
-            scl = node.get('scale', [1.0, 1.0, 1.0])
-            struct.pack_into('<III', buf, 48,
-                             _float_to_f32(scl[0]),
-                             _float_to_f32(scl[1]),
-                             _float_to_f32(scl[2]))
-
-            # Type-specific data at offset 60
-            type_str = node.get('type', 'empty')
-            if type_str == 'mesh':
-                mesh = node.get('mesh', {})
-                struct.pack_into('<HHB', buf, 60,
-                                 mesh.get('asset_index', 0),
-                                 mesh.get('material_index', 0xFFFF),
-                                 1 if mesh.get('is_animated', False) else 0)
-            elif type_str == 'camera':
-                cam = node.get('camera', {})
-                to = cam.get('to', [0.0, 0.0, -1.0])
-                up = cam.get('up', [0.0, 1.0, 0.0])
-                struct.pack_into('<IIIIII', buf, 60,
-                                 _float_to_f32(to[0]), _float_to_f32(to[1]),
-                                 _float_to_f32(to[2]),
-                                 _float_to_f32(up[0]), _float_to_f32(up[1]),
-                                 _float_to_f32(up[2]))
-            elif type_str == 'trigger':
-                trig = node.get('trigger', {})
-                shape_type = {'sphere': 1, 'aabb': 2}.get(
-                    trig.get('shape', 'sphere'), 1)
-                buf[60] = shape_type
-                buf[61] = trig.get('script_id', 0)
-                if shape_type == 1:
-                    struct.pack_into('<I', buf, 64,
-                                     _float_to_f32(trig.get('radius', 1.0)))
-                elif shape_type == 2:
-                    struct.pack_into('<III', buf, 64,
-                                     _float_to_f32(trig.get('half_x', 1.0)),
-                                     _float_to_f32(trig.get('half_y', 1.0)),
-                                     _float_to_f32(trig.get('half_z', 1.0)))
-
-            # Tags at offset 80 (3 * 16 = 48 bytes)
-            for t in range(len(tags)):
-                tag_bytes = _pack_fixed_string(tags[t], TAG_LEN)
-                buf[80 + t * TAG_LEN:80 + (t + 1) * TAG_LEN] = tag_bytes
-
-            f.write(bytes(buf))
-
-
-class NEA_OT_ExportScene(bpy.types.Operator, ExportHelper):
-    """Export the current Blender scene as a binary .neascene file"""
-    bl_idname = "nea.export_scene"
-    bl_label = "Export NEA Scene"
-    bl_options = {'REGISTER', 'PRESET'}
-    filename_ext = ".neascene"
-
-    filter_glob: StringProperty(
-        default="*.neascene",
-        options={'HIDDEN'},
-    )
-
-    scaleFactor: FloatProperty(
-        name="Scale",
-        description="Scale factor for position values",
-        default=1.0, min=0.01, max=1000.0,
-    )
-
-    export_json: BoolProperty(
-        name="Also save .json",
-        description="Keep the intermediate JSON file next to the binary",
-        default=False,
-    )
-
-    path_mode = path_reference_mode
-    check_extension = True
-
-    def invoke(self, context, event):
-        # Default filename from scene settings or blend file name
-        settings = context.scene.nea_scene_settings
-        if settings.scene_name:
-            self.filepath = settings.scene_name
-        else:
-            self.filepath = "level"
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
-        import json
-        import struct
-
-        scale = self.scaleFactor
-
-        # Build scene data
-        scene_data = _collect_scene_nodes(context, scale)
-
-        if not scene_data['nodes']:
-            self.report({'ERROR'}, "No exportable objects in scene")
-            return {'CANCELLED'}
-
-        bin_path = self.filepath
-        nodes = scene_data['nodes']
-        assets = scene_data.get('assets', [])
-        mat_refs = scene_data.get('materials', [])
-        active_cam = scene_data.get('active_camera_idx', 0xFFFF)
-
-        # Save optional JSON
-        if self.export_json:
-            export_dir = os.path.dirname(bin_path)
-            base_name = os.path.splitext(os.path.basename(bin_path))[0]
-            json_path = os.path.join(export_dir, base_name + '.neascene.json')
-            with open(json_path, 'w') as f:
-                json.dump(scene_data, f, indent=2)
-
-        # Write binary .neascene directly
-        _write_neascene_binary(bin_path, nodes, assets, mat_refs, active_cam)
-
-        self.report({'INFO'},
-                    f"Exported {len(nodes)} nodes to {bin_path}")
-        return {'FINISHED'}
-
-
-class OBJECT_PT_nea_scene_node(bpy.types.Panel):
-    """NEA scene node properties"""
-    bl_label = "NEA Scene Node"
-    bl_idname = "OBJECT_PT_nea_scene_node"
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = "object"
-
-    @classmethod
-    def poll(cls, context):
-        return context.object is not None
-
-    def draw(self, context):
-        layout = self.layout
-        obj = context.object
-        props = obj.nea_scene_node
-
-        layout.prop(props, "node_type")
-        layout.prop(props, "visible")
-        layout.prop(props, "tags")
-
-        resolved = _resolve_node_type(obj)
-
-        if resolved == 'camera':
-            layout.prop(props, "is_active_camera")
-
-        if resolved == 'trigger':
-            box = layout.box()
-            box.label(text="Trigger Settings:")
-            box.prop(props, "trigger_shape")
-            box.prop(props, "script_id")
-            if props.trigger_shape == 'sphere':
-                box.prop(props, "trigger_radius")
-            elif props.trigger_shape == 'aabb':
-                col = box.column(align=True)
-                col.prop(props, "trigger_half_x")
-                col.prop(props, "trigger_half_y")
-                col.prop(props, "trigger_half_z")
-
-
-class VIEW3D_PT_nea_scene_export(bpy.types.Panel):
-    """NEA scene export panel in the 3D viewport N-panel"""
-    bl_label = "NEA Scene Export"
-    bl_idname = "VIEW3D_PT_nea_scene_export"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "NEA"
-
-    def draw(self, context):
-        layout = self.layout
-        settings = context.scene.nea_scene_settings
-
-        layout.prop(settings, "scene_name")
-        layout.prop(settings, "scale")
-
-        layout.separator()
-        layout.operator("nea.export_scene", icon='EXPORT',
-                         text="Export NEA Scene...")
-
-        layout.separator()
-        icon = 'HIDE_OFF' if context.scene.nea_show_triggers else 'HIDE_ON'
-        layout.operator("nea.toggle_trigger_overlay", icon=icon,
-                         depress=getattr(context.scene, 'nea_show_triggers',
-                                         False))
 
 
 ###
@@ -4139,17 +3580,12 @@ def menu_func_export_anim(self, context):
 def menu_func_export_batch(self, context):
     self.layout.operator(
         MaybeExportMD5Batch.bl_idname, text="MD5 Mesh and Animation(s)")
-def menu_func_export_scene(self, context):
-    self.layout.operator(
-        NEA_OT_ExportScene.bl_idname, text="NEA Scene (.neascene)")
 
 classes = (
     # Addon preferences (must be first)
     NEA_AddonPreferences,
     # PropertyGroups (must be registered before panels that use them)
     NEA_BoneCollisionProps,
-    NEA_SceneNodeProps,
-    NEA_SceneSettings,
     NEA_ToolSettings,
     NEA_PolyformatProps,
     NEA_PtexconvProps,
@@ -4171,18 +3607,14 @@ classes = (
     MD5Panel,
     BONE_PT_nea_collision,
     OBJECT_PT_nea_polyformat,
-    OBJECT_PT_nea_scene_node,
     MATERIAL_PT_nea_ptexconv,
     SCENE_PT_nea_lights,
     SCENE_PT_nea_vram,
-    VIEW3D_PT_nea_scene_export,
     VIEW3D_PT_nea_tools,
     MATERIAL_PT_nea_animmat,
     # Operators
     NEA_OT_ToggleCollisionOverlay,
     NEA_OT_AutoFitCollision,
-    NEA_OT_ExportScene,
-    NEA_OT_ToggleTriggerOverlay,
     NEA_OT_RunObj2dl,
     NEA_OT_RunMd5ToDsma,
     NEA_OT_RunPtexconv,
@@ -4208,15 +3640,8 @@ def register():
         name="Show Collision Overlays",
         default=False)
 
-    bpy.types.Object.nea_scene_node = bpy.props.PointerProperty(
-        type=NEA_SceneNodeProps)
     bpy.types.Object.nea_polyformat = bpy.props.PointerProperty(
         type=NEA_PolyformatProps)
-    bpy.types.Scene.nea_scene_settings = bpy.props.PointerProperty(
-        type=NEA_SceneSettings)
-    bpy.types.Scene.nea_show_triggers = BoolProperty(
-        name="Show Trigger Overlays",
-        default=False)
     bpy.types.Scene.nea_tool_settings = bpy.props.PointerProperty(
         type=NEA_ToolSettings)
     bpy.types.Scene.nea_light_props = bpy.props.PointerProperty(
@@ -4241,28 +3666,20 @@ def register():
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_mesh)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_anim)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_batch)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_scene)
 
 def unregister():
-    global _collision_draw_handler, _trigger_draw_handler
+    global _collision_draw_handler
     if _collision_draw_handler is not None:
         bpy.types.SpaceView3D.draw_handler_remove(
             _collision_draw_handler, 'WINDOW')
         _collision_draw_handler = None
-    if _trigger_draw_handler is not None:
-        bpy.types.SpaceView3D.draw_handler_remove(
-            _trigger_draw_handler, 'WINDOW')
-        _trigger_draw_handler = None
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
     del bpy.types.Bone.nea_collision
     del bpy.types.Scene.nea_show_collision
-    del bpy.types.Object.nea_scene_node
     del bpy.types.Object.nea_polyformat
-    del bpy.types.Scene.nea_scene_settings
-    del bpy.types.Scene.nea_show_triggers
     del bpy.types.Scene.nea_tool_settings
     del bpy.types.Scene.nea_light_props
     del bpy.types.Material.nea_ptexconv
@@ -4281,7 +3698,6 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_mesh)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_anim)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_batch)
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_scene)
     del bpy.types.Scene.md5_bone_collection
 
 if __name__ == "__main__":

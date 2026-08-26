@@ -50,7 +50,6 @@ extern "C" {
 #include "NEATexture.h"
 #include "NEAThread.h"
 #include "NEABoneCollision.h"
-#include "NEAScene.h"
 #include "NEASound.h"
 #include "NEAAnimMat.h"
 #include "NEAHw2D.h"

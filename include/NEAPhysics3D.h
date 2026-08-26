@@ -28,17 +28,15 @@
 ///
 /// @section relation Relation to the other physics modules
 ///
-/// NEA has three older physics layers and this replaces none of them:
+/// NEA has two older physics layers and this replaces neither of them:
 ///
 ///   - [NEAPhysics.h](NEAPhysics.h) -- velocity/impulse objects, AABB and
 ///     sphere only, no rotation. Cheap and entirely adequate for a platformer.
-///   - [NEARigidBody.h](NEARigidBody.h) -- OBB bodies solved on the ARM7 over
-///     FIFO. Rotation, but one shape type and no convex hulls.
 ///   - [NEACollision.h](NEACollision.h) -- shapes and narrow phase with no
 ///     solver, for queries and triggers.
 ///
 /// Use this module when you need convex hulls, stacking that holds, or contact
-/// events. It runs on the ARM9 and costs ARM9 time; the other three are still
+/// events. It runs on the ARM9 and costs ARM9 time; the other two are still
 /// the right answer for simpler scenes.
 ///
 /// @section rawapi Reaching Box3D directly
@@ -929,8 +927,8 @@ int NEA_Phys3DWorldGetTeleportCount(void);
 /// Step the world and sync every bound model, in one call.
 ///
 /// What NEA_WaitForVBL() runs for NEA_UPDATE_PHYS3D. libNEA.a reaches it
-/// through a **weak reference** -- the same mechanism NEA_RigidBodySync and
-/// NEA_SoundUpdateAll use -- so the flag does nothing at all unless a project
+/// through a **weak reference** -- the same mechanism NEA_SoundUpdateAll and
+/// NEA_Hw2DOBJUpdateAll use -- so the flag does nothing at all unless a project
 /// links libNEA_box3d.a and creates a world. The core library never acquires an
 /// undefined Box3D symbol, which is what keeps the two archives independent.
 ///

@@ -2057,8 +2057,8 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     // intentionally left running every hardware frame (60 Hz).
     if (ne_two_pass_enabled && ne_two_pass_frame != 0)
         flags &= ~(NEA_UPDATE_ANIMATIONS | NEA_UPDATE_PHYSICS
-                   | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_RIGIDBODY
-                   | NEA_UPDATE_PARTICLES | NEA_UPDATE_PHYS3D);
+                   | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_PARTICLES
+                   | NEA_UPDATE_PHYS3D);
 
     // One completed frame, counted here rather than at the end of the function
     // because the NEA_CAN_SKIP_VBL path below returns early -- and a frame that
@@ -2091,12 +2091,6 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     extern void NEA_AnimMatUpdateAll(void) __attribute__((weak));
     if ((flags & NEA_UPDATE_ANIM_MAT) && NEA_AnimMatUpdateAll)
         NEA_AnimMatUpdateAll();
-
-    // Weak reference: rigid body sync is only linked when
-    // the user calls any NEA_RigidBody* function.
-    extern void NEA_RigidBodySync(void) __attribute__((weak));
-    if ((flags & NEA_UPDATE_RIGIDBODY) && NEA_RigidBodySync)
-        NEA_RigidBodySync();
 
     // Weak reference: Hw2D OAM flush is only linked when
     // the user calls any NEA_Hw2D* function.

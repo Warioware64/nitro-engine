@@ -25,11 +25,6 @@ Features:
   specular/emission, material swap, polygon ID, texture scroll X/Y, texture
   rotate, texture scale X/Y). Exported from Blender via F-Curves, loaded at
   runtime as ``.neaanimmat`` binaries. Supports STEP and LINEAR interpolation.
-- **Scene system**: binary ``.neascene`` format with node hierarchy (mesh,
-  camera, trigger, empty), asset/material reference tables, parent-children
-  transforms, tag queries, and trigger zones with enter/exit/tick callbacks.
-  ``NEA_SceneLoadFAT()`` automatically loads meshes and GRF textures from
-  NitroFS, creating and binding materials to mesh nodes.
 - **Two-pass rendering** to double the polygon budget by splitting the screen
   into two halves, each rendered in a separate hardware frame (effective 30 FPS).
   Three modes available: FIFO, framebuffer, and HBL DMA.
@@ -71,14 +66,6 @@ Features:
   sources can be attached to models so audio follows objects in the scene. Enabled
   by building with ``NEA_MAXMOD=1`` — when disabled, the module compiles to
   nothing and has no dependencies.
-- **Rigid body physics** *(experimental)*: ARM7-accelerated OBB rigid body
-  simulation with angular dynamics, impulse-based collision response, Coulomb
-  friction, and object sleeping. The ARM9 sends commands via FIFO and receives
-  position/rotation updates each frame. Supports dynamic bodies (OBB shape),
-  static colliders (axis-aligned rectangles for walls/floors/ceilings), and
-  integration with NEA's collision system (ColMesh, Sphere, Capsule) via contact
-  injection. Requires using one of the provided ARM7 binaries
-  (``arm7_nea.elf`` or ``arm7_nea_maxmod.elf``).
 - **Hardware 2D pipeline** (``NEAHw2D``): use the NDS 2D hardware alongside
   the 3D engine. Supports tiled backgrounds (4bpp/8bpp), bitmap backgrounds
   (8bpp indexed and 16bpp direct color), and hardware OBJ sprites with
@@ -351,9 +338,8 @@ failure::
 ``NEA_BOX3D_NO_ITCM=1`` is the master switch and keeps the whole library out of
 ITCM, including the shared math.
 
-This is independent of the three older physics modules (``NEAPhysics.h``,
-``NEARigidBody.h``, ``NEACollision.h``), which are unchanged and still in
-``libNEA.a``.
+This is independent of the two older physics modules (``NEAPhysics.h`` and
+``NEACollision.h``), which are unchanged and still in ``libNEA.a``.
 
 Tools
 =====
@@ -371,8 +357,6 @@ Nitro Engine Advanced includes the following conversion tools under ``tools/``:
   ``--collision-b3`` writes the same bones as Box3D shapes (``.b3col``).
 - **img2ds**: Converts images to NDS textures and palettes (deprecated, except
   for DEPTHBMP conversion).
-- **neascene_export**: Converts JSON scene descriptions to binary ``.neascene``
-  files for the scene system.
 
 Blender Addon
 =============
@@ -385,8 +369,6 @@ addon for **Blender 5.0** and above. It provides:
   properties (alpha, colors, material swap, texture scroll/rotate/scale) using
   Blender's F-Curve system. Animated properties are previewed in the viewport
   during playback. Export to ``.neaanimmat`` binary with one click.
-- **Scene node editor** (Object Properties panel): configure nodes for the scene
-  system with tags, trigger zones, and hierarchy.
 - **Per-bone collision editor** for animated models.
 - Integrated conversion tool execution (obj2dl, md5_to_dsma, ptexconv).
 
