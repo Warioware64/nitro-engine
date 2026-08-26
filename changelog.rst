@@ -4,6 +4,313 @@ Changelog
 Unreleased
 ----------
 
+**Particle pipeline fixes.** An audit of ``NEAParticle.c`` against the format
+module and the editor's simulator turned up six defects.
+
+- **Fixed: an emitter attached to a deleted model read freed memory.**
+  ``NEA_ParticleEmitterAttachToModel()`` keeps a raw pointer and
+  ``ne_update_emitter()`` reads the model's position every frame, but nothing
+  cleared it when the model went away. ``NEA_ModelDelete()`` now calls
+  ``__NEA_ParticleDetachModel()``, the same way it already cancelled
+  asynchronous loads that would write into the model.
+- **Fixed: overlapping particles could not blend with each other.** Every
+  particle was submitted with ``POLY_ID(0)``, and the hardware refuses to blend
+  a translucent polygon over a translucent pixel carrying the same ID -- so in a
+  dense effect the first quad drawn at a pixel won and the rest were discarded.
+  Every particle in the ``fire`` preset is translucent for its whole life, so
+  none of them layered. An emitter now spreads its particles over eight IDs, the
+  same trick ``NEA_RichTextRender3D()`` uses for overlapping glyphs, moveable
+  with ``NEA_ParticleEmitterSetPolyID()``. Measured on the particles example:
+  **1.19x luminance and 1.18x coverage**.
+- **Fixed: a truncated ``.npe`` read past the end of its buffer.** The parser
+  walks the file using counts stored inside it and took a bare pointer, so there
+  was nothing to compare them against. The file loaders now pass the size they
+  already had -- ``__NEA_FATLoadDataSize()`` for the synchronous path, and the
+  asynchronous one was discarding a size it was being handed --  and
+  ``NEA_ParticleEmitterLoadSize()`` exposes the bounded parse. The unbounded
+  ``NEA_ParticleEmitterLoad()`` stays for ROM-linked data and now says so.
+  ``tests/particle_load`` feeds it prefixes cut at each stage of the parse.
+- **Fixed: the sprite-sheet flag was ignored.** The runtime played a sheet
+  whenever ``cols * rows > 1``, regardless of ``FLAG_SPRITESHEET``, so an effect
+  with the flag off but a leftover grid animated on hardware and not in the
+  editor. The flag decides now.
+- **Implemented: velocity stretch.** ``FLAG_STRETCH`` was parsed and ignored. A
+  stretched particle's quad is lengthened along its direction of travel and
+  tapers as it slows.
+- **Implemented, as far as the hardware allows: additive.** ``FLAG_ADDITIVE``
+  was also parsed and ignored, and it cannot be honoured literally -- DISP3DCNT
+  offers alpha blending on or off and the DS 3D engine has no additive mode at
+  all. The runtime now weights each particle's alpha by its brightness instead,
+  so a dark particle contributes almost nothing where adding zero would, and a
+  bright one dominates. Together with the polygon IDs above that is close enough
+  for sparks and flames. The editor preview does exactly the same arithmetic
+  rather than compositing a true add it could never reproduce.
+
+**npe_editor: the simulator had drifted from the runtime.** Its docstring calls
+it a copy of ``NEAParticle.c``'s per-frame logic; three things had come loose.
+
+- **Cone spread was half the width the DS produces.** The runtime picks an angle
+  in 0..``cone_spread`` NEA units and feeds ``sinLerp(theta << 6)`` against a
+  32768-unit circle, so one unit is pi/256 radians; the editor was using
+  pi/511. An effect authored at ``cone_spread`` 128 was a 45 degree cone in the
+  editor and a 90 degree one on hardware.
+- The random-direction sphere used a half turn for the polar angle where the
+  runtime uses a whole one.
+- A zero particle life became one frame in the editor and sixty on hardware.
+
+**Both editors can see the artwork now.** ``npe_editor`` drew particles as flat
+coloured ovals and ``animmat_editor`` drew a tinted rectangle with a wireframe
+grid, because neither format records the texture it animates -- both name a
+material the runtime resolves later. **File -> Import image** now points either
+editor at the real artwork, remembered in a ``<file>.editor.json`` sidecar. The
+binary is never touched by that, and losing the sidecar costs the preview and
+nothing else.
+
+- The particle preview **composites** instead of drawing shapes, which is what
+  makes the two flags that matter real rather than approximated: additive
+  blending becomes a genuine add, and a sprite sheet plays its cells. Rotation
+  and per-particle size come along with it. Transformed sprites are cached per
+  (cell, rotation, size) bucket, since rotating every particle every frame is
+  not something Python does at 30 fps.
+- The material preview textures its quad and applies the real UV transform, with
+  an all-targets mode -- driving several materials at once being the point of a
+  version 2 animation -- and a switch for whether the tint comes from the vertex
+  colour or from emission, since a vertex-colour track does nothing on a mesh
+  with normals.
+- Both editors now need `Pillow <https://pypi.org/project/Pillow/>`_. Their
+  previews cannot rotate, scale, tint or alpha-composite without it, and
+  ``tools/img2ds`` already depended on it.
+
+**Fixed: a texture matrix translation is in sixteenths of a texel.** The
+hardware multiplies that row of the matrix by a constant 1/16 (GBATEK, texture
+coordinate transformation mode 1), so ``NEA_TextureMatrixTranslate(64.0)`` moves
+a texture by four texels, not sixty-four. Nothing said so, and both material
+animation examples were consequently scrolling a sixteenth of what their
+comments claimed. Confirmed on hardware: with a 64 texel texture, a translation
+of 1024 is pixel-identical to zero, and 512 is half a wrap.
+``NEA_TextureMatrixTranslateI()`` now documents the unit, and
+``NEA_TextureMatrixTranslateTexels()`` says it in texels for you. The preview
+finding this is exactly what a preview is for.
+
+**animmat_editor cleanup.** It was written in one pass and showed it.
+
+- **Discrete tracks are no longer plotted as numbers.** Lights, culling,
+  material swap and texture/palette swap never interpolate, so a line on a
+  numeric axis said nothing -- a bitmask, or a staircase between 0, 64, 128 and
+  192. They get a strip of labelled segments instead, and a value editor that
+  speaks their language: a dropdown for culling, four checkboxes for lights,
+  spinboxes with an "unchanged" state for the swap pair.
+- **Losing work is harder.** There was no dirty flag and no unsaved-changes
+  guard at all, where ``npe_editor`` has had one since it was written. New, Open
+  and closing the window now ask.
+- Dragging a key onto another key's frame silently produced two keys on one
+  frame, which leaves a zero-length span the runtime skips -- so one of them
+  quietly stopped doing anything. Refused now, on drag and on typed edits alike.
+- Changing the length used to freeze a baked track's last value across the new
+  frames; it resamples, and keyframes scale with it.
+- The value boxes kept the previous track's contents after switching tracks, so
+  **Set** wrote a stale value into the new one.
+- Two targets could share a name. ``NEA_AnimMatFindTarget()`` returns the first
+  match, so the second never bound and never said so.
+- The colour picker handled only the vertex-colour track and explained itself
+  with an error box after the click. It is enabled by track type now, and the
+  packed diffuse/ambient and specular/emission tracks get a swatch per half --
+  they could not be authored at all before, which is why the version 2 example
+  had to write its emission values by hand in Python.
+- The interpolation control stayed active for constant and baked tracks, where
+  it does nothing.
+- **Save As version 1** exists, with the checks that make it safe. Opening a
+  version 1 file and saving silently rewrote it as version 2.
+- The vertical axis on the fixed-point tracks was labelled with values run
+  through the fixed-point conversion twice, so it was neither correct nor in
+  order.
+- The size report re-serialised the whole animation twice on every keystroke,
+  once through ``optimize()``; it is debounced. A drag re-evaluated every frame
+  of the track on each mouse motion just to find the plot range; that is
+  computed once per gesture.
+
+**NSMW can now fit a smoothly weighted mesh.** NSMW spends one matrix-stack
+slot -- one "node" -- per distinct combination of bone pair and blend weight,
+and the hardware stack has 31 levels. ``resolve_node()`` keyed on the exact
+weight, at 1/4096 resolution, so two vertices weighted 0.500 and 0.501 to the
+same bone pair took two of the 30 slots. Any smoothly weighted character blew
+the budget and the exporter raised an error telling the user to "simplify the
+rig", with no tool to do it.
+
+This had never been exercised: every skinned asset in the tree is rigidly
+weighted, ``Robot.md5mesh`` included, so the two-weight path NSMW exists for had
+no test case at all.
+
+- **A test asset that actually has the property.**
+  ``examples/assets/tentacle/`` is a chain of 12 bones in a cylinder with the
+  blend varying per vertex, generated by a committed script. It wants **194
+  slots** for its 11 bone pairs.
+- **Clustering.** ``md5_to_dsma.py`` merges the closest two nodes of a bone pair
+  until the budget is met, weighting each merge by how many vertices it affects
+  so a node covering three vertices cannot drag one covering three hundred. The
+  tentacle comes down to 30 slots for a worst-case blend error of 0.230 and an
+  average of 0.096 per vertex, and the tool prints both.
+- **``--max-nodes``** sets the budget and **``--weight-buckets``** pre-rounds the
+  weights. Quantizing is **off by default** because measurement says it makes
+  the result worse, not better: on the tentacle, clustering alone gives 0.230
+  worst-case error, and quantizing to 1/16 first gives 0.368. Rounding throws
+  away the vertex counts clustering uses to decide what matters. It survives
+  only as a speed knob, since clustering is O(n^2).
+- The rest pose is untouched. Vertex bind positions still use the weights the
+  artist authored, and a node matrix is the identity at rest whatever its
+  weights are, so clustering changes only how the mesh deforms.
+
+``examples/loading/nsmw_node_budget`` loads the same tentacle at three budgets
+(30, 16 and 11 slots) side by side, on a banded texture that makes a skinning
+error show up as a kink in the stripes.
+
+Clustering cannot go below one node per bone pair, so a mesh that blends between
+more than 30 pairs still cannot be exported. Getting past that means splitting
+the mesh into groups drawn in separate passes, which needs a per-submesh node
+set in the NSMW file and a per-group prepare at run time, not just an exporter
+change. The error message says so explicitly rather than pointing at the rig.
+
+**Material animation, rebuilt around what retail DS games did.** The
+reverse-engineered SRT0 and PAT0 subfile formats (documented in
+``helpSrc/nsbmd_docs.txt``) target a material *by name* and store dense channels
+as flat per-frame arrays. NEAAnimMat now does both, which fixes the two things
+it could not do.
+
+- **One animation can drive a whole model.** An ``NEA_AnimMatInstance`` used to
+  be one draw call's worth of GPU state, and ``NEA_ModelDraw()`` walks every
+  submesh internally, so a multi-material model could not be animated per
+  material at all. A version 2 file groups its tracks under named targets, and
+  ``NEA_ModelSetAnimMat()`` matches those names against the material names the
+  submeshes carry from their DLMM file. The matching happens once, at bind time,
+  so nothing compares strings while drawing.
+- **Version 1 files still load.** They parse into a single unnamed target, which
+  is what a one-material version 2 file looks like, so the old "apply then draw"
+  idiom is untouched.
+- **Storage modes.** Every track used to cost a binary search, a division and an
+  interpolation every frame. ``NEA_AMSTORE_CONST`` stores an unchanging value in
+  the track header and costs nothing at all; ``NEA_AMSTORE_BAKED`` stores one
+  16 bit value per frame and costs a single indexed load, with the four texture
+  translate/scale tracks encoded as 1.10.5 exactly as retail does.
+  ``NEA_AMSTORE_KEYS`` is the old path, kept for sparse tracks.
+- **``NEA_AMTRACK_TEXPAL_SWAP``**, PAT0's trick: swap the texture and the palette
+  out of small tables instead of exchanging a whole ``NEA_Material``. This is
+  what flipbooks, blinking eyes and scrolling water want.
+  ``NEA_MaterialTexUse()`` binds an image without disturbing colours,
+  properties or palette.
+- **Fixed: one flag governed three colour registers.** ``has_color_props`` was
+  set by any of the vertex-colour, diffuse/ambient or specular/emission tracks,
+  and the apply path then wrote all three registers from it. A target animating
+  only its colour therefore also zeroed the material's diffuse and specular.
+  Latent in version 1, where an animation tended to drive all of them or none;
+  unavoidable in version 2, where partial track sets across several targets are
+  the normal case. Each register now has its own flag and is written only if a
+  track drives it.
+- **The apply path stopped resetting the texture matrix every frame.** It called
+  ``NEA_TextureMatrixIdentity()`` unconditionally and then built the transform
+  through three helpers that each switch matrix mode and switch back -- up to
+  eight mode switches for one transform, plus an identity load for instances
+  that never touch the texture matrix. It is now one mode switch, and the reset
+  only happens when a previous apply actually left a transform loaded.
+
+**Fixed: keyframed alpha, polygon ID, angle and colour tracks never actually
+interpolated.** ``mulf32()`` already brings its product down by 12 bits, and the
+integer lerps shifted the result down by 12 again, dividing every step by a
+further 4096. A linear alpha ramp from 31 to 3 across seventeen frames moved
+from 31 to 30 and then snapped. Every keyframed ``ALPHA``, ``POLYID``,
+``TEX_ROTATE``, ``COLOR``, ``DIFFUSE_AMBIENT`` and ``SPECULAR_EMISSION`` track
+has been behaving as a step. The texture translate/scale tracks were correct and
+are unchanged. **Animations tuned around the old behaviour will now move.**
+
+**New: an editor.** ``tools/animmat_editor/`` follows the ``npe_editor``
+pattern: ``animmat_format.py`` reads and writes both file versions and can
+rewrite a track into its cheapest storage mode, and ``animmat_editor.py`` is a
+tkinter GUI with a keyframe timeline and a live preview.
+
+``examples/loading/animated_material_v2`` is the demonstration: four named
+materials on one model, three of them driven from a single 484-byte file and the
+fourth left alone because no target names it. Between them they use all three
+storage modes -- a baked UV scroll, keyframed alpha and emission, a stepped
+palette swap and a constant. It also shows why a vertex-colour track does
+nothing on a mesh with normals: any NORMAL command re-runs the lighting
+equation and overwrites the vertex colour, so lit meshes animate emission
+instead.
+
+The preview is only worth having if it agrees with the hardware, so
+``tests/animmat_eval`` enforces that: ``gen_vectors.py`` writes an animation and
+the values the Python evaluator says each frame should produce, and the test ROM
+checks the real runtime against them. It covers all three storage modes, both
+interpolation modes and every non-linear lerp. That harness is what surfaced the
+double-shift bug above.
+
+**The idle parts of the GPU.** The DS rendering engine has a set of per-frame
+fixed-function units that cost nothing once configured. NEA reached most of the
+registers already, but through a door narrow enough that the interesting uses
+were out of reach. This opens them up.
+
+- **Toon table ramps.** ``NEA_SetupToonShadingTables()`` wrote a hardcoded
+  two-band step into a table that holds 32 arbitrary colors. The table is indexed
+  by how lit a surface is, which makes it a gradient map and not just a
+  cel-shading switch: shading can shift hue as it darkens instead of only losing
+  brightness. ``NEA_ToonTableBands()`` builds an N-band cel ramp,
+  ``NEA_ToonTableGradient()`` a smooth two-color one,
+  ``NEA_ToonTableGradientStops()`` a multi-stop ramp, and ``NEA_ToonTableSet()``
+  takes a raw table. All of them are 32 halfwords pushed once, cheap enough to
+  rebuild every frame.
+- **Environment mapping.** ``NEA_TEXGEN_NORMAL`` was declared but unreachable,
+  because nothing ever loaded a texture matrix that would make it produce a
+  reflection. ``NEA_ModelSetEnvMap()`` makes ``NEA_ModelDraw()`` load one at the
+  only moment it can be right, after the model's transform and before its
+  geometry, so the reflection follows the object and not just the camera.
+  ``NEA_TextureMatrixEnvMap()`` is the manual form and
+  ``NEA_MaterialSetTexGen()`` switches a material's texgen mode at runtime. The
+  mesh needs its texture coordinates at the center of the texture: ``obj2dl.py``
+  and ``md5_to_dsma.py`` (both the DSMA and NSMW paths) gained ``--envmap-uv``
+  for that, which as a side effect makes the display list smaller, since every
+  coordinate is then identical and the packer emits one ``TEXCOORD`` command
+  instead of one per vertex. On animated models the reflection is anchored to
+  the model rather than to each bone, because there is only one texture matrix
+  and the display list restores a different bone matrix as it goes; see
+  ``NEA_ModelSetEnvMap()`` for what that looks like.
+- **Rear plane depth.** ``NEA_ClearDepthSet()`` and ``NEA_ClearDepthGet()`` expose
+  a register that was written once at init and never again. It decides how far
+  away "nothing" is, and it is what makes the clear bitmap's per-pixel depth
+  channel usable: a background with its own depth *occludes* geometry rather than
+  merely sitting behind it.
+- **Polygon IDs on models.** Edge marking outlines a pixel only where its
+  neighbour has a different polygon ID, and ``NEA_ModelDraw()`` never touched the
+  polygon format at all, so per-object outlining meant hand-written
+  ``NEA_PolyFormat()`` calls. ``NEA_ModelSetPolyID()`` overrides just the ID,
+  leaving alpha, lights and culling as the last ``NEA_PolyFormat()`` left them,
+  and puts it back afterwards. ``NEA_PolyFormatGet()`` exposes the shadow copy of
+  the write-only register this needs. ``NEA_OutliningSetColorAll()`` covers the
+  common case of one outline color, and the docs now explain the ID grouping,
+  the rear-plane comparison and the antialiasing conflict.
+- **Alpha test.** ``NEA_AlphaTestEnable()`` and ``NEA_AlphaTestDisable()`` reach a
+  register that was zeroed at init and never touched. Cutout textures can now be
+  drawn as opaque polygons: correct depth, no manual sorting, and no polygon IDs
+  spent on translucency.
+- **Shininess ramps.** ``NEA_ShininessTableSet()`` uploads a custom 128-entry
+  table, and ``NEA_SHININESS_STEPPED`` and ``NEA_SHININESS_THRESHOLD`` join the
+  four power curves with a banded and a hard-clipped highlight.
+- **1-dot polygon depth.** ``NEA_OneDotDepthSet()`` resolves a long-standing TODO.
+  The register bypasses the geometry FIFO, so the function drains it first.
+
+New examples under ``examples/effects``: ``toon_ramps``, ``env_mapping``,
+``rear_plane_depth``, ``edge_marking`` and ``alpha_test``. ``specular_material``
+gained the two new shininess ramps.
+
+**Three enum fixes in NEAPolygon.h.** All three were copy-paste defects that made
+the affected values silently do nothing:
+
+- ``NEA_DEPTH_TEST_EQUAL`` was ``(0 << 14)``, the same as
+  ``NEA_DEPTH_TEST_LESS``. **This changes behaviour**: code that passed it was
+  getting a less-than test and will now get the equal test it asked for. That is
+  the point, since depth-equal is what decals and the matching depth tricks need.
+- ``NEA_RENDER_ONEA_DOT_POLYS`` was ``(0 << 13)``, the same as
+  ``NEA_HIDE_ONEA_DOT_POLYS``. It is now ``(1 << 13)``.
+- ``NEA_LIGHT_013``, ``NEA_LIGHT_023`` and ``NEA_LIGHT_123`` all expanded to
+  lights 0, 1 and 2. They now name the lights they claim to.
+
 **NEAThread: a background task system.** ``NEA_TaskSubmit()`` runs a unit of
 work on a pooled worker thread and calls an optional completion callback on the
 main thread during the vertical blank, which is the only place a task's results

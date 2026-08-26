@@ -354,12 +354,12 @@ static void ne_init_registers(void)
 
     GFX_CONTROL = GL_TEXTURE_2D | GL_ANTIALIAS | GL_BLEND;
 
-    GFX_ALPHA_TEST = 0;
+    NEA_AlphaTestDisable();
 
     NEA_ClearColorSet(NEA_Black, 31, 63);
     NEA_FogEnableBackground(false);
 
-    GFX_CLEAR_DEPTH = GL_MAX_DEPTH;
+    NEA_ClearDepthSet(GL_MAX_DEPTH);
 
     MATRIX_CONTROL = GL_TEXTURE;
     MATRIX_IDENTITY = 0;

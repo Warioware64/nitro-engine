@@ -283,11 +283,17 @@ def stripify_quads(resolved_quads):
 # ---------------------------------------------------------------------------
 
 def emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                model_scale, model_translation, use_vertex_color):
+                model_scale, model_translation, use_vertex_color,
+                envmap_uv=False):
     """Emit all display-list commands for one vertex key."""
     vertex_idx, texcoord_idx, normal_idx = vk
 
-    if texcoord_idx is not None:
+    if envmap_uv:
+        # Sphere mapping (NEA_TEXGEN_NORMAL) adds the generated coordinate to
+        # this one, so it has to be the centre of the texture for every vertex.
+        # The model's own UVs, if it has any, are irrelevant and are dropped.
+        dl.texcoord(texture_size[0] / 2.0, texture_size[1] / 2.0)
+    elif texcoord_idx is not None:
         u, v = texcoords[texcoord_idx]
         # OBJ (0,0) = bottom-left, NDS (0,0) = top-left
         v = 1.0 - v
@@ -318,7 +324,7 @@ def emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
 
 def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
                           normals, texture_size, model_scale, model_translation,
-                          use_vertex_color, no_strip):
+                          use_vertex_color, no_strip, envmap_uv=False):
     """Generate a display list for a group of faces.
 
     Returns a finalized DisplayList instance.
@@ -352,7 +358,8 @@ def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
         dl.begin_vtxs("triangle_strip")
         for vk in strip_verts:
             emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                        model_scale, model_translation, use_vertex_color)
+                        model_scale, model_translation, use_vertex_color,
+                        envmap_uv)
         dl.end_vtxs()
 
     # Emit separate triangles
@@ -361,7 +368,8 @@ def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
         for fi in tri_singles:
             for vk in resolved_tris[fi]:
                 emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                            model_scale, model_translation, use_vertex_color)
+                            model_scale, model_translation, use_vertex_color,
+                        envmap_uv)
         dl.end_vtxs()
 
     # Emit quad strips
@@ -369,7 +377,8 @@ def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
         dl.begin_vtxs("quad_strip")
         for vk in strip_verts:
             emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                        model_scale, model_translation, use_vertex_color)
+                        model_scale, model_translation, use_vertex_color,
+                        envmap_uv)
         dl.end_vtxs()
 
     # Emit separate quads
@@ -378,7 +387,8 @@ def generate_display_list(resolved_tris, resolved_quads, vertices, texcoords,
         for fi in quad_singles:
             for vk in resolved_quads[fi]:
                 emit_vertex(dl, vk, vertices, texcoords, normals, texture_size,
-                            model_scale, model_translation, use_vertex_color)
+                            model_scale, model_translation, use_vertex_color,
+                        envmap_uv)
         dl.end_vtxs()
 
     dl.finalize()
@@ -716,7 +726,7 @@ def convert_obj(input_file, output_file, texture_size,
                 model_scale, model_translation, use_vertex_color,
                 no_strip=False, multi_material=False, collision=False,
                 collision_b3=False, collision_b3_scale=1.0,
-                collision_b3_c=None):
+                collision_b3_c=None, envmap_uv=False):
 
     vertices, texcoords, normals, material_faces, mtl_file = \
         parse_obj(input_file, use_vertex_color)
@@ -773,7 +783,7 @@ def convert_obj(input_file, output_file, texture_size,
         dl = generate_display_list(resolved_tris, resolved_quads, vertices,
                                     texcoords, normals, texture_size,
                                     model_scale, model_translation,
-                                    use_vertex_color, no_strip)
+                                    use_vertex_color, no_strip, envmap_uv)
         dl.save_to_file(output_file)
     else:
         # ---- Multi-material path ----
@@ -822,7 +832,7 @@ def convert_obj(input_file, output_file, texture_size,
             dl = generate_display_list(resolved_tris, resolved_quads, vertices,
                                         texcoords, normals, mat_tex_size,
                                         model_scale, model_translation,
-                                        use_vertex_color, no_strip)
+                                        use_vertex_color, no_strip, envmap_uv)
 
             kd = mat_props.get('Kd', (1.0, 1.0, 1.0))
             ka = mat_props.get('Ka', (0.0, 0.0, 0.0))
@@ -894,6 +904,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-strip", required=False,
                         action='store_true',
                         help="disable strip generation (original behavior)")
+    parser.add_argument("--envmap-uv", required=False,
+                        action='store_true',
+                        help="replace all texture coordinates with the centre "
+                             "of the texture, as required by sphere-map "
+                             "environment mapping (NEA_TEXGEN_NORMAL)")
     parser.add_argument("--multi-material", required=False,
                         action='store_true',
                         help="enable multi-material output (DLMM format)")
@@ -945,7 +960,7 @@ if __name__ == "__main__":
                     args.scale, args.translation, args.use_vertex_color,
                     args.no_strip, args.multi_material, args.collision,
                     args.collision_b3, args.collision_b3_scale,
-                    args.collision_b3_c)
+                    args.collision_b3_c, args.envmap_uv)
     except BaseException as e:
         print("ERROR: " + str(e))
         traceback.print_exc()

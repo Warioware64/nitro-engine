@@ -102,6 +102,30 @@ void NEA_MaterialColorSet(NEA_Material *tex, u32 color);
 /// @param tex Material.
 void NEA_MaterialColorDelete(NEA_Material *tex);
 
+/// Binds only a material's texture image, leaving everything else alone.
+///
+/// NEA_MaterialUse() binds the image together with the material's colour, its
+/// lighting properties and its palette. This binds the image and nothing else,
+/// which is what a texture animation wants: the material stays as it was and
+/// only the picture on it changes.
+///
+/// @param tex Material to take the texture from. NULL unbinds the texture.
+void NEA_MaterialTexUse(const NEA_Material *tex);
+
+/// Changes how texture coordinates are generated for a material.
+///
+/// The texgen mode is normally chosen once, in the flags passed to the loader.
+/// This switches it afterwards, which is what makes it possible to turn a
+/// material's reflection on and off at runtime.
+///
+/// Passing NEA_TEXGEN_NORMAL turns the material into an environment map: see
+/// NEA_TextureMatrixEnvMap() for what else that needs.
+///
+/// @param tex Material (it must have a texture in VRAM).
+/// @param texgen One of NEA_TEXGEN_OFF, NEA_TEXGEN_TEXCOORD,
+///               NEA_TEXGEN_NORMAL or NEA_TEXGEN_POSITION.
+void NEA_MaterialSetTexGen(NEA_Material *tex, NEA_TextureFlags texgen);
+
 /// Loads a texture from the filesystem and assigns it to a material object.
 ///
 /// The height doesn't need to be a power of two, but he width must be a power
@@ -587,9 +611,14 @@ void NEA_TextureDrawingEnd(void);
 
 /// @defgroup texture_matrix Texture matrix
 ///
-/// Functions to manipulate the GPU texture matrix. Only materials loaded with
-/// NEA_TEXGEN_TEXCOORD are affected. Materials with NEA_TEXGEN_OFF (the
-/// default) are not affected, so there is no conflict.
+/// Functions to manipulate the GPU texture matrix. Materials loaded with
+/// NEA_TEXGEN_OFF (the default) are not affected, so there is no conflict; all
+/// three other texgen modes go through this matrix.
+///
+/// The scroll, rotate and scale helpers are meant for NEA_TEXGEN_TEXCOORD, and
+/// transform the UVs baked into the mesh. NEA_TextureMatrixEnvMap() is the one
+/// for NEA_TEXGEN_NORMAL, and does something rather different: it makes the
+/// matrix generate coordinates from the surface normal.
 ///
 /// @{
 
@@ -600,9 +629,30 @@ void NEA_TextureMatrixIdentity(void);
 
 /// Translate the texture matrix (fixed-point).
 ///
-/// @param x Translation on the S (horizontal) axis (f32).
-/// @param y Translation on the T (vertical) axis (f32).
+/// **The unit is a sixteenth of a texel, not a texel.** The hardware multiplies
+/// the translation row of the texture matrix by a constant 1/16 (see GBATEK's
+/// texture coordinate transformation, mode 1), so a translation of `x` shifts
+/// the texture by `x / 16` texels. Scrolling a 64 texel texture through one
+/// full wrap therefore needs `inttof32(64 * 16)`, not `inttof32(64)`.
+///
+/// Use NEA_TextureMatrixTranslateTexels() if you would rather say it in texels.
+///
+/// @param x Translation on the S (horizontal) axis (f32, in 1/16 texels).
+/// @param y Translation on the T (vertical) axis (f32, in 1/16 texels).
 void NEA_TextureMatrixTranslateI(int x, int y);
+
+/// Translate the texture matrix by a number of texels.
+///
+/// The same as NEA_TextureMatrixTranslateI() with the sixteenths worked out for
+/// you, which is what almost every caller actually wants: scrolling a texture by
+/// its own width is `NEA_TextureMatrixTranslateTexels(inttof32(width), 0)`.
+///
+/// @param u Translation on the S (horizontal) axis, in texels (f32).
+/// @param v Translation on the T (vertical) axis, in texels (f32).
+static inline void NEA_TextureMatrixTranslateTexels(int u, int v)
+{
+    NEA_TextureMatrixTranslateI(u * 16, v * 16);
+}
 
 /// Translate the texture matrix (float).
 ///
@@ -631,6 +681,62 @@ void NEA_TextureMatrixScaleI(int sx, int sy);
 /// @param sy Scale on the T (vertical) axis.
 #define NEA_TextureMatrixScale(sx, sy) \
     NEA_TextureMatrixScaleI(floattof32(sx), floattof32(sy))
+
+/// Loads a texture matrix that turns surface normals into sphere-map
+/// coordinates.
+///
+/// This is environment mapping: a "matcap" or chrome look, where a single
+/// circular image is reflected off the surface and slides across it as the
+/// object or the camera turns. It costs no extra polygons and no per-vertex
+/// work, because the coordinate generation happens in the same hardware unit
+/// that already transforms the normal for lighting.
+///
+/// Three things have to line up for it to work:
+///
+/// 1. **The material** must use NEA_TEXGEN_NORMAL, either from its load flags
+///    or via NEA_MaterialSetTexGen(). The texture itself should be a sphere
+///    map: a circular image where the centre is the part of the surface facing
+///    the camera and the rim is the part facing away.
+/// 2. **The matrix**, which is this function. Call it after the camera and the
+///    model's own transform are in place, because it reads the transform that
+///    is current at that moment. That is what makes the reflection follow the
+///    object rather than only the camera.
+/// 3. **The mesh** must have every texture coordinate at the centre of the
+///    texture. In this mode the hardware *adds* the mesh's coordinate to the
+///    generated one, so it acts as the origin of the sphere map; anything else
+///    smears the reflection across the surface. Export models for this with
+///    `obj2dl.py --envmap-uv`, or emit NEA_PolyTexCoord(w / 2, h / 2) before
+///    each normal when building geometry by hand.
+///
+/// So the per-model draw order is: camera, model transform, this, draw.
+///
+/// This reads back a GPU result register, which means waiting for the geometry
+/// engine to go idle. That is a real stall, so it is a per-object cost, not a
+/// per-vertex one: call it once per environment-mapped model, not more.
+///
+/// @param tex Material whose texture is the sphere map. Its size determines the
+///            scale of the mapping.
+void NEA_TextureMatrixEnvMap(const NEA_Material *tex);
+
+/// Loads a sphere-map texture matrix with explicit scale factors.
+///
+/// The general form of NEA_TextureMatrixEnvMap(), for when the sphere map does
+/// not fill its texture, or to deliberately over- or under-scale the
+/// reflection. The scales are the half-size of the area the reflection should
+/// cover, in texels: a unit normal maps to +/- that many texels around the
+/// mesh's texture coordinate.
+///
+/// Everything said about NEA_TextureMatrixEnvMap() applies here too.
+///
+/// Note the sign of `scale_t`. Texture T grows downwards while a normal's +Y
+/// points up, so a sphere map image wants a **negative** T scale; passing a
+/// positive one mirrors the reflection vertically, which reads as lighting the
+/// model from below. NEA_TextureMatrixEnvMap() handles this for you.
+///
+/// @param scale_s Half-width of the sphere map in texels (f32). Use inttof32().
+/// @param scale_t Half-height of the sphere map in texels (f32), normally
+///                negative.
+void NEA_TextureMatrixEnvMapI(int scale_s, int scale_t);
 
 /// @}
 

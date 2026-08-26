@@ -1,0 +1,3 @@
+# 16-color palette. The palette is replaced at runtime by the
+# texture/palette swap track, so only the indices matter here.
+-gx -gb -gB4 -gT!

@@ -48,6 +48,10 @@ typedef enum {
 /// Maximum number of submeshes per multi-material model.
 #define NEA_MAX_SUBMESHES 16
 
+/// Forward declaration. NEAAnimMat.h includes this header, so it cannot be
+/// included from here; only the pointer type is needed.
+typedef struct NEA_AnimMatInstance_ NEA_AnimMatInstance;
+
 /// DLMM file magic number ("DLMM" in little-endian).
 #define NEA_DLMM_MAGIC 0x4D4D4C44
 
@@ -94,6 +98,16 @@ typedef struct {
     int sy;                   ///< Y scale of the model (f32)
     int sz;                   ///< Z scale of the model (f32)
     m4x3 *mat;                ///< Transformation matrix assigned by the user.
+    int poly_id;              ///< Polygon ID to draw with, or -1 to inherit it.
+    bool envmap;              ///< Load a sphere-map texture matrix when drawing.
+
+    /// Material animation driving this model, or NULL.
+    NEA_AnimMatInstance *animmat;
+
+    /// For each submesh, the index of the animation target whose name matches
+    /// that submesh's material, or -1 for "not animated". Resolved once by
+    /// NEA_ModelSetAnimMat() so that drawing never compares strings.
+    int8_t animmat_target[NEA_MAX_SUBMESHES];
 } NEA_Model;
 
 /// Creates a new model object.
@@ -250,6 +264,86 @@ void NEA_ModelTranslateI(NEA_Model *model, int x, int y, int z);
 /// @param ry Rotation by Y axis (0 - 511).
 /// @param rz Rotation by Z axis (0 - 511).
 void NEA_ModelSetRot(NEA_Model *model, int rx, int ry, int rz);
+
+/// Sets the polygon ID this model is drawn with.
+///
+/// By default a model inherits whatever polygon format was last set with
+/// NEA_PolyFormat(), which means every model in a scene usually shares one ID.
+/// Giving a model its own ID matters for two things:
+///
+/// - **Outlining.** Edge marking draws an outline only where neighbouring
+///   pixels have different polygon IDs, so objects that should be outlined
+///   separately need separate IDs. See NEA_OutliningEnable().
+/// - **Translucency.** Two translucent polygons only blend with each other if
+///   their IDs differ.
+///
+/// Only the ID field is overridden; alpha, lighting, culling and the rest still
+/// come from the last NEA_PolyFormat() call, so the usual per-frame setup keeps
+/// working unchanged.
+///
+/// Some IDs are already spoken for: 63 is the rear plane and 62 and 61 are the
+/// GUI (NEA_GUI_POLY_ID).
+///
+/// @param model Model.
+/// @param id Polygon ID (0 - 63), or -1 to go back to inheriting it.
+void NEA_ModelSetPolyID(NEA_Model *model, int id);
+
+/// Draws this model with sphere-map environment mapping.
+///
+/// Environment mapping needs a texture matrix built from the transform that is
+/// current when the model is drawn, and that transform only exists inside
+/// NEA_ModelDraw(). This flag makes it load one at the right moment, which is
+/// after the model's position and rotation are applied and before any geometry
+/// is submitted. The reflection then tracks the object as well as the camera.
+///
+/// The material also has to use NEA_TEXGEN_NORMAL and the mesh has to have its
+/// texture coordinates at the centre of the texture; see
+/// NEA_TextureMatrixEnvMap() for the whole picture.
+///
+/// Only single-material models are supported. A multi-material model would need
+/// a different matrix per submesh, since each submesh may have a different
+/// texture size.
+///
+/// **On animated models the reflection is anchored to the model, not to each
+/// bone.** Sphere mapping generates coordinates from the raw normal in the
+/// display list, using the texture matrix alone -- the position and vector
+/// matrices play no part. A skinned display list restores a different bone
+/// matrix as it goes, but there is only one texture matrix and it is loaded
+/// once, from the model's own transform. So a bone rotated away from the
+/// model's root reflects as though it weren't: the highlight slides with the
+/// limb instead of staying put on screen. Subtle on a mostly upright character,
+/// obvious on a swinging arm. Fixing it would mean reloading the texture matrix
+/// at every bone change inside the display list, which the format has no room
+/// for. Use it on animated models where the deformation is small, or on rigid
+/// ones.
+///
+/// This costs a wait for the geometry engine per model per frame. It is a real
+/// stall, so turn it off for models that don't need it.
+///
+/// @param model Model.
+/// @param value True enables environment mapping, false disables it.
+void NEA_ModelSetEnvMap(NEA_Model *model, bool value);
+
+/// Drives this model's materials from a material animation.
+///
+/// One animation can hold several named targets, and this matches each of them
+/// against the material names the model's submeshes carry from their DLMM file.
+/// A submesh whose material name has no matching target is drawn normally, so a
+/// model can have one animated material and five still ones.
+///
+/// The matching happens **here**, once, not while drawing: the resolved target
+/// indices are stored on the model, and NEA_ModelDraw() only looks them up.
+/// Call this again if the animation data changes.
+///
+/// For a single-material model, or for an animation whose one target has no
+/// name, target 0 is used. That makes the old idiom -- NEA_AnimMatApply()
+/// followed by NEA_ModelDraw() -- keep working untouched; this is the way to
+/// animate a model that has more than one material, which was not previously
+/// possible at all.
+///
+/// @param model Model.
+/// @param inst Animation instance, or NULL to stop driving this model.
+void NEA_ModelSetAnimMat(NEA_Model *model, NEA_AnimMatInstance *inst);
 
 /// Rotate a model.
 ///

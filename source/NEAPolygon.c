@@ -70,6 +70,28 @@ void NEA_ShininessTableGenerate(NEA_ShininessFunction function)
             bytes[i] = v * 2 / div;
         }
     }
+    else if (function == NEA_SHININESS_STEPPED)
+    {
+        // Quantize the linear ramp into flat levels. Four bands is enough for
+        // the highlight to read as banded without breaking into noise on the
+        // curved surfaces this is normally used on.
+        const int levels = 4;
+
+        for (int i = 0; i < 128; i++)
+        {
+            int band = (i * levels) / 128;
+            bytes[i] = (band * 255) / (levels - 1);
+        }
+    }
+    else if (function == NEA_SHININESS_THRESHOLD)
+    {
+        // Nothing until the half vector is nearly aligned with the normal, then
+        // full intensity. The highlight becomes a hard-edged shape.
+        const int threshold = 96;
+
+        for (int i = 0; i < 128; i++)
+            bytes[i] = (i < threshold) ? 0 : 255;
+    }
     else
     {
         for (int i = 0; i < 128 / 4; i++)
@@ -82,14 +104,41 @@ void NEA_ShininessTableGenerate(NEA_ShininessFunction function)
         GFX_SHININESS = table[i];
 }
 
+void NEA_ShininessTableSet(const u8 *table)
+{
+    NEA_AssertPointer(table, "NULL pointer");
+
+    // The register takes four entries at a time, and the caller's buffer has no
+    // alignment guarantee, so pack the words by hand rather than casting.
+    for (int i = 0; i < NEA_SHININESS_TABLE_SIZE; i += 4)
+    {
+        GFX_SHININESS = (u32)table[i]
+                      | ((u32)table[i + 1] << 8)
+                      | ((u32)table[i + 2] << 16)
+                      | ((u32)table[i + 3] << 24);
+    }
+}
+
+// GFX_POLY_FORMAT is write-only. This holds a copy of its value so that code
+// which only wants to change one field (NEA_ModelSetPolyID(), for example) can
+// leave the rest alone.
+static u32 ne_last_poly_format = 0;
+
 void NEA_PolyFormat(u32 alpha, u32 id, NEA_LightEnum lights,
                    NEA_CullingEnum culling, NEA_OtherFormatEnum other)
 {
     NEA_AssertMinMax(0, alpha, 31, "Invalid alpha value %lu", alpha);
     NEA_AssertMinMax(0, id, 63, "Invalid polygon ID %lu", id);
 
-    GFX_POLY_FORMAT = POLY_ALPHA(alpha) | POLY_ID(id)
-                    | lights | culling | other;
+    ne_last_poly_format = POLY_ALPHA(alpha) | POLY_ID(id)
+                        | lights | culling | other;
+
+    GFX_POLY_FORMAT = ne_last_poly_format;
+}
+
+u32 NEA_PolyFormatGet(void)
+{
+    return ne_last_poly_format;
 }
 
 void NEA_OutliningSetColor(u32 index, u32 color)
@@ -99,20 +148,117 @@ void NEA_OutliningSetColor(u32 index, u32 color)
     GFX_EDGE_TABLE[index] = color;
 }
 
+void NEA_OutliningSetColorAll(u32 color)
+{
+    for (int i = 0; i < 8; i++)
+        GFX_EDGE_TABLE[i] = color;
+}
+
 void NEA_SetupToonShadingTables(bool value)
 {
     if (value)
-    {
-        for (int i = 0; i < 16; i++)
-            GFX_TOON_TABLE[i] = RGB15(8, 8, 8);
-        for (int i = 16; i < 32; i++)
-            GFX_TOON_TABLE[i] = RGB15(24, 24, 24);
-    }
+        NEA_ToonTableBands(2, RGB15(8, 8, 8), RGB15(24, 24, 24));
     else
+        NEA_ToonTableFill(0);
+}
+
+void NEA_ToonTableSet(const u16 *table)
+{
+    NEA_AssertPointer(table, "NULL pointer");
+
+    for (int i = 0; i < NEA_TOON_TABLE_SIZE; i++)
+        GFX_TOON_TABLE[i] = table[i];
+}
+
+void NEA_ToonTableFill(u32 color)
+{
+    for (int i = 0; i < NEA_TOON_TABLE_SIZE; i++)
+        GFX_TOON_TABLE[i] = color;
+}
+
+// Splits an RGB15 value into its three 5 bit channels.
+static inline void ne_toon_unpack(u32 color, int *r, int *g, int *b)
+{
+    *r = color & 0x1F;
+    *g = (color >> 5) & 0x1F;
+    *b = (color >> 10) & 0x1F;
+}
+
+// Interpolates between two colors, channel by channel. `num`/`den` is the
+// position between `from` (0) and `to` (den). Everything stays in integers: the
+// channels are 5 bit, so nothing here can overflow.
+static u32 ne_toon_lerp(u32 from, u32 to, int num, int den)
+{
+    int r0, g0, b0, r1, g1, b1;
+
+    ne_toon_unpack(from, &r0, &g0, &b0);
+    ne_toon_unpack(to, &r1, &g1, &b1);
+
+    int r = r0 + ((r1 - r0) * num) / den;
+    int g = g0 + ((g1 - g0) * num) / den;
+    int b = b0 + ((b1 - b0) * num) / den;
+
+    return RGB15(r, g, b);
+}
+
+void NEA_ToonTableBands(int bands, u32 dark, u32 bright)
+{
+    NEA_AssertMinMax(1, bands, NEA_TOON_TABLE_SIZE,
+                     "Invalid number of toon bands %d", bands);
+
+    for (int i = 0; i < NEA_TOON_TABLE_SIZE; i++)
     {
-        for (int i = 0; i < 32; i++)
-            GFX_TOON_TABLE[i] = 0;
+        // Which band this entry falls in, and where that band sits in the ramp.
+        int band = (i * bands) / NEA_TOON_TABLE_SIZE;
+
+        u32 color = (bands == 1) ? bright
+                                 : ne_toon_lerp(dark, bright, band, bands - 1);
+
+        GFX_TOON_TABLE[i] = color;
     }
+}
+
+void NEA_ToonTableGradient(u32 lo, u32 hi)
+{
+    for (int i = 0; i < NEA_TOON_TABLE_SIZE; i++)
+        GFX_TOON_TABLE[i] = ne_toon_lerp(lo, hi, i, NEA_TOON_TABLE_SIZE - 1);
+}
+
+void NEA_ToonTableGradientStops(const u32 *colors, const u8 *indices, int count)
+{
+    NEA_AssertPointer(colors, "NULL colors pointer");
+    NEA_AssertPointer(indices, "NULL indices pointer");
+    NEA_AssertMinMax(1, count, NEA_TOON_TABLE_SIZE,
+                     "Invalid number of gradient stops %d", count);
+
+    for (int i = 0; i < count; i++)
+    {
+        NEA_AssertMinMax(0, indices[i], NEA_TOON_TABLE_SIZE - 1,
+                         "Gradient stop %d out of range", i);
+        NEA_Assert(i == 0 || indices[i] > indices[i - 1],
+                   "Gradient stop indices must be strictly increasing");
+    }
+
+    // Hold the first stop's color across everything before it.
+    for (int i = 0; i < indices[0]; i++)
+        GFX_TOON_TABLE[i] = colors[0];
+
+    for (int stop = 0; stop < count - 1; stop++)
+    {
+        int from = indices[stop];
+        int to = indices[stop + 1];
+        int span = to - from;
+
+        for (int i = from; i < to; i++)
+        {
+            GFX_TOON_TABLE[i] = ne_toon_lerp(colors[stop], colors[stop + 1],
+                                             i - from, span);
+        }
+    }
+
+    // ... and the last stop's color across everything after it.
+    for (int i = indices[count - 1]; i < NEA_TOON_TABLE_SIZE; i++)
+        GFX_TOON_TABLE[i] = colors[count - 1];
 }
 
 void NEA_FogEnable(u32 shift, u32 color, u32 alpha, int mass, int depth)
@@ -298,6 +444,52 @@ void NEA_ClearColorSet(u32 color, u32 alpha, u32 id)
 u32 NEA_ClearColorGet(void)
 {
     return ne_clearcolor;
+}
+
+// GFX_CLEAR_DEPTH is write-only, so keep a copy the same way the clear color
+// does.
+static u32 ne_cleardepth = GL_MAX_DEPTH;
+
+void NEA_ClearDepthSet(u32 depth)
+{
+    NEA_AssertMinMax(0, depth, 0x7FFF, "Invalid clear depth %lu", depth);
+
+    ne_cleardepth = depth;
+    GFX_CLEAR_DEPTH = depth;
+}
+
+u32 NEA_ClearDepthGet(void)
+{
+    return ne_cleardepth;
+}
+
+void NEA_OneDotDepthSet(u32 depth)
+{
+    NEA_AssertMinMax(0, depth, 0x7FFF, "Invalid 1-dot depth %lu", depth);
+
+    // This register bypasses the geometry FIFO, so a write takes effect at once
+    // and would otherwise change the behaviour of polygons that are already
+    // queued. Let the engine drain first.
+    while (GFX_STATUS & BIT(27));
+
+    REG_DISP_1DOT_DEPTH = depth;
+}
+
+void NEA_AlphaTestEnable(u32 threshold)
+{
+    // 31 would reject every pixel, opaque ones included, which can only ever be
+    // a mistake.
+    NEA_AssertMinMax(0, threshold, 30, "Invalid alpha test threshold %lu",
+                     threshold);
+
+    GFX_ALPHA_TEST = threshold;
+    GFX_CONTROL |= GL_ALPHA_TEST;
+}
+
+void NEA_AlphaTestDisable(void)
+{
+    GFX_CONTROL &= ~GL_ALPHA_TEST;
+    GFX_ALPHA_TEST = 0;
 }
 
 void NEA_ClearBMPEnable(bool value)

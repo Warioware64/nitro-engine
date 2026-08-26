@@ -1,0 +1,21 @@
+{
+  "images": [
+    "../../../assets/panels/scroll.png",
+    "../../../assets/panels/flip.png",
+    "../../../assets/panels/pulse.png"
+  ],
+  "targets": {
+    "scroll": {
+      "image": 0
+    },
+    "flip": {
+      "image": 1
+    },
+    "pulse": {
+      "image": 2
+    }
+  },
+  "tint_emission": true,
+  "all_targets": false,
+  "version": 1
+}

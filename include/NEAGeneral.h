@@ -351,6 +351,10 @@ void NEA_ClippingPlanesSetI(int znear, int zfar);
 
 /// Enable or disable antialiasing.
 ///
+/// Antialiasing is on by default. It is worth turning off when using edge
+/// marking (NEA_OutliningEnable()): the two units fight over the same edge
+/// pixels, and outlines come out cleaner without it.
+///
 /// @param value true enables antialiasing, false disables it.
 void NEA_AntialiasEnable(bool value);
 

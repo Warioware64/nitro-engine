@@ -70,3 +70,41 @@ The following tools are used to export models created on the PC to the NDS:
 
   This tool has been deprecated. You should only use it for the depth bitmap
   (DEPTHBMP), as this conversion isn't supported by any other tool.
+
+Editors
+=======
+
+Two of the tools are interactive rather than command-line. Both need Python's
+``tkinter`` and `Pillow <https://pypi.org/project/Pillow/>`_::
+
+    pip install Pillow
+
+Pillow is what lets their previews rotate, scale, tint and alpha-composite real
+artwork, none of which Tk can do on its own.
+
+- **npe_editor**
+
+  Edits a particle effect and saves it as the ``.npe`` binary ``NEAParticle``
+  loads. The preview runs the same simulation the C runtime does, so what it
+  shows is what the DS will show::
+
+      python3 tools/npe_editor/npe_editor.py effects/fire.npe
+
+- **animmat_editor**
+
+  Edits a material animation and saves it as the ``.neaanimmat`` binary
+  ``NEAAnimMat`` loads, in either format version. Tracks that interpolate get a
+  curve with draggable keyframes; tracks the hardware can only step through get
+  a strip of labelled segments, because a light mask or a culling mode plotted
+  on a numeric axis is not readable::
+
+      python3 tools/animmat_editor/animmat_editor.py panels.neaanimmat
+
+  Its evaluator is checked frame-for-frame against the C runtime by
+  ``tests/animmat_eval``, which is what makes the preview trustworthy.
+
+Neither format records the artwork it animates -- both name a material that the
+runtime resolves later -- so the editors take the image separately, through
+**File → Import image**, and remember it in a ``<file>.editor.json`` sidecar.
+The binary itself is never touched by that, and losing the sidecar costs the
+preview and nothing else.

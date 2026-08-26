@@ -103,6 +103,8 @@ struct NEA_ParticleEmitter {
     int32_t       origin_x, origin_y, origin_z;
     NEA_Model    *attach;
 
+    uint8_t  poly_id_base;   // First of the 8 IDs the emitter cycles through.
+
     bool     playing;
     bool     params_loaded;
     int32_t  emit_acc;       // 16.16 accumulator (particles ready to spawn)
@@ -244,6 +246,8 @@ NEA_ParticleEmitter *NEA_ParticleEmitterCreate(void)
         e->seed = ne_part_global_seed;
         ne_part_global_seed = ne_part_global_seed * 1103515245u + 12345u;
 
+        e->poly_id_base = NEA_PARTICLE_DEFAULT_POLY_ID;
+
         ne_part_emitters[i] = e;
         return e;
     }
@@ -305,15 +309,27 @@ void NEA_ParticleEmitterDelete(NEA_ParticleEmitter *emitter)
 //     u16 num
 //     num * { u16 t, u16 size }                  (4 B each)
 
-int NEA_ParticleEmitterLoad(NEA_ParticleEmitter *emitter, const void *data)
+// Fixed part of an NPE file: header + emitter block + material reference, plus
+// the two key counts that follow it.
+#define NEA_NPE_FIXED_SIZE (16 + 80 + 52 + 2)
+
+// Parses an NPE image, refusing to read past `size` bytes.
+//
+// The loaders that read from a file know how many bytes they actually got, and
+// this walks the file using counts stored inside it, so without the length a
+// truncated or corrupt .npe reads past the end of the allocation. Callers that
+// genuinely cannot know the size (a file linked into the ROM, where the data is
+// as trustworthy as the code) pass SIZE_MAX.
+static int ne_npe_parse(NEA_ParticleEmitter *emitter, const void *data,
+                        size_t size)
 {
-    NEA_AssertPointer(emitter, "NULL emitter");
-    NEA_AssertPointer(data, "NULL data");
-
-    if (emitter == NULL || data == NULL)
-        return 0;
-
     const uint8_t *p = data;
+
+    if (size < NEA_NPE_FIXED_SIZE)
+    {
+        NEA_DebugPrint("NPE truncated");
+        return 0;
+    }
 
     uint32_t magic   = ne_rd_u32(p + 0);
     uint32_t version = ne_rd_u32(p + 4);
@@ -380,6 +396,12 @@ int NEA_ParticleEmitterLoad(NEA_ParticleEmitter *emitter, const void *data)
         NEA_DebugPrint("Too many color keys");
         return 0;
     }
+    // 6 bytes per colour key, then the size-key count, then 4 per size key.
+    if (size < (size_t)NEA_NPE_FIXED_SIZE + (size_t)nck * 6 + 2)
+    {
+        NEA_DebugPrint("NPE truncated in color keys");
+        return 0;
+    }
     pp->num_color_keys = nck;
     for (int i = 0; i < nck; i++)
     {
@@ -396,6 +418,12 @@ int NEA_ParticleEmitterLoad(NEA_ParticleEmitter *emitter, const void *data)
     if (nsk > NEA_NPE_MAX_KEYS)
     {
         NEA_DebugPrint("Too many size keys");
+        return 0;
+    }
+    if (size < (size_t)NEA_NPE_FIXED_SIZE + (size_t)nck * 6 + 2
+             + (size_t)nsk * 4)
+    {
+        NEA_DebugPrint("NPE truncated in size keys");
         return 0;
     }
     pp->num_size_keys = nsk;
@@ -432,16 +460,43 @@ int NEA_ParticleEmitterLoad(NEA_ParticleEmitter *emitter, const void *data)
     return 1;
 }
 
+int NEA_ParticleEmitterLoad(NEA_ParticleEmitter *emitter, const void *data)
+{
+    NEA_AssertPointer(emitter, "NULL emitter");
+    NEA_AssertPointer(data, "NULL data");
+
+    if (emitter == NULL || data == NULL)
+        return 0;
+
+    // No length to check against. This is the ROM-linked case, where the data
+    // is as trustworthy as the code beside it; anything read from a file goes
+    // through the loaders below, which do know the size.
+    return ne_npe_parse(emitter, data, SIZE_MAX);
+}
+
+int NEA_ParticleEmitterLoadSize(NEA_ParticleEmitter *emitter, const void *data,
+                                size_t size)
+{
+    NEA_AssertPointer(emitter, "NULL emitter");
+    NEA_AssertPointer(data, "NULL data");
+
+    if (emitter == NULL || data == NULL)
+        return 0;
+
+    return ne_npe_parse(emitter, data, size);
+}
+
 int NEA_ParticleEmitterLoadFAT(NEA_ParticleEmitter *emitter, const char *path)
 {
     NEA_AssertPointer(emitter, "NULL emitter");
     NEA_AssertPointer(path, "NULL path");
 
-    void *buf = NEA_FATLoadData(path);
+    size_t size = 0;
+    void *buf = __NEA_FATLoadDataSize(path, &size);
     if (buf == NULL)
         return 0;
 
-    int ok = NEA_ParticleEmitterLoad(emitter, buf);
+    int ok = ne_npe_parse(emitter, buf, size);
     free(buf);
     return ok;
 }
@@ -453,8 +508,9 @@ typedef struct {
 static void ne_async_part_finalize(NEA_AsyncFile *job)
 {
     ne_async_part_param *p = __NEA_AsyncParam(job);
-    char *buf = __NEA_AsyncBuffer(job, NULL);
-    int ok = (buf != NULL) ? NEA_ParticleEmitterLoad(p->emitter, buf) : 0;
+    size_t size = 0;
+    char *buf = __NEA_AsyncBuffer(job, &size);
+    int ok = (buf != NULL) ? ne_npe_parse(p->emitter, buf, size) : 0;
     __NEA_AsyncSetResult(job, ok);
 }
 
@@ -506,6 +562,21 @@ void NEA_ParticleEmitterAttachToModel(NEA_ParticleEmitter *emitter,
     emitter->attach = model;
 }
 
+void __NEA_ParticleDetachModel(NEA_Model *model)
+{
+    // An emitter follows its model by raw pointer and reads the model's
+    // position every frame. Deleting the model without clearing that leaves the
+    // next update reading freed memory, so NEA_ModelDelete() calls this first.
+    if (!ne_part_inited || model == NULL)
+        return;
+
+    for (int i = 0; i < ne_part_max; i++)
+    {
+        if (ne_part_emitters[i] != NULL && ne_part_emitters[i]->attach == model)
+            ne_part_emitters[i]->attach = NULL;
+    }
+}
+
 void NEA_ParticleEmitterPlay(NEA_ParticleEmitter *emitter)
 {
     if (emitter == NULL) return;
@@ -526,6 +597,16 @@ void NEA_ParticleEmitterStop(NEA_ParticleEmitter *emitter)
     if (emitter->pool != NULL)
         memset(emitter->pool, 0, sizeof(ne_particle_t) * emitter->pool_size);
     emitter->alive_count = 0;
+}
+
+void NEA_ParticleEmitterSetPolyID(NEA_ParticleEmitter *emitter, int base)
+{
+    if (emitter == NULL)
+        return;
+
+    NEA_AssertMinMax(0, base, 56, "Invalid particle polygon ID base %d", base);
+
+    emitter->poly_id_base = (uint8_t)(base & 0x3F);
 }
 
 int NEA_ParticleEmitterAliveCount(const NEA_ParticleEmitter *emitter)
@@ -902,9 +983,15 @@ void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter)
     }
 
     // Texture sub-rect computation for sprite-sheet animation.
+    //
+    // Gated on the flag, not just on the grid being bigger than one cell. It
+    // used to be the latter, which meant an effect with the flag off but a
+    // leftover 2x2 grid still played a sheet on hardware while the editor,
+    // which does read the flag, showed the whole texture.
+    bool sheet = (emitter->params.flags & NEA_NPE_FLAG_SPRITESHEET) != 0;
     int cols  = emitter->params.sheet_cols ? emitter->params.sheet_cols : 1;
     int rows  = emitter->params.sheet_rows ? emitter->params.sheet_rows : 1;
-    int nfr   = cols * rows;
+    int nfr   = sheet ? cols * rows : 1;
     int tw    = (emitter->material != NULL) ? NEA_TextureGetSizeX(emitter->material) : 0;
     int th    = (emitter->material != NULL) ? NEA_TextureGetSizeY(emitter->material) : 0;
     int fw    = (cols > 0) ? tw / cols : tw;
@@ -918,6 +1005,20 @@ void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter)
 
         // Half-size as f32: (size_8_8 << 4) gives 12.12, then >>1 for half.
         int32_t hs = ((int32_t)pa->size << 4) >> 1;
+
+        // Velocity stretch: lengthen the quad along the direction of travel
+        // and narrow it across, so a fast particle reads as a streak. The
+        // amount is the speed itself, which is what makes a spark taper off as
+        // it slows.
+        int32_t stretch = 0;
+        if (emitter->params.flags & NEA_NPE_FLAG_STRETCH)
+        {
+            int32_t v[3] = { pa->vx, pa->vy, pa->vz };
+            int32_t len2 = mulf32(v[0], v[0]) + mulf32(v[1], v[1])
+                         + mulf32(v[2], v[2]);
+            if (len2 > 0)
+                stretch = sqrtf32(len2);
+        }
 
         // Rotated quad basis.
         int32_t rs[3], us[3];
@@ -944,10 +1045,37 @@ void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter)
 
         // Per-particle alpha through the poly format register.
         uint32_t alpha = (uint32_t)(pa->a >> 3) & 0x1F;
+
+        // The DS 3D engine has no additive blend. DISP3DCNT bit 3 is a plain
+        // alpha-blending on/off and there is no mode selector, so
+        // `dst = src*a + dst*(1-a)` is the only blend the hardware performs.
+        //
+        // What it can do is weight a particle's alpha by how bright it is. A
+        // dark particle then contributes almost nothing, as adding near-zero
+        // would, and a bright one dominates what is behind it. Together with
+        // the polygon IDs above -- which is what lets overlapping particles
+        // blend at all -- that is close enough to additive for sparks and
+        // flames, and it is what the flag has always meant to promise.
+        if (emitter->params.flags & NEA_NPE_FLAG_ADDITIVE)
+        {
+            uint32_t lum = ((uint32_t)pa->r * 77 + (uint32_t)pa->g * 151
+                          + (uint32_t)pa->b * 28) >> 8;
+            alpha = (alpha * lum) / 255;
+        }
+
         if (alpha == 0)
             continue; // fully transparent: skip submission
+        // Translucent polygons are not blended over a translucent pixel that
+        // has the *same* polygon ID -- the hardware skips the blend entirely.
+        // Every particle used to be submitted with ID 0, so a dense effect
+        // could not layer with itself at all: the first quad drawn at a pixel
+        // won and the rest were discarded. Cycling through eight IDs is the
+        // same trick NEA_RichTextRender3D() uses for overlapping glyphs.
+        //
+        // Eight is not a guarantee -- two particles eight slots apart share an
+        // ID again -- but it turns "never blends" into "rarely collides".
         GFX_POLY_FORMAT = POLY_ALPHA(alpha)
-                        | POLY_ID(0)
+                        | POLY_ID((emitter->poly_id_base + (i & 7)) & 0x3F)
                         | POLY_CULL_NONE;
 
         // Color modulation (RGB15, no alpha component here).
@@ -976,6 +1104,37 @@ void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter)
             s_v0 = (fr * fh) << 4;
             s_u1 = ((fc + 1) * fw) << 4;
             s_v1 = ((fr + 1) * fh) << 4;
+        }
+
+        // Apply the stretch along the velocity, after the billboard basis is
+        // built so the quad still faces the camera.
+        if (stretch > 0)
+        {
+            int32_t vdir[3] = { pa->vx, pa->vy, pa->vz };
+            normalizef32(vdir);
+
+            // How much of the velocity lies along each quad axis. The quad is
+            // scaled along whichever it mostly points down.
+            int32_t along_r = mulf32(vdir[0], rvec[0]) + mulf32(vdir[1], rvec[1])
+                            + mulf32(vdir[2], rvec[2]);
+            int32_t along_u = mulf32(vdir[0], uvec[0]) + mulf32(vdir[1], uvec[1])
+                            + mulf32(vdir[2], uvec[2]);
+
+            // Cap the elongation so a fast particle becomes a streak rather
+            // than a line across the whole screen.
+            int32_t k = inttof32(1) + (stretch << 3);
+            if (k > inttof32(6))
+                k = inttof32(6);
+
+            if (along_u < 0)
+                along_u = -along_u;
+            if (along_r < 0)
+                along_r = -along_r;
+
+            if (along_u >= along_r)
+                for (int kk = 0; kk < 3; kk++) us[kk] = mulf32(us[kk], k);
+            else
+                for (int kk = 0; kk < 3; kk++) rs[kk] = mulf32(rs[kk], k);
         }
 
         // Four corners in world space.

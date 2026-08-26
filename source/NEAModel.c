@@ -163,6 +163,11 @@ NEA_Model *NEA_ModelCreate(NEA_ModelType type)
     model->sx = model->sy = model->sz = inttof32(1);
 
     model->mat = NULL;
+    model->poly_id = -1; // Inherit the polygon ID from NEA_PolyFormat()
+
+    model->animmat = NULL;
+    for (int j = 0; j < NEA_MAX_SUBMESHES; j++)
+        model->animmat_target[j] = -1;
 
     model->modeltype = type;
     model->meshindex = NEA_NO_MESH;
@@ -190,6 +195,10 @@ void NEA_ModelDelete(NEA_Model *model)
     // Abort any asynchronous load that would write into this model, before the
     // memory it points to goes away.
     __NEA_AsyncCancelTarget(model);
+
+    // Same reason: a particle emitter attached to this model follows it by raw
+    // pointer and reads its position every frame.
+    __NEA_ParticleDetachModel(model);
 
     int i = 0;
     while (1)
@@ -349,6 +358,20 @@ void NEA_ModelDraw(const NEA_Model *model)
         PosTest_Asynch(0, 0, 0);
     }
 
+    // Override only the polygon ID, leaving alpha, lights, culling and the rest
+    // of the format as the last NEA_PolyFormat() call left them. The register is
+    // write-only, hence the shadow copy.
+    bool poly_id_overridden = !NEA_TestTouch && model->poly_id >= 0;
+
+    if (poly_id_overridden)
+    {
+        GFX_POLY_FORMAT = (NEA_PolyFormatGet() & ~POLY_ID(63))
+                        | POLY_ID(model->poly_id);
+    }
+
+    if (!NEA_TestTouch && model->envmap && model->texture != NULL)
+        NEA_TextureMatrixEnvMap(model->texture);
+
     if (model->multi != NULL)
     {
         // Multi-material draw path
@@ -414,6 +437,17 @@ void NEA_ModelDraw(const NEA_Model *model)
                     GFX_COLOR = sub->color;
                     GFX_TEX_FORMAT = 0;
                 }
+
+                // The animation goes on top of the submesh's own material, so
+                // it can override just an alpha or a scroll and leave the rest.
+                // The target index was resolved by NEA_ModelSetAnimMat(), so
+                // there is no name matching in here.
+                if (model->animmat != NULL && i < NEA_MAX_SUBMESHES &&
+                    model->animmat_target[i] >= 0)
+                {
+                    NEA_AnimMatApplyTarget(model->animmat,
+                                           model->animmat_target[i]);
+                }
             }
             NEA_DisplayListDrawDefault(sub->dl_data);
         }
@@ -429,6 +463,12 @@ void NEA_ModelDraw(const NEA_Model *model)
         // or if texture is NULL (preserves external setup like NEA_AnimMatApply).
         if (!NEA_TestTouch && model->texture != NULL)
             NEA_MaterialUse(model->texture);
+
+        if (!NEA_TestTouch && model->animmat != NULL &&
+            model->animmat_target[0] >= 0)
+        {
+            NEA_AnimMatApplyTarget(model->animmat, model->animmat_target[0]);
+        }
 
         ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
         const void *meshdata = mesh->address;
@@ -459,7 +499,81 @@ void NEA_ModelDraw(const NEA_Model *model)
         }
     }
 
+    // Put the format back so that the next model, if it has no ID of its own,
+    // draws with what NEA_PolyFormat() set rather than with this model's ID.
+    if (poly_id_overridden)
+        GFX_POLY_FORMAT = NEA_PolyFormatGet();
+
     MATRIX_POP = 1;
+}
+
+void NEA_ModelSetPolyID(NEA_Model *model, int id)
+{
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_AssertMinMax(-1, id, 63, "Invalid polygon ID %d", id);
+
+    model->poly_id = id;
+}
+
+void NEA_ModelSetAnimMat(NEA_Model *model, NEA_AnimMatInstance *inst)
+{
+    NEA_AssertPointer(model, "NULL pointer");
+
+    model->animmat = inst;
+
+    for (int i = 0; i < NEA_MAX_SUBMESHES; i++)
+        model->animmat_target[i] = -1;
+
+    if (inst == NULL || inst->data == NULL)
+        return;
+
+    // A single-material model has no submesh names to match against, so target
+    // 0 drives it. That is what makes the old "apply then draw" idiom and this
+    // new binding describe the same thing for such a model.
+    if (model->multi == NULL)
+    {
+        model->animmat_target[0] = 0;
+        return;
+    }
+
+    bool unnamed_single = (inst->data->num_targets == 1) &&
+                          (inst->data->targets[0].name[0] == '\0');
+
+    for (int i = 0; i < model->multi->num_submeshes; i++)
+    {
+        if (i >= NEA_MAX_SUBMESHES)
+            break;
+
+        if (unnamed_single)
+        {
+            model->animmat_target[i] = 0;
+            continue;
+        }
+
+        // Prefer the submesh's own material name (it comes from the DLMM file
+        // and is what an artist named the material), falling back to the name
+        // of the material object bound to it.
+        int target = NEA_AnimMatFindTarget(inst->data,
+                                           model->multi->submeshes[i].name);
+
+        if (target < 0 && model->multi->submeshes[i].material != NULL)
+        {
+            target = NEA_AnimMatFindTarget(
+                inst->data,
+                NEA_MaterialGetName(model->multi->submeshes[i].material));
+        }
+
+        model->animmat_target[i] = (int8_t)target;
+    }
+}
+
+void NEA_ModelSetEnvMap(NEA_Model *model, bool value)
+{
+    NEA_AssertPointer(model, "NULL pointer");
+    NEA_Assert(!value || model->multi == NULL,
+              "Environment mapping needs a single-material model");
+
+    model->envmap = value;
 }
 
 void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
@@ -482,6 +596,11 @@ void NEA_ModelClone(NEA_Model *dest, NEA_Model *source)
     dest->rx = source->rx;
     dest->ry = source->ry;
     dest->rz = source->rz;
+    dest->poly_id = source->poly_id;
+    dest->envmap = source->envmap;
+    dest->animmat = source->animmat;
+    memcpy(dest->animmat_target, source->animmat_target,
+           sizeof(dest->animmat_target));
     dest->sx = source->sx;
     dest->sy = source->sy;
     dest->sz = source->sz;

@@ -1,0 +1,2 @@
+# 16-bit color, no transparency
+-gx -gb -gB16 -gT!

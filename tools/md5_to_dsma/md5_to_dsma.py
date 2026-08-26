@@ -897,7 +897,7 @@ def stripify_triangles(resolved_tris):
 def convert_md5mesh(model_file, name, output_folder, texture_size,
                     draw_normal_polygons, extension_mesh, extension_anim,
                     blender_fix, export_base_pose, no_strip=False,
-                    multi_material=False):
+                    multi_material=False, envmap_uv=False):
 
     print(f"Converting model: {model_file}")
 
@@ -995,8 +995,15 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
             tri_vdata = []
             for vert, weight in zip(verts, weights):
                 st = vert.st
-                u = st[0] * mesh_tex_size[0]
-                v = st[1] * mesh_tex_size[1]
+                if envmap_uv:
+                    # Sphere mapping (NEA_TEXGEN_NORMAL) adds the generated
+                    # coordinate to this one, so it has to be the centre of the
+                    # texture for every vertex. The mesh's own UVs are dropped.
+                    u = mesh_tex_size[0] / 2.0
+                    v = mesh_tex_size[1] / 2.0
+                else:
+                    u = st[0] * mesh_tex_size[0]
+                    v = st[1] * mesh_tex_size[1]
 
                 joint_index = weight.joint
                 joint = joints[joint_index]
@@ -1169,6 +1176,213 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
 # NSMW (two-weight smooth skinning) support
 # ---------------------------------------------------------------------------
 
+# Fitting a smoothly weighted mesh into the matrix-stack budget
+# -------------------------------------------------------------
+#
+# NSMW spends one matrix-stack slot per distinct (joint pair, weight)
+# combination, and the hardware stack has 31 levels. A rigidly weighted mesh
+# needs one slot per bone and never comes close. A smoothly weighted one keys on
+# the weight as well as the bones, so a 12-bone tentacle whose blend varies
+# per vertex wants 194 slots for 11 actual bone pairs.
+#
+# Three stages bring that down, each doing less damage than the next, and each
+# reporting what it cost so a silent loss of quality is impossible:
+#
+#   1. quantize -- round the blend to a fixed number of steps. Off by default:
+#      measured against clustering alone on the tentacle test asset it makes the
+#      result *worse* (0.37 worst-case blend error against 0.23), because it
+#      throws away the vertex counts clustering uses to decide what matters.
+#      It survives only as a speed knob, since clustering is O(n^2) and a mesh
+#      with thousands of distinct weights would otherwise take minutes.
+#   2. cluster  -- merge the closest remaining pair of nodes, over and over,
+#      until the budget is met. Adaptive: a bone pair whose weights are spread
+#      out keeps more of them than one whose weights are nearly the same, and
+#      merges are weighted by how many vertices they affect.
+#   3. split    -- partition the triangles into groups that each fit, and draw
+#      them in several passes. The only stage that always succeeds, and the only
+#      one that costs anything at run time.
+#
+# Clustering cannot go below one node per bone pair, so a mesh with more bone
+# pairs than slots needs stage 3 no matter how coarse the weights get.
+
+
+def _node_weight(node):
+    """Blend factor of a node, as a float. Single-weight nodes sit at 1.0."""
+    return 1.0 if node[0] == 1 else node[3]
+
+
+def _quantize_nodes(nodes, usage, buckets):
+    """Round every blend to 1/buckets and merge whatever collides.
+
+    A blend that rounds all the way to 0 or 1 stops being a blend: the node
+    becomes a plain single-weight one, which is both cheaper and exactly what
+    the artist's weight was approaching.
+    """
+    remap = [0] * len(nodes)
+    out = []
+    seen = {}
+    max_err = 0.0
+
+    for i, node in enumerate(nodes):
+        nw, j0, j1, w0, w1 = node
+
+        if nw == 1:
+            key = (1, j0, j0)
+        else:
+            q = round(w0 * buckets) / buckets
+            max_err = max(max_err, abs(q - w0))
+
+            if q >= 1.0:
+                key = (1, j0, j0)
+            elif q <= 0.0:
+                key = (1, j1, j1)
+            else:
+                key = (2, j0, j1, q)
+
+        idx = seen.get(key)
+        if idx is None:
+            idx = len(out)
+            seen[key] = idx
+            if key[0] == 1:
+                out.append((1, key[1], key[1], 1.0, 0.0))
+            else:
+                out.append((2, key[1], key[2], key[3], 1.0 - key[3]))
+        remap[i] = idx
+
+    new_usage = [0] * len(out)
+    for i, n in enumerate(usage):
+        new_usage[remap[i]] += n
+
+    return out, new_usage, remap, max_err
+
+
+def _cluster_nodes(nodes, usage, max_nodes):
+    """Merge the closest two nodes of a bone pair until the budget is met.
+
+    The merged blend is the vertex-count-weighted mean of the two, so a node
+    covering three vertices does not drag one covering three hundred.
+    """
+    # Live node state, indexed the same way as `nodes`. Merging rewrites the
+    # survivor and marks the other dead; the remap is resolved at the end.
+    alive = list(range(len(nodes)))
+    parent = list(range(len(nodes)))
+    weight = [_node_weight(n) for n in nodes]
+    count = list(usage)
+    max_err = 0.0
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    # Only two-weight nodes of the same bone pair can be merged; a single-weight
+    # node is already the cheapest thing a vertex can reference.
+    groups = {}
+    for i, n in enumerate(nodes):
+        if n[0] == 2:
+            groups.setdefault((n[1], n[2]), []).append(i)
+
+    live = len(nodes)
+
+    while live > max_nodes:
+        best = None
+        for key, members in groups.items():
+            members = [m for m in members if find(m) == m]
+            groups[key] = members
+            if len(members) < 2:
+                continue
+            members.sort(key=lambda m: weight[m])
+            for a, b in zip(members, members[1:]):
+                gap = weight[b] - weight[a]
+                if best is None or gap < best[0]:
+                    best = (gap, a, b)
+
+        if best is None:
+            # Every bone pair is down to a single node. Only splitting the mesh
+            # can help from here.
+            break
+
+        _, a, b = best
+        total = count[a] + count[b] or 1
+        merged = (weight[a] * count[a] + weight[b] * count[b]) / total
+
+        max_err = max(max_err, abs(merged - weight[a]), abs(merged - weight[b]))
+
+        weight[a] = merged
+        count[a] = total
+        parent[b] = a
+        live -= 1
+
+    # Compact the survivors into a fresh table.
+    remap = [0] * len(nodes)
+    out = []
+    index_of = {}
+    for i, n in enumerate(nodes):
+        root = find(i)
+        if root not in index_of:
+            index_of[root] = len(out)
+            if n[0] == 1 and root == i:
+                out.append((1, n[1], n[1], 1.0, 0.0))
+            else:
+                r = nodes[root]
+                w = weight[root]
+                out.append((2, r[1], r[2], w, 1.0 - w))
+        remap[i] = index_of[root]
+
+    new_usage = [0] * len(out)
+    for i, n in enumerate(usage):
+        new_usage[remap[i]] += n
+
+    return out, new_usage, remap, max_err
+
+
+def reduce_nodes(nodes, usage, max_nodes, buckets):
+    """Bring a node table within budget. Returns (nodes, usage, remap, report)."""
+    report = []
+    original = list(nodes)
+    original_usage = list(usage)
+    remap = list(range(len(nodes)))
+    start = len(nodes)
+
+    def compose(outer):
+        return [outer[r] for r in remap]
+
+    if buckets > 0 and len(nodes) > max_nodes:
+        nodes, usage, r, _ = _quantize_nodes(nodes, usage, buckets)
+        remap = compose(r)
+        report.append(f"quantize to 1/{buckets}: {start} -> {len(nodes)} nodes")
+
+    if len(nodes) > max_nodes:
+        before = len(nodes)
+        nodes, usage, r, _ = _cluster_nodes(nodes, usage, max_nodes)
+        remap = compose(r)
+        report.append(f"cluster: {before} -> {len(nodes)} nodes")
+
+    # Measure the damage once, against the weights the artist authored, rather
+    # than accumulating it a merge at a time. Each merge moves a centroid, so
+    # summing the steps would overstate what any single vertex actually lost.
+    max_drift = 0.0
+    total_drift = 0.0
+    total_verts = 0
+    for i, node in enumerate(original):
+        final = nodes[remap[i]]
+        drift = abs(_node_weight(node) - _node_weight(final))
+        # A blend that collapsed onto one of its two joints moved all the way
+        # to that joint: to j0 the blend went to 1, to j1 it went to 0.
+        if node[0] == 2 and final[0] == 1:
+            drift = (1.0 - node[3]) if final[1] == node[1] else node[3]
+        max_drift = max(max_drift, drift)
+        total_drift += drift * original_usage[i]
+        total_verts += original_usage[i]
+
+    if total_verts:
+        report.append(f"blend error: {max_drift:.3f} worst, "
+                      f"{total_drift / total_verts:.3f} average per vertex")
+
+    return nodes, usage, remap, report
+
+
 def save_nsmw(output_file, num_joints, node_list, invbind_list, submeshes):
     """Write an NSMW model to binary.
 
@@ -1226,7 +1440,8 @@ def save_nsmw(output_file, num_joints, node_list, invbind_list, submeshes):
 
 def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
                          extension_mesh, extension_anim, blender_fix,
-                         export_base_pose, no_strip=False):
+                         export_base_pose, no_strip=False, envmap_uv=False,
+                         max_nodes=NSMW_MAX_NODES, weight_buckets=0):
 
     print(f"Converting model (NSMW): {model_file}")
 
@@ -1249,9 +1464,12 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
     # the left of the animated joint matrices, so it must NOT be applied here.
     joint_rest = [joint_info_to_m4x3(j.orient, j.pos) for j in joints]
 
-    # Global node table shared by all submeshes.
+    # Global node table shared by all submeshes. Weights are kept as floats
+    # here and only converted to fixed point when the file is written, because
+    # the reduction passes below need to measure distances between them.
     node_map = {}      # node key -> node index
-    node_list = []     # list of (num_weights, j0, j1, w0_f32, w1_f32)
+    node_list = []     # list of (num_weights, j0, j1, w0, w1) with float weights
+    node_usage = []    # how many vertices reference each node
     over_weight_warned = [False]
 
     def resolve_node(mesh, vert):
@@ -1281,20 +1499,25 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
         if len(sel) == 1:
             j = sel[0][0]
             sel = [(j, 1.0, sel[0][2])]
-            key = (1, j, j, float_to_f32(1.0), 0)
+            key = (1, j, j, 1.0, 0.0)
         else:
             (j0, w0, p0), (j1, w1, p1) = sel
             # Canonicalize so the smaller joint index is first (stable dedup)
             if j1 < j0:
                 (j0, w0, p0), (j1, w1, p1) = (j1, w1, p1), (j0, w0, p0)
             sel = [(j0, w0, p0), (j1, w1, p1)]
-            key = (2, j0, j1, float_to_f32(w0), float_to_f32(w1))
+            # Dedupe at the resolution the hardware actually stores, so two
+            # weights the GPU cannot tell apart do not take two slots.
+            q0 = round(w0 * 4096) / 4096.0
+            key = (2, j0, j1, q0, 1.0 - q0)
 
         idx = node_map.get(key)
         if idx is None:
             idx = len(node_list)
             node_map[key] = idx
             node_list.append(key)
+            node_usage.append(0)
+        node_usage[idx] += 1
         return idx, sel
 
     def compute_vbind(sel):
@@ -1354,9 +1577,13 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
                 mv = tri[vi]
                 st = mesh.verts[mv].st
                 vb = vert_vbind[mv]
+                # See the note in convert_md5mesh(): sphere mapping wants every
+                # texture coordinate at the centre of the texture.
                 tri_vdata.append({
-                    'u': st[0] * mesh_tex_size[0],
-                    'v': st[1] * mesh_tex_size[1],
+                    'u': (mesh_tex_size[0] / 2.0) if envmap_uv
+                         else st[0] * mesh_tex_size[0],
+                    'v': (mesh_tex_size[1] / 2.0) if envmap_uv
+                         else st[1] * mesh_tex_size[1],
                     'node_index': vert_node[mv],
                     'nx': norm.x, 'ny': norm.y, 'nz': norm.z,
                     'px': vb.x, 'py': vb.y, 'pz': vb.z,
@@ -1397,15 +1624,37 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
             'mat_name': mat_name,
         })
 
-    num_nodes = len(node_list)
-    print(f"  Nodes (matrix-palette slots): {num_nodes}")
-    if num_nodes == 0:
+    if len(node_list) == 0:
         raise MD5FormatError("NSMW model has no nodes")
-    if num_nodes > NSMW_MAX_NODES:
+
+    print(f"  Nodes wanted (matrix-palette slots): {len(node_list)}")
+
+    if len(node_list) > max_nodes:
+        node_list, node_usage, remap, report = reduce_nodes(
+            node_list, node_usage, max_nodes, weight_buckets)
+
+        for line in report:
+            print(f"    {line}")
+
+        # The node indices baked into the per-vertex data were assigned before
+        # the reduction, so point them at the survivors.
+        for md in mesh_data:
+            for tri_vdata in md['all_tri_verts']:
+                for d in tri_vdata:
+                    d['node_index'] = remap[d['node_index']]
+
+    num_nodes = len(node_list)
+    print(f"  Nodes used: {num_nodes} (budget {max_nodes})")
+
+    if num_nodes > max_nodes:
+        pairs = len(set((n[1], n[2]) for n in node_list))
         raise MD5FormatError(
-            f"NSMW model needs {num_nodes} nodes but the matrix stack only has "
-            f"room for {NSMW_MAX_NODES}. Reduce the number of distinct two-bone "
-            "weight combinations (e.g. split the mesh or simplify the rig).")
+            f"NSMW model still needs {num_nodes} nodes after quantizing and "
+            f"clustering, and the budget is {max_nodes}. It uses {pairs} "
+            "distinct bone pairs, and clustering cannot go below one node per "
+            "pair, so the mesh has to be split across several draws. Splitting "
+            "is not implemented yet; for now, reduce the number of bone pairs "
+            "the mesh actually blends between.")
 
     base_matrix = 30 - num_nodes + 1
 
@@ -1457,7 +1706,12 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
         })
 
     output_path = os.path.join(output_folder, f"{name}{extension_mesh}")
-    save_nsmw(output_path, len(joints), node_list, invbind_list, submeshes)
+    # The node table carried float weights so the reduction passes could
+    # measure distances between them; the file format wants fixed point.
+    node_list_fixed = [(n[0], n[1], n[2], float_to_f32(n[3]), float_to_f32(n[4]))
+                       for n in node_list]
+
+    save_nsmw(output_path, len(joints), node_list_fixed, invbind_list, submeshes)
     print(f"Saved NSMW with {num_nodes} node(s) and {len(submeshes)} submesh(es) "
           f"to {output_path}")
 
@@ -1869,6 +2123,23 @@ if __name__ == "__main__":
                         action='store_true',
                         help="output DLMM format with per-mesh materials "
                              "(texture sizes auto-detected from shader images)")
+    parser.add_argument("--max-nodes", required=False, type=int,
+                        default=NSMW_MAX_NODES,
+                        help=f"NSMW matrix-palette budget (default "
+                             f"{NSMW_MAX_NODES}, the size of the hardware "
+                             "matrix stack). Lower it to see the reduction "
+                             "passes work harder.")
+    parser.add_argument("--weight-buckets", required=False, type=int, default=0,
+                        help="NSMW: round blend weights to this many steps "
+                             "before clustering. Off by default -- it makes the "
+                             "result measurably worse, and exists only to keep "
+                             "the clustering pass tractable on meshes with "
+                             "thousands of distinct weights.")
+    parser.add_argument("--envmap-uv", required=False,
+                        action='store_true',
+                        help="replace all texture coordinates with the centre "
+                             "of the texture, as required by sphere-map "
+                             "environment mapping (NEA_TEXGEN_NORMAL)")
     parser.add_argument("--old-md5", required=False,
                         action='store_true',
                         help="parse old MD5 format without per-bone scale "
@@ -1935,13 +2206,15 @@ if __name__ == "__main__":
                 convert_md5mesh_nsmw(args.model, args.name, args.output,
                                      args.texture, extension_mesh,
                                      extension_anim, args.blender_fix,
-                                     args.export_base_pose, args.no_strip)
+                                     args.export_base_pose, args.no_strip,
+                                     args.envmap_uv, args.max_nodes,
+                                     args.weight_buckets)
             else:
                 convert_md5mesh(args.model, args.name, args.output, args.texture,
                                 args.draw_normal_polygons, extension_mesh,
                                 extension_anim, args.blender_fix,
                                 args.export_base_pose, args.no_strip,
-                                args.multi_material)
+                                args.multi_material, args.envmap_uv)
 
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,

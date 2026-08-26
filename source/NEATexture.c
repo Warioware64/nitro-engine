@@ -382,6 +382,31 @@ void NEA_MaterialColorDelete(NEA_Material *tex)
     tex->color = NEA_White;
 }
 
+void NEA_MaterialTexUse(const NEA_Material *tex)
+{
+    // Deliberately binds nothing but the image: no colours, no properties, and
+    // no palette. A texture/palette animation swaps those independently, and a
+    // flipbook whose frames share one palette should not have it rebound on
+    // every frame.
+    if (tex == NULL || tex->texindex == NEA_NO_TEXTURE)
+    {
+        GFX_TEX_FORMAT = 0;
+        return;
+    }
+
+    GFX_TEX_FORMAT = NEA_Texture[tex->texindex].param;
+}
+
+void NEA_MaterialSetTexGen(NEA_Material *tex, NEA_TextureFlags texgen)
+{
+    NEA_AssertPointer(tex, "NULL pointer");
+    NEA_Assert(tex->texindex != NEA_NO_TEXTURE, "No texture asigned to material");
+
+    // Texgen lives in bits 30-31 of the texture parameter word.
+    u32 param = NEA_Texture[tex->texindex].param & ~(3U << 30);
+    NEA_Texture[tex->texindex].param = param | (texgen & (3U << 30));
+}
+
 #ifdef NEA_BLOCKSDS
 
 // Chunk IDs of the GRF container. libnds builds these the same way but doesn't
@@ -1766,4 +1791,63 @@ void NEA_TextureMatrixScaleI(int sx, int sy)
     MATRIX_SCALE = sy;
     MATRIX_SCALE = inttof32(1);
     MATRIX_CONTROL = GL_MODELVIEW;
+}
+
+// Current directional vector matrix, 9 words in 3x3 order. This is the rotation
+// part of the modelview transform, the same one the GPU uses to bring normals
+// into view space for lighting. libnds doesn't export it.
+#ifndef VECMTX_RESULT
+#define VECMTX_RESULT ((vs32 *)0x04000680)
+#endif
+
+void NEA_TextureMatrixEnvMapI(int scale_s, int scale_t)
+{
+    // Normals arrive as 1.0.9 and the matrix as 1.19.12, so their product has 21
+    // fractional bits, and the hardware takes it as the raw 1.11.4 texture
+    // coordinate. A matrix entry of N therefore maps a unit normal to N *raw*
+    // units, and a texel is 16 of those. The callers of this function think in
+    // texels, so convert here.
+    scale_s *= 16;
+    scale_t *= 16;
+
+    // Result registers may only be read with the geometry engine stopped.
+    while (GFX_STATUS & BIT(27));
+
+    int32_t vec[9];
+
+    for (int i = 0; i < 9; i++)
+        vec[i] = VECMTX_RESULT[i];
+
+    MATRIX_CONTROL = GL_TEXTURE;
+    MATRIX_IDENTITY = 0;
+
+    // The hardware computes texcoords as the row vector (Nx, Ny, Nz, 1) times
+    // this matrix, and every matrix command sets C = M * C, so the factors go in
+    // right to left: scale first, then the rotation, giving C = Vec * Scale. The
+    // normal is rotated into view space and only then scaled into texels.
+    MATRIX_SCALE = scale_s;
+    MATRIX_SCALE = scale_t;
+    MATRIX_SCALE = inttof32(1);
+
+    for (int i = 0; i < 9; i++)
+        MATRIX_MULT3x3 = vec[i];
+
+    MATRIX_CONTROL = GL_MODELVIEW;
+}
+
+void NEA_TextureMatrixEnvMap(const NEA_Material *tex)
+{
+    NEA_AssertPointer(tex, "NULL pointer");
+
+    // Half the texture size each way, so a unit normal reaches the edge of the
+    // sphere map from the centre the mesh's texture coordinate puts it at.
+    //
+    // T is negated because the two axes disagree about which way is up: texture
+    // T grows downwards, while a normal's +Y points up. Without this a sphere
+    // map comes out vertically mirrored, and anything lit from above in the
+    // image ends up lighting the model from below.
+    int half_s = inttof32(NEA_TextureGetSizeX(tex) / 2);
+    int half_t = inttof32(NEA_TextureGetSizeY(tex) / 2);
+
+    NEA_TextureMatrixEnvMapI(half_s, -half_t);
 }

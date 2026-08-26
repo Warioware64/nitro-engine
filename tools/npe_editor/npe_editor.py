@@ -6,8 +6,9 @@
 # Standalone NPE (Nitro Particle Entity) editor.
 #
 # Edit a particle effect with live preview, save as a `.npe` binary the
-# NEAParticle runtime can load directly. Tkinter only -- ships with Python,
-# no extra dependencies, matching the rest of the NEA Python tools.
+# NEAParticle runtime can load directly. Tkinter plus Pillow: the preview
+# composites real sprites with rotation, scale, alpha and additive blending,
+# none of which Tk's own drawing can do, and tools/img2ds already needs Pillow.
 #
 # Usage:
 #     python3 tools/npe_editor/npe_editor.py [path/to/file.npe]
@@ -17,6 +18,16 @@
 Left panel: tabbed parameter controls.
 Right panel: 2D side-view preview running the same simulation logic as the
   C runtime in NEAParticle.c, so what you see is what the DS will show.
+
+An effect names the material it draws with but does not contain it, so the
+editor cannot know what the particle looks like. Point it at the image with
+File -> Import sprite image and it is recorded in a sidecar beside the effect
+(see editor_sidecar.py); the .npe itself is never touched by that.
+
+With a sprite loaded the preview composites rather than drawing shapes, which is
+what makes the two flags that matter visible: additive blending becomes a real
+add instead of a colour mixed toward the background, and a sprite sheet actually
+plays its cells.
 """
 
 import json
@@ -27,11 +38,17 @@ import sys
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    sys.exit("This editor needs Pillow for its preview: pip install Pillow")
+
 # Allow running the script from anywhere by adding its dir to sys.path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import npe_format  # noqa: E402
+import editor_sidecar as SC  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Simulator (mirrors NEAParticle.c -- keep the two in lockstep)
@@ -74,8 +91,11 @@ class Simulator:
         d = self.eff["initial_dir"]
         cone = int(self.eff["cone_spread"])
         if d[0] == 0 and d[1] == 0 and d[2] == 0:
-            theta = self._rng.uniform(0, math.pi)
-            phi   = self._rng.uniform(0, 2 * math.pi)
+            # Both angles span the full 0..511 the runtime uses. That makes the
+            # polar angle cover a whole turn rather than a half, which
+            # double-covers the sphere -- harmless, and what the hardware does.
+            theta = self._rng.uniform(0, 511) * math.pi / 256.0
+            phi   = self._rng.uniform(0, 511) * math.pi / 256.0
             return (math.sin(theta) * math.cos(phi),
                     math.cos(theta),
                     math.sin(theta) * math.sin(phi))
@@ -97,8 +117,12 @@ class Simulator:
         ux = ry*dz - rz*dy
         uy = rz*dx - rx*dz
         uz = rx*dy - ry*dx
-        max_theta_rad = (cone / 511.0) * math.pi   # cone 0..511 maps to 0..pi
-        theta = self._rng.uniform(0, max_theta_rad)
+        # The runtime picks theta in 0..cone_spread NEA angle units and feeds
+        # sinLerp(theta << 6), against a 32768-unit full circle. So one unit is
+        # pi/256 radians and cone_spread 256 is a half-turn -- not the pi/511
+        # this used to assume, which made the editor's cone half the width of
+        # the one the DS actually produces.
+        theta = self._rng.uniform(0, cone) * math.pi / 256.0
         phi   = self._rng.uniform(0, 2 * math.pi)
         st, ct = math.sin(theta), math.cos(theta)
         sp, cp = math.sin(phi),   math.cos(phi)
@@ -125,7 +149,9 @@ class Simulator:
         spd = self._rand_range(e["speed_min"], e["speed_max"])
         p.vx, p.vy, p.vz = dx * spd, dy * spd, dz * spd
         p.age  = 0
-        p.life = max(1, self._rand_int(e["life_min_frames"], e["life_max_frames"]))
+        # The runtime substitutes 60 frames for a zero life, rather than
+        # clamping to one.
+        p.life = self._rand_int(e["life_min_frames"], e["life_max_frames"]) or 60
         p.rot  = int(e["base_rotation"])
         p.rot_vel = self._rand_int(e["ang_vel_min"], e["ang_vel_max"])
         p.size = float(e["base_size"]) if e["base_size"] else 1.0
@@ -223,6 +249,15 @@ class NpeEditor:
         self.effect = npe_format.default_effect()
         self.sim = Simulator(self.effect)
         self._preview_scale = PREVIEW_SCALE_DEFAULT
+
+        # Sprite preview state. _sprite_cache holds transformed copies keyed by
+        # (cell, rotation bucket, size bucket): rotating and scaling every
+        # particle every frame is far too slow in Python at 30 fps, and the DS
+        # itself does not resolve rotation any more finely than this.
+        self._sprite_path = None
+        self._sprite = None
+        self._sprite_cache = {}
+        self._preview_photo = None
         self._dirty = False
 
         self._build_menu()
@@ -247,6 +282,10 @@ class NpeEditor:
         fm.add_command(label="Save As...",  command=self._save_as)
         fm.add_separator()
         fm.add_command(label="Export JSON...", command=self._export_json)
+        fm.add_separator()
+        fm.add_command(label="Import sprite image...",
+                       command=self._import_sprite)
+        fm.add_command(label="Clear sprite image", command=self._clear_sprite)
         fm.add_separator()
         fm.add_command(label="Quit", command=self.root.destroy)
         m.add_cascade(label="File", menu=fm)
@@ -622,6 +661,7 @@ class NpeEditor:
                 data = f.read()
             self.effect = npe_format.decode(data)
             self.path = p
+            self._load_sidecar()
             self._sim_reset()
             self._refresh_all()
             self._dirty = False
@@ -635,6 +675,7 @@ class NpeEditor:
         try:
             with open(self.path, "wb") as f:
                 f.write(npe_format.encode(self.effect))
+            self._save_sidecar()
             self._dirty = False
             self._update_title()
         except Exception as ex:
@@ -683,34 +724,204 @@ class NpeEditor:
         self._draw_preview()
         self.root.after(33, self._tick)  # ~30 fps
 
+    # -- sprite ------------------------------------------------------------
+
+    ROT_BUCKETS = 16
+    SIZE_BUCKETS = 12
+
+    def _load_sidecar(self):
+        """Pick up the sprite recorded beside this effect, if any."""
+        data = SC.load(self.path)
+        self._set_sprite(SC.resolve_path(self.path, data.get("image")),
+                         stored=data.get("image"), persist=False)
+
+    def _save_sidecar(self):
+        if self._sprite_path:
+            SC.save(self.path, {"image": self._sprite_path})
+        else:
+            SC.delete(self.path)
+
+    def _set_sprite(self, full_path, stored=None, persist=True):
+        self._sprite_cache = {}
+        self._sprite = None
+        self._sprite_path = stored
+
+        if full_path:
+            try:
+                self._sprite = Image.open(full_path).convert("RGBA")
+            except (OSError, ValueError):
+                self._sprite = None
+
+        if persist:
+            self._save_sidecar()
+
+    def _import_sprite(self):
+        p = filedialog.askopenfilename(
+            title="Sprite image for this effect",
+            filetypes=[("Images", "*.png *.gif *.jpg *.jpeg *.bmp"),
+                       ("All files", "*")])
+        if not p:
+            return
+
+        try:
+            Image.open(p).close()
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Cannot read image", str(e))
+            return
+
+        self._set_sprite(p, stored=SC.store_path(self.path, p))
+
+    def _clear_sprite(self):
+        self._set_sprite(None)
+
+    def _sheet_cell(self, particle):
+        """Which sprite-sheet cell a particle is on, or None if not a sheet."""
+        eff = self.effect
+        if not eff.get("spritesheet"):
+            return None
+
+        cols = max(1, int(eff.get("sheet_cols", 1)))
+        rows = max(1, int(eff.get("sheet_rows", 1)))
+        count = cols * rows
+        if count <= 1:
+            return None
+
+        fps = int(eff.get("sheet_fps", 0))
+        if fps <= 0:
+            return 0
+
+        # age is in frames at 60 Hz, as the runtime counts it.
+        return int(particle.age * fps / 60.0) % count
+
+    def _sprite_for(self, cell, rot, diameter):
+        """A rotated, scaled copy of the sprite, cached."""
+        size_bucket = max(1, min(256, int(diameter)))
+        size_bucket -= size_bucket % max(1, 256 // self.SIZE_BUCKETS)
+        size_bucket = max(2, size_bucket)
+
+        rot_bucket = int(rot) % 512 * self.ROT_BUCKETS // 512
+
+        key = (cell, rot_bucket, size_bucket)
+        hit = self._sprite_cache.get(key)
+        if hit is not None:
+            return hit
+
+        src = self._sprite
+        if cell is not None:
+            cols = max(1, int(self.effect.get("sheet_cols", 1)))
+            rows = max(1, int(self.effect.get("sheet_rows", 1)))
+            cw, ch = src.width // cols, src.height // rows
+            cx, cy = (cell % cols) * cw, (cell // cols) * ch
+            src = src.crop((cx, cy, cx + cw, cy + ch))
+
+        img = src.resize((size_bucket, size_bucket), Image.BILINEAR)
+
+        degrees = rot_bucket * 360.0 / self.ROT_BUCKETS
+        if degrees:
+            img = img.rotate(degrees, resample=Image.BILINEAR, expand=True)
+
+        self._sprite_cache[key] = img
+        return img
+
     def _draw_preview(self):
         c = self.canvas
         c.delete("all")
         cx = PREVIEW_W // 2
         cy = PREVIEW_H * 3 // 4  # emitter near the bottom
-        # Floor line.
-        c.create_line(0, cy, PREVIEW_W, cy, fill="#283848")
-        # Origin marker.
-        c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, outline="#5d7", width=1)
-        # Particles (side view: X -> screen X, Y -> -screen Y).
         sc = self._preview_scale
+
+        if self._sprite is None:
+            alive = self._draw_preview_shapes(c, cx, cy, sc)
+        else:
+            alive = self._draw_preview_sprites(c, cx, cy, sc)
+
+        self.alive_lbl.config(text=f"Alive: {alive}")
+
+        # Floor line and origin marker, over whatever was drawn.
+        c.create_line(0, cy, PREVIEW_W, cy, fill="#283848")
+        c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, outline="#5d7", width=1)
+
+        if self._sprite is None and self._sprite_path:
+            c.create_text(6, 6, anchor="nw", fill="#a66",
+                          font=("TkFixedFont", 8),
+                          text="sprite image missing: " + str(self._sprite_path))
+
+    def _draw_preview_shapes(self, c, cx, cy, sc):
+        """The no-sprite fallback: one oval per particle.
+
+        Alpha is approximated by mixing toward the background, which is the best
+        a solid shape can do and the reason importing a sprite is worth it.
+        """
         alive = 0
         for p in self.sim.pool:
-            if not p.alive: continue
+            if not p.alive:
+                continue
             alive += 1
             x = cx + p.px * sc
             y = cy - p.py * sc
             rad = max(1.0, p.size * sc * 0.5)
-            # Mix particle color with background according to alpha.
             br, bg_, bb = 0x10, 0x18, 0x20
-            af = p.a / 255.0
+            pa_ = int(p.a)
+            if self.effect.get("additive"):
+                lum = (p.r * 77 + p.g * 151 + p.b * 28) >> 8
+                pa_ = (pa_ * lum) // 255
+            af = pa_ / 255.0
             cr = int(br * (1 - af) + p.r * af)
             cg = int(bg_ * (1 - af) + p.g * af)
             cb = int(bb * (1 - af) + p.b * af)
             color = f"#{cr:02x}{cg:02x}{cb:02x}"
             c.create_oval(x - rad, y - rad, x + rad, y + rad,
                           outline=color, fill=color)
-        self.alive_lbl.config(text=f"Alive: {alive}")
+        return alive
+
+    def _draw_preview_sprites(self, c, cx, cy, sc):
+        """Composite the real sprite for every particle, into one image.
+
+        Compositing rather than drawing each particle separately is what makes
+        alpha and additive blending real rather than approximated: additive in
+        particular is the whole look of a spark or a flame and cannot be faked
+        with a solid shape.
+        """
+        additive = bool(self.effect.get("additive"))
+
+        field = Image.new("RGB", (PREVIEW_W, PREVIEW_H), (0x10, 0x18, 0x20))
+        alive = 0
+
+        for p in self.sim.pool:
+            if not p.alive:
+                continue
+            alive += 1
+
+            diameter = max(2.0, p.size * sc)
+            sprite = self._sprite_for(self._sheet_cell(p), p.rot, diameter)
+
+            # The DS has no additive blend, so the runtime approximates one by
+            # weighting a particle's alpha with its brightness: dark particles
+            # contribute almost nothing, bright ones dominate. Do exactly the
+            # same here -- a preview that showed true additive would be showing
+            # something the hardware cannot produce.
+            p_a = int(p.a)
+            if additive:
+                lum = (p.r * 77 + p.g * 151 + p.b * 28) >> 8
+                p_a = (p_a * lum) // 255
+
+            # Tint by the particle colour, fade by its alpha.
+            r, g, b, a = sprite.split()
+            tinted = Image.merge("RGBA", (
+                r.point(lambda v, k=p.r: (v * k) // 255),
+                g.point(lambda v, k=p.g: (v * k) // 255),
+                b.point(lambda v, k=p.b: (v * k) // 255),
+                a.point(lambda v, k=p_a: (v * k) // 255)))
+
+            x = int(cx + p.px * sc - tinted.width / 2)
+            y = int(cy - p.py * sc - tinted.height / 2)
+
+            field.paste(tinted, (x, y), tinted)
+
+        self._preview_photo = ImageTk.PhotoImage(field)
+        c.create_image(0, 0, anchor="nw", image=self._preview_photo)
+        return alive
+
 
     # -- Misc --------------------------------------------------------------
 

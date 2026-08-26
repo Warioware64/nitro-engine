@@ -22,9 +22,23 @@
 /// over each particle's life.
 ///
 /// Particles are drawn as textured quads, billboarded against the active
-/// camera by default. The per-emitter axis-aligned flag in the NPE file
-/// disables billboarding and uses world X/Y for the quad basis instead,
-/// which suits effects like waterfalls or vertical flame planes.
+/// camera by default. The per-emitter flags in the NPE file change that:
+///
+/// - **axis-aligned** drops billboarding and uses world X/Y for the quad
+///   basis, which suits waterfalls or vertical flame planes.
+/// - **stretch** lengthens the quad along the direction of travel, so a fast
+///   particle reads as a streak and tapers as it slows.
+/// - **sprite sheet** takes each frame from a cell of a `cols` x `rows` grid,
+///   advancing with the particle's age at `sheet_fps`.
+/// - **additive** is an approximation, because the DS 3D engine has no
+///   additive blend -- DISP3DCNT offers alpha blending on or off and nothing
+///   else. The runtime weights each particle's alpha by its brightness
+///   instead, so dark particles contribute almost nothing and bright ones
+///   dominate, which is what additive looks like for sparks and flames.
+///
+/// An emitter spreads its particles over eight polygon IDs so that overlapping
+/// ones actually blend; see NEA_ParticleEmitterSetPolyID() for why that is
+/// needed and when to move the range.
 ///
 /// One `.npe` file = one emitter (e.g. "fire", "smoke", "explosion"). Author
 /// `.npe` files with `tools/npe_editor/`.
@@ -56,6 +70,13 @@
 
 #define NEA_DEFAULT_PARTICLE_EMITTERS 16  ///< Default max emitters.
 #define NEA_PARTICLE_DEFAULT_POOL     128 ///< Particle pool size when the NPE asks for 0.
+
+/// First of the eight polygon IDs an emitter cycles through by default.
+///
+/// Not zero: scene geometry usually draws with ID 0, and a particle sharing an
+/// ID with what is behind it cannot blend over it. Not near 63 either, which is
+/// the rear plane, or 61 and 62, which the GUI uses.
+#define NEA_PARTICLE_DEFAULT_POLY_ID  8
 
 /// Opaque handle representing one emitter.
 typedef struct NEA_ParticleEmitter NEA_ParticleEmitter;
@@ -107,6 +128,14 @@ void NEA_ParticleEmitterDelete(NEA_ParticleEmitter *emitter);
 /// the material (NEA_MaterialSetName()) when you load its texture, and the
 /// emitter will pick it up automatically. NEA_ParticleEmitterSetMaterial()
 /// can still be used to override afterwards.
+///
+/// **This overload cannot bounds-check.** The parser walks the file using
+/// counts stored inside it, and with no length there is nothing to compare
+/// them against, so a truncated image reads past the end of the buffer. That is
+/// fine for data linked into the ROM, which is as trustworthy as the code
+/// beside it. For anything read from a file, use
+/// NEA_ParticleEmitterLoadSize() or NEA_ParticleEmitterLoadFAT(), which know
+/// how many bytes they actually have.
 ///
 /// @param emitter Emitter handle.
 /// @param data Pointer to the NPE file bytes in RAM.
@@ -214,6 +243,50 @@ void NEA_ParticleEmitterDraw(NEA_ParticleEmitter *emitter);
 /// @param emitter Emitter handle.
 /// @return Number of alive particles (0..pool size).
 int NEA_ParticleEmitterAliveCount(const NEA_ParticleEmitter *emitter);
+
+/// Clears any emitter's attachment to a model that is about to be deleted.
+///
+/// Internal. NEA_ModelDelete() calls this before the model's memory goes away,
+/// the same way it cancels asynchronous loads that would write into it. An
+/// emitter keeps a raw pointer to the model it follows and reads its position
+/// every frame, so without this the next update would read freed memory.
+///
+/// @param model Model being deleted.
+void __NEA_ParticleDetachModel(NEA_Model *model);
+
+/// Loads emitter parameters from an NPE image of a known size.
+///
+/// The same as NEA_ParticleEmitterLoad(), but bounded: the parser walks the
+/// file using counts stored inside it, so it needs the length to refuse a
+/// truncated or corrupt one instead of reading past the end. Use this for
+/// anything that did not come linked into the ROM.
+///
+/// @param emitter Emitter to fill in.
+/// @param data Pointer to the NPE image.
+/// @param size Bytes actually available at that pointer.
+/// @return 1 on success, 0 on error.
+int NEA_ParticleEmitterLoadSize(NEA_ParticleEmitter *emitter, const void *data,
+                                size_t size);
+
+/// Sets the first of the eight polygon IDs this emitter cycles through.
+///
+/// Particles are translucent, and the hardware refuses to blend a translucent
+/// polygon over a translucent pixel carrying the *same* polygon ID. An emitter
+/// therefore spreads its particles across eight consecutive IDs so that
+/// overlapping ones layer instead of the first one winning outright.
+///
+/// The reason to change the base is collision with the rest of the scene: a
+/// particle whose ID matches the geometry behind it will not blend over that
+/// geometry. Give an emitter its own eight if something in the scene is drawn
+/// with IDs in the default range.
+///
+/// Note that eight is a mitigation rather than a guarantee. Particles that are
+/// eight pool slots apart share an ID again, so a very dense effect can still
+/// have occasional pairs that refuse to blend.
+///
+/// @param emitter Emitter.
+/// @param base First polygon ID of the eight (0 - 56).
+void NEA_ParticleEmitterSetPolyID(NEA_ParticleEmitter *emitter, int base);
 
 /// @}
 

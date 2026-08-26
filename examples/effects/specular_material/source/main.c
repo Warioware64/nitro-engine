@@ -151,12 +151,18 @@ int main(int argc, char *argv[])
         // Shininess table
         // ---------------
 
+        // The first four are power curves of increasing tightness. The last two
+        // are not curves at all: STEPPED quantizes the ramp into flat levels,
+        // which bands the highlight the way NEA_ToonTableBands() bands the
+        // shading, and THRESHOLD clips it to a hard-edged shape.
         const char *names[] = {
             [NEA_SHININESS_NONE]      = "None     ",
             [NEA_SHININESS_LINEAR]    = "Linear   ",
             [NEA_SHININESS_QUADRATIC] = "Quadratic",
             [NEA_SHININESS_CUBIC]     = "Cubic    ",
-            [NEA_SHININESS_QUARTIC]   = "Quartic  "
+            [NEA_SHININESS_QUARTIC]   = "Quartic  ",
+            [NEA_SHININESS_STEPPED]   = "Stepped  ",
+            [NEA_SHININESS_THRESHOLD] = "Threshold"
         };
         printf("\nShininess: %s", names[shininess]);
 
@@ -167,7 +173,7 @@ int main(int argc, char *argv[])
         }
         if (keys_down & KEY_R)
         {
-            if (shininess < NEA_SHININESS_QUARTIC)
+            if (shininess < NEA_SHININESS_THRESHOLD)
                 shininess++;
         }
 
