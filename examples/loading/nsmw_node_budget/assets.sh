@@ -24,5 +24,6 @@ for budget in 30 16 11; do
         --texture 64 64 \
         --bin \
         --max-nodes $budget \
+        --smooth-normals \
         --format nsmw
 done

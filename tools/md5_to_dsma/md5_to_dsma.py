@@ -11,6 +11,7 @@ from collections import namedtuple, defaultdict
 from math import sqrt
 
 from display_list import DisplayList, float_to_f32, float_to_n10
+from smooth_normals import build_smooth_normals
 
 class MD5FormatError(Exception):
     pass
@@ -69,6 +70,35 @@ NSMW_HEADER_SIZE = 24     # magic, version, num_nodes, num_joints,
 NSMW_NODE_SIZE = 12       # num_weights/joint0/joint1/pad + 2 * weight (f32)
 NSMW_INVBIND_SIZE = 48    # 12 int32 (4x3 matrix)
 NSMW_MAX_NODES = 30       # matrix-stack budget (must match NEA_MAX_SKIN_NODES)
+
+def smooth_normal_table(mesh_positions, angle):
+    """Smoothed per-corner normals for every mesh of a model, in one pass.
+
+    `mesh_positions` is [[(p0, p1, p2), ...], ...] -- one triangle list per
+    mesh, each corner an (x, y, z) tuple in model space. Smoothing runs across
+    every mesh at once, because an MD5 model's meshes are its material groups
+    and a surface that runs across one should not pick up a lighting seam
+    there.
+
+    Returns {(mesh_index, tri_index, corner): (nx, ny, nz)}.
+    """
+    flat = []
+    where = []
+    for mi, tris in enumerate(mesh_positions):
+        for ti, tri in enumerate(tris):
+            flat.append(tri)
+            where.append((mi, ti))
+
+    if not flat:
+        return {}
+
+    out = {}
+    for (mi, ti), corners in zip(where, build_smooth_normals(flat, angle)):
+        for vi, n in enumerate(corners):
+            out[(mi, ti, vi)] = n
+
+    return out
+
 
 def save_dlmm(output_file, submeshes):
     """Write multi-material model to .dlmm binary format.
@@ -897,7 +927,8 @@ def stripify_triangles(resolved_tris):
 def convert_md5mesh(model_file, name, output_folder, texture_size,
                     draw_normal_polygons, extension_mesh, extension_anim,
                     blender_fix, export_base_pose, no_strip=False,
-                    multi_material=False, envmap_uv=False):
+                    multi_material=False, envmap_uv=False,
+                    smooth_normals=None):
 
     print(f"Converting model: {model_file}")
 
@@ -919,6 +950,29 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
                        blender_fix)
 
     print("Converting meshes...")
+
+    # Smoothed normals are computed for the whole model at once, before any
+    # mesh is processed, because MD5 meshes are the model's material groups and
+    # a surface running across one should not gain a lighting seam there.
+    smoothed = {}
+    if smooth_normals is not None:
+        mesh_positions = []
+        for mesh in meshes:
+            tris = []
+            for tri in mesh.tris:
+                posed = []
+                for vi in tri:
+                    weight = mesh.weights[mesh.verts[vi].startWeight]
+                    joint = joints[weight.joint]
+                    m = joint_info_to_m4x3(joint.orient, joint.pos)
+                    p = weight.pos.mul_m4x3(m)
+                    posed.append((p.x, p.y, p.z))
+                tris.append(tuple(posed))
+            mesh_positions.append(tris)
+
+        smoothed = smooth_normal_table(mesh_positions, smooth_normals)
+        print(f"  Smooth normals: {len(smoothed)} corner normal(s) at "
+              f"{smooth_normals:g} degrees")
 
     model_dir = os.path.dirname(os.path.abspath(model_file))
     base_matrix = 30 - len(joints) + 1
@@ -988,12 +1042,18 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
         # Each entry: (texcoord, joint_index, normal_joint_space, pos, final_or_None)
         all_tri_verts = []  # list of list of per-vertex tuples (one list per tri)
 
-        for tri, norm in zip(mesh.tris, tri_normal):
+        for ti, (tri, norm) in enumerate(zip(mesh.tris, tri_normal)):
             verts = [mesh.verts[i] for i in tri]
             weights = [mesh.weights[v.startWeight] for v in verts]
 
             tri_vdata = []
-            for vert, weight in zip(verts, weights):
+            for corner, (vert, weight) in enumerate(zip(verts, weights)):
+                # Smoothing replaces the face normal per corner. Everything
+                # after this is unchanged: the rotation into joint space was
+                # already per corner, it just used to be handed the same value
+                # three times.
+                sm = smoothed.get((mesh_index, ti, corner))
+                norm = Vector(*sm) if sm else tri_normal[ti]
                 st = vert.st
                 if envmap_uv:
                     # Sphere mapping (NEA_TEXGEN_NORMAL) adds the generated
@@ -1441,7 +1501,8 @@ def save_nsmw(output_file, num_joints, node_list, invbind_list, submeshes):
 def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
                          extension_mesh, extension_anim, blender_fix,
                          export_base_pose, no_strip=False, envmap_uv=False,
-                         max_nodes=NSMW_MAX_NODES, weight_buckets=0):
+                         max_nodes=NSMW_MAX_NODES, weight_buckets=0,
+                         smooth_normals=None):
 
     print(f"Converting model (NSMW): {model_file}")
 
@@ -1472,9 +1533,11 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
     node_usage = []    # how many vertices reference each node
     over_weight_warned = [False]
 
-    def resolve_node(mesh, vert):
-        # Returns (node_index, selected) where 'selected' is a list of
-        # (joint, weight_float, weight_pos) for the chosen (1 or 2) weights.
+    def select_weights(mesh, vert):
+        # The pure half of resolve_node: which one or two weights a vertex ends
+        # up using, with no node-table side effects. Split out so the normal
+        # smoothing pre-pass can compute bind positions without inflating the
+        # node usage counts that the budget reduction later reads.
         ws = [mesh.weights[vert.startWeight + k] for k in range(vert.countWeight)]
         if len(ws) == 0:
             raise MD5FormatError("Vertex with no weights")
@@ -1511,6 +1574,12 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
             q0 = round(w0 * 4096) / 4096.0
             key = (2, j0, j1, q0, 1.0 - q0)
 
+        return key, sel
+
+    def resolve_node(mesh, vert):
+        # Returns (node_index, selected), registering the node on the way.
+        key, sel = select_weights(mesh, vert)
+
         idx = node_map.get(key)
         if idx is None:
             idx = len(node_list)
@@ -1528,6 +1597,24 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
             vy += w * p.y
             vz += w * p.z
         return Vector(vx, vy, vz)
+
+    # Smoothed normals for the whole model, before any mesh is processed. The
+    # bind positions come from select_weights(), the side-effect-free half of
+    # resolve_node(), so this pre-pass does not inflate the node usage counts
+    # that the budget reduction reads later.
+    smoothed = {}
+    if smooth_normals is not None:
+        mesh_positions = []
+        for mesh in meshes:
+            vbind = [compute_vbind(select_weights(mesh, v)[1])
+                     for v in mesh.verts]
+            tris = [tuple((vbind[i].x, vbind[i].y, vbind[i].z) for i in tri)
+                    for tri in mesh.tris]
+            mesh_positions.append(tris)
+
+        smoothed = smooth_normal_table(mesh_positions, smooth_normals)
+        print(f"  Smooth normals: {len(smoothed)} corner normal(s) at "
+              f"{smooth_normals:g} degrees")
 
     mesh_data = []  # per-mesh data needed to emit display lists later
 
@@ -1577,6 +1664,15 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
                 mv = tri[vi]
                 st = mesh.verts[mv].st
                 vb = vert_vbind[mv]
+
+                # Smoothing gives each corner its own normal; without it all
+                # three share the triangle's.
+                sm = smoothed.get((mesh_index, ti, vi))
+                if sm:
+                    norm = Vector(*sm)
+                else:
+                    norm = tri_normal[ti]
+
                 # See the note in convert_md5mesh(): sphere mapping wants every
                 # texture coordinate at the centre of the texture.
                 tri_vdata.append({
@@ -2135,6 +2231,13 @@ if __name__ == "__main__":
                              "result measurably worse, and exists only to keep "
                              "the clustering pass tractable on meshes with "
                              "thousands of distinct weights.")
+    parser.add_argument("--smooth-normals", required=False, type=float,
+                        nargs='?', const=60.0, default=None,
+                        help="average vertex normals across adjacent triangles "
+                             "whose face angle is below this threshold in "
+                             "degrees (default 60 if flag given with no "
+                             "value); omit the flag entirely to keep flat "
+                             "per-triangle normals")
     parser.add_argument("--envmap-uv", required=False,
                         action='store_true',
                         help="replace all texture coordinates with the centre "
@@ -2208,13 +2311,14 @@ if __name__ == "__main__":
                                      extension_anim, args.blender_fix,
                                      args.export_base_pose, args.no_strip,
                                      args.envmap_uv, args.max_nodes,
-                                     args.weight_buckets)
+                                     args.weight_buckets, args.smooth_normals)
             else:
                 convert_md5mesh(args.model, args.name, args.output, args.texture,
                                 args.draw_normal_polygons, extension_mesh,
                                 extension_anim, args.blender_fix,
                                 args.export_base_pose, args.no_strip,
-                                args.multi_material, args.envmap_uv)
+                                args.multi_material, args.envmap_uv,
+                                args.smooth_normals)
 
         for anim_file in args.anims:
             convert_md5anim(args.name, args.output, anim_file, args.skip_frames,

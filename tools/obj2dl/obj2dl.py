@@ -9,6 +9,7 @@ import struct
 
 from display_list import DisplayList
 from mtl_parser import parse_mtl, float_to_rgb15, pack_diffuse_ambient, pack_specular_emission
+from smooth_normals import build_smooth_normals
 from collections import defaultdict
 
 import b3mesh
@@ -722,11 +723,101 @@ def parse_obj(input_file, use_vertex_color):
 # Main conversion
 # ---------------------------------------------------------------------------
 
+def apply_smooth_normals(vertices, normals, material_faces, angle,
+                         use_vertex_color):
+    """Replace the OBJ's normals with ones smoothed across shallow edges.
+
+    Runs over every face of every material at once, before anything is split by
+    material: a material boundary is a texturing decision rather than a shape
+    one, and smoothing per-material would put a lighting seam along every one of
+    them.
+
+    The faces are stored as raw "v/vt/vn" strings and both the single- and
+    multi-material paths re-parse them, so this rewrites those strings with new
+    normal indices. Nothing downstream has to know it happened.
+
+    Returns the new normals list.
+    """
+    if use_vertex_color:
+        print("Warning: --use-vertex-color emits vertex colors instead of "
+              "normals, so --smooth-normals would have no effect. Skipping it.")
+        return normals
+
+    # Flatten every face into triangles, remembering where each came from so the
+    # results can be written back. A quad contributes two triangles that share
+    # corners 0 and 2, exactly as the display list will emit it.
+    tris = []
+    slots = []   # [(mat, face_index, corner_index), ...] parallel to tris' corners
+
+    for mat_name, face_list in material_faces.items():
+        for fi, face in enumerate(face_list):
+            idx = [parse_face_vertex(v, False)[0] for v in face]
+            if len(idx) == 3:
+                spans = [(0, 1, 2)]
+            elif len(idx) == 4:
+                spans = [(0, 1, 2), (0, 2, 3)]
+            else:
+                raise OBJFormatError(
+                    f"Unsupported polygons with {len(idx)} faces. "
+                    "Please, split the polygons in your model to triangles.")
+
+            for span in spans:
+                tris.append(tuple(vertices[idx[c]][:3] for c in span))
+                slots.append([(mat_name, fi, c) for c in span])
+
+    if not tris:
+        return normals
+
+    smoothed = build_smooth_normals(tris, angle)
+
+    # One normal per corner, but a corner shared by two triangles of the same
+    # quad gets whichever came last -- they are computed from the same vertex
+    # and the same neighbourhood, so they agree.
+    corner_normal = {}
+    for tri_corners, tri_slots in zip(smoothed, slots):
+        for n, slot in zip(tri_corners, tri_slots):
+            corner_normal[slot] = n
+
+    # Deduplicate. This is the part that lets the stripifier merge again: two
+    # corners with the same smoothed normal must end up on the same index, or
+    # every vertex key stays unique and nothing strips.
+    new_normals = []
+    index_of = {}
+
+    def normal_index(n):
+        key = (round(n[0], 6), round(n[1], 6), round(n[2], 6))
+        if key not in index_of:
+            index_of[key] = len(new_normals)
+            new_normals.append(list(key))
+        return index_of[key]
+
+    for mat_name, face_list in material_faces.items():
+        for fi, face in enumerate(face_list):
+            rebuilt = []
+            for c, corner in enumerate(face):
+                v_idx, vt_idx, _ = parse_face_vertex(corner, False)
+                vn = normal_index(corner_normal[(mat_name, fi, c)])
+                if vt_idx is None:
+                    rebuilt.append(f"{v_idx + 1}//{vn + 1}")
+                else:
+                    rebuilt.append(f"{v_idx + 1}/{vt_idx + 1}/{vn + 1}")
+            face_list[fi] = rebuilt
+
+    if normals:
+        print(f"Smooth normals: {len(normals)} authored normal(s) replaced by "
+              f"{len(new_normals)} computed at {angle:g} degrees")
+    else:
+        print(f"Smooth normals: {len(new_normals)} computed at {angle:g} "
+              "degrees (the file had none)")
+
+    return new_normals
+
+
 def convert_obj(input_file, output_file, texture_size,
                 model_scale, model_translation, use_vertex_color,
                 no_strip=False, multi_material=False, collision=False,
                 collision_b3=False, collision_b3_scale=1.0,
-                collision_b3_c=None, envmap_uv=False):
+                collision_b3_c=None, envmap_uv=False, smooth_normals=None):
 
     vertices, texcoords, normals, material_faces, mtl_file = \
         parse_obj(input_file, use_vertex_color)
@@ -749,6 +840,12 @@ def convert_obj(input_file, output_file, texture_size,
         print("")
     elif mtl_file:
         print(f"Warning: MTL file not found: {mtl_file}")
+        print("")
+
+    # Smoothing runs over the whole model, before it is split by material.
+    if smooth_normals is not None:
+        normals = apply_smooth_normals(vertices, normals, material_faces,
+                                       smooth_normals, use_vertex_color)
         print("")
 
     # Determine if we should use multi-material mode
@@ -904,6 +1001,13 @@ if __name__ == "__main__":
     parser.add_argument("--no-strip", required=False,
                         action='store_true',
                         help="disable strip generation (original behavior)")
+    parser.add_argument("--smooth-normals", required=False, type=float,
+                        nargs='?', const=60.0, default=None,
+                        help="average vertex normals across adjacent triangles "
+                             "whose face angle is below this threshold in "
+                             "degrees (default 60 if flag given with no "
+                             "value); omit the flag entirely to keep flat "
+                             "per-triangle normals")
     parser.add_argument("--envmap-uv", required=False,
                         action='store_true',
                         help="replace all texture coordinates with the centre "
@@ -960,7 +1064,7 @@ if __name__ == "__main__":
                     args.scale, args.translation, args.use_vertex_color,
                     args.no_strip, args.multi_material, args.collision,
                     args.collision_b3, args.collision_b3_scale,
-                    args.collision_b3_c, args.envmap_uv)
+                    args.collision_b3_c, args.envmap_uv, args.smooth_normals)
     except BaseException as e:
         print("ERROR: " + str(e))
         traceback.print_exc()

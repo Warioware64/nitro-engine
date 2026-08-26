@@ -1385,6 +1385,14 @@ def _resolve_output_dir(ts):
     return resolved
 
 
+# MD5 meshes have always been flat-shaded -- one normal per triangle, given to
+# all three of its corners -- so this is the only way to get smooth shading out
+# of that pipeline.
+SMOOTH_NORMALS_DESC = (
+    "Average vertex normals across adjacent faces whose angle is below the "
+    "crease threshold. Edges sharper than that stay hard")
+
+
 class NEA_ToolSettings(bpy.types.PropertyGroup):
     """Per-scene settings for NEA conversion tools."""
     output_dir: StringProperty(
@@ -1401,6 +1409,13 @@ class NEA_ToolSettings(bpy.types.PropertyGroup):
         name="Multi-Material (DLMM)", default=False)
     obj2dl_collision: BoolProperty(
         name="Generate .colmesh", default=False)
+    obj2dl_smooth_normals: BoolProperty(
+        name="Smooth Normals", default=False,
+        description=SMOOTH_NORMALS_DESC)
+    obj2dl_smooth_angle: FloatProperty(
+        name="Crease Angle", default=60.0, min=0.0, max=180.0,
+        description="Faces meeting at less than this angle are averaged "
+                    "together")
     md5_mesh_path: StringProperty(
         name="MD5mesh File",
         description="Path to the .md5mesh file",
@@ -1415,6 +1430,13 @@ class NEA_ToolSettings(bpy.types.PropertyGroup):
     )
     md5_export_base_pose: BoolProperty(
         name="Export Base Pose", default=False)
+    md5_smooth_normals: BoolProperty(
+        name="Smooth Normals", default=False,
+        description=SMOOTH_NORMALS_DESC)
+    md5_smooth_angle: FloatProperty(
+        name="Crease Angle", default=60.0, min=0.0, max=180.0,
+        description="Faces meeting at less than this angle are averaged "
+                    "together. MD5 meshes are flat-shaded without this")
     md5_multi_material: BoolProperty(
         name="Multi-Material (DLMM)", default=False)
     md5_skin_format: EnumProperty(
@@ -2002,6 +2024,8 @@ class NEA_OT_RunObj2dl(bpy.types.Operator):
             cmd.append('--multi-material')
         if ts.obj2dl_collision:
             cmd.append('--collision')
+        if ts.obj2dl_smooth_normals:
+            cmd.extend(['--smooth-normals', str(ts.obj2dl_smooth_angle)])
 
         print(f"NEA: Running: {' '.join(cmd)}")
         if not _run_tool(cmd, self.report):
@@ -2087,6 +2111,8 @@ class NEA_OT_RunMd5ToDsma(bpy.types.Operator):
             cmd.append('--export-base-pose')
         if ts.md5_multi_material:
             cmd.append('--multi-material')
+        if ts.md5_smooth_normals:
+            cmd.extend(['--smooth-normals', str(ts.md5_smooth_angle)])
         cmd.extend(['--format', ts.md5_skin_format])
 
         print(f"NEA: Running: {' '.join(cmd)}")
@@ -2221,6 +2247,10 @@ class VIEW3D_PT_nea_tools(bpy.types.Panel):
         box.prop(ts, "obj2dl_vertex_color")
         box.prop(ts, "obj2dl_multi_material")
         box.prop(ts, "obj2dl_collision")
+        box.prop(ts, "obj2dl_smooth_normals")
+        sub = box.row()
+        sub.enabled = ts.obj2dl_smooth_normals
+        sub.prop(ts, "obj2dl_smooth_angle")
         row = box.row()
         row.scale_y = 1.4
         row.operator("nea.run_obj2dl", icon='EXPORT')
@@ -2234,6 +2264,10 @@ class VIEW3D_PT_nea_tools(bpy.types.Panel):
         box2.prop(ts, "md5_blender_fix")
         box2.prop(ts, "md5_export_base_pose")
         box2.prop(ts, "md5_multi_material")
+        box2.prop(ts, "md5_smooth_normals")
+        sub2 = box2.row()
+        sub2.enabled = ts.md5_smooth_normals
+        sub2.prop(ts, "md5_smooth_angle")
         row2 = box2.row()
         row2.scale_y = 1.4
         row2.operator("nea.run_md5_to_dsma", icon='EXPORT')

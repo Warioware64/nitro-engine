@@ -19,7 +19,10 @@
 //
 // The same mesh is loaded here at three budgets so the trade is visible rather
 // than described. The banded texture is deliberate: a skinning error shows up as
-// a kink in what should be even stripes.
+// a kink in what should be even stripes -- so the bands are the texture, not the
+// shading. The mesh is exported with --smooth-normals, because an MD5 model is
+// flat-shaded otherwise and this cylinder came out as ten hard facets, which
+// would be easy to mistake for a skinning problem.
 //
 //   30 slots  the full budget       0.230 worst-case blend error
 //   16 slots                        0.504

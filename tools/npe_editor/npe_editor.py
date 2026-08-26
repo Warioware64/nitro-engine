@@ -227,6 +227,261 @@ class Simulator:
             p.size = self._sample_size(e["size_keys"], t, p.size)
 
 # ---------------------------------------------------------------------------
+# Keyframe graph
+# ---------------------------------------------------------------------------
+
+# The same palette and interaction the animmat editor's timeline uses, so the
+# two tools feel like one set. Colour and size over life are keyframed curves
+# exactly like a material animation track, and they used to be edited through a
+# listbox and a chain of modal prompts -- three dialogs to move one colour key.
+
+GRAPH_BG      = "#1b1b1f"
+GRAPH_GRID_H  = "#2a2a30"
+GRAPH_GRID_V  = "#26262c"
+GRAPH_AXIS    = "#777"
+GRAPH_CURVE   = "#4da3ff"
+GRAPH_KEY     = "#ff8c42"
+GRAPH_KEY_SEL = "#ffd24d"
+GRAPH_HINT    = "#666"
+
+GRAPH_HINT_TEXT = ("Click a key to select, drag to move, double-click empty "
+                   "space to add, right-click a key to delete.")
+
+
+class LifeGraph(tk.Canvas):
+    """A keyframe curve over a particle's life, drawn like an animmat track.
+
+    Both of the things an emitter animates over life are curves with draggable
+    keys, so both get the same widget:
+
+      size   x is t (0..1000), y is the size in world units.
+      color  x is t, y is alpha. RGB is a gradient behind the curve and a
+             swatch on each key, because a colour is not a height -- but alpha
+             is, and it is the channel that decides whether anything is
+             visible at all.
+    """
+
+    def __init__(self, parent, editor, mode):
+        super().__init__(parent, height=190, background=GRAPH_BG,
+                         highlightthickness=0)
+        self.editor = editor
+        self.mode = mode          # "size" or "color"
+        self.sel = None
+        self._drag = None
+        self._range = None
+
+        self.bind("<Configure>", lambda e: self.redraw())
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", lambda e: self._end_drag())
+        self.bind("<Double-Button-1>", self._on_double)
+        self.bind("<Button-3>", self._on_right)
+
+    # -- data ------------------------------------------------------------
+
+    @property
+    def keys(self):
+        return self.editor.effect[
+            "color_keys" if self.mode == "color" else "size_keys"]
+
+    def _set_keys(self, keys):
+        self.editor.effect[
+            "color_keys" if self.mode == "color" else "size_keys"] = keys
+
+    def _y_value(self, key):
+        """The number this key plots at."""
+        return key[4] if self.mode == "color" else key[1]
+
+    def _with_y(self, key, t, value):
+        if self.mode == "color":
+            return (t, key[1], key[2], key[3], int(max(0, min(255, value))))
+        return (t, max(0.0, float(value)))
+
+    def _y_span(self):
+        if self.mode == "color":
+            return 0.0, 255.0
+        top = max((s for _, s in self.keys), default=1.0) or 1.0
+        return 0.0, top * 1.15
+
+    def _sample(self, t):
+        if self.mode == "color":
+            return Simulator._sample_color(self.keys, t)[3]
+        return Simulator._sample_size(self.keys, t, 0.0)
+
+    # -- geometry ---------------------------------------------------------
+
+    def _geom(self):
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w <= 1:
+            w = 420
+        if h <= 1:
+            h = int(self.cget("height"))
+        return w, h, 44, 12, w - 14, h - 26
+
+    def _to_px(self, t, value, lo, hi):
+        _, _, x0, y0, x1, y1 = self._geom()
+        x = x0 + (x1 - x0) * t / 1000.0
+        span = (hi - lo) or 1.0
+        y = y1 - (y1 - y0) * (value - lo) / span
+        return x, y
+
+    def _from_px(self, px, py, lo, hi):
+        _, _, x0, y0, x1, y1 = self._geom()
+        t = round((px - x0) / max(1, x1 - x0) * 1000.0)
+        span = (hi - lo) or 1.0
+        value = lo + (y1 - py) / max(1, y1 - y0) * span
+        return max(0, min(1000, int(t))), value
+
+    # -- drawing ----------------------------------------------------------
+
+    def redraw(self):
+        self.delete("all")
+        w, h, x0, y0, x1, y1 = self._geom()
+        lo, hi = self._y_span()
+
+        if self.mode == "color":
+            self._draw_gradient(x0, y0, x1, y1)
+
+        for i in range(5):
+            y = y0 + (y1 - y0) * i / 4
+            self.create_line(x0, y, x1, y, fill=GRAPH_GRID_H)
+            val = hi - (hi - lo) * i / 4
+            label = f"{val:.0f}" if self.mode == "color" else f"{val:.2f}"
+            self.create_text(x0 - 5, y, text=label, fill=GRAPH_AXIS,
+                             anchor="e", font=("TkFixedFont", 7))
+
+        for t in range(0, 1001, 100):
+            x, _ = self._to_px(t, lo, lo, hi)
+            self.create_line(x, y0, x, y1, fill=GRAPH_GRID_V)
+            self.create_text(x, y1 + 9, text=str(t), fill=GRAPH_AXIS,
+                             font=("TkFixedFont", 7))
+
+        # The evaluated curve: sampled through the same functions the simulator
+        # and the runtime use, so the graph cannot disagree with the preview.
+        pts = []
+        for i in range(0, 121):
+            t = i * 1000 // 120
+            pts.extend(self._to_px(t, self._sample(t), lo, hi))
+        if len(pts) >= 4:
+            self.create_line(*pts, fill=GRAPH_CURVE, width=2, joinstyle="round")
+
+        for i, key in enumerate(self.keys):
+            x, y = self._to_px(key[0], self._y_value(key), lo, hi)
+            selected = (i == self.sel)
+            if self.mode == "color":
+                # The swatch sits on top of the gradient, so its outline has to
+                # read against a light band as well as a dark one -- the
+                # canvas-coloured outline the size keys use vanishes here.
+                swatch = f"#{key[1]:02x}{key[2]:02x}{key[3]:02x}"
+                self.create_rectangle(x - 6, y - 6, x + 6, y + 6,
+                                      fill=swatch,
+                                      outline=GRAPH_KEY_SEL if selected
+                                      else "#e8e8ea", width=2)
+            else:
+                self.create_rectangle(x - 4, y - 4, x + 4, y + 4,
+                                      fill=GRAPH_KEY_SEL if selected
+                                      else GRAPH_KEY, outline=GRAPH_BG)
+
+        if not self.keys:
+            self.create_text((x0 + x1) / 2, (y0 + y1) / 2, fill=GRAPH_HINT,
+                             text="No keyframes - double-click to add one")
+
+    def _draw_gradient(self, x0, y0, x1, y1):
+        """The colour over life, behind the alpha curve."""
+        step = 2
+        for x in range(int(x0), int(x1), step):
+            t = int(1000 * (x - x0) / max(1, x1 - x0))
+            r, g, b, a = Simulator._sample_color(self.keys, t)
+            # Composited over the canvas so alpha is visible as fading, the
+            # same way the preview composites it.
+            af = a / 255.0
+            cr = int(0x1b * (1 - af) + r * af)
+            cg = int(0x1b * (1 - af) + g * af)
+            cb = int(0x1f * (1 - af) + b * af)
+            self.create_rectangle(x, y0, x + step, y1,
+                                  fill=f"#{cr:02x}{cg:02x}{cb:02x}", width=0)
+
+    # -- interaction ------------------------------------------------------
+
+    def _hit(self, px, py):
+        lo, hi = self._y_span()
+        for i, key in enumerate(self.keys):
+            x, y = self._to_px(key[0], self._y_value(key), lo, hi)
+            if abs(px - x) <= 7 and abs(py - y) <= 7:
+                return i
+        return None
+
+    def _on_click(self, e):
+        self.sel = self._hit(e.x, e.y)
+        self._drag = self.sel
+        self._range = self._y_span() if self.sel is not None else None
+        self.editor.on_graph_select(self)
+        self.redraw()
+
+    def _on_drag(self, e):
+        if self._drag is None:
+            return
+        lo, hi = self._range
+        t, value = self._from_px(e.x, e.y, lo, hi)
+
+        keys = list(self.keys)
+
+        # Two keys on one t leave a zero-length span, which the samplers skip --
+        # so one of them silently stops mattering. Refuse the move sideways and
+        # let the drag continue vertically, as the animmat timeline does.
+        if any(j != self._drag and k[0] == t for j, k in enumerate(keys)):
+            t = keys[self._drag][0]
+
+        moved = self._with_y(keys[self._drag], t, value)
+        keys[self._drag] = moved
+        keys.sort(key=lambda k: k[0])
+
+        self._set_keys(keys)
+        self._drag = keys.index(moved)
+        self.sel = self._drag
+
+        self.editor.on_graph_select(self)
+        self.editor._mark_dirty()
+        self.redraw()
+
+    def _end_drag(self):
+        self._drag = None
+        self._range = None
+
+    def _on_double(self, e):
+        lo, hi = self._y_span()
+        t, value = self._from_px(e.x, e.y, lo, hi)
+
+        keys = [k for k in self.keys if k[0] != t]
+        if self.mode == "color":
+            r, g, b, _a = Simulator._sample_color(self.keys, t)
+            keys.append((t, r, g, b, int(max(0, min(255, value)))))
+        else:
+            keys.append((t, max(0.0, float(value))))
+
+        keys.sort(key=lambda k: k[0])
+        self._set_keys(keys)
+        self.sel = next(i for i, k in enumerate(keys) if k[0] == t)
+
+        self.editor.on_graph_select(self)
+        self.editor._mark_dirty()
+        self.redraw()
+
+    def _on_right(self, e):
+        i = self._hit(e.x, e.y)
+        if i is None:
+            return
+        keys = list(self.keys)
+        del keys[i]
+        self._set_keys(keys)
+        self.sel = None
+        self.editor.on_graph_select(self)
+        self.editor._mark_dirty()
+        self.redraw()
+
+
+# ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 
@@ -466,34 +721,131 @@ class NpeEditor:
     def _build_color_tab(self):
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Color over life")
-        ttk.Label(f, text="Keyframes (t = 0..1000):").pack(anchor="w")
-        self.color_list = tk.Listbox(f, height=10)
-        self.color_list.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        bar = ttk.Frame(f); bar.pack(fill=tk.X)
-        ttk.Button(bar, text="Add",  command=self._add_color_key   ).pack(side=tk.LEFT)
-        ttk.Button(bar, text="Edit", command=self._edit_color_key  ).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bar, text="Delete", command=self._delete_color_key).pack(side=tk.LEFT)
+        ttk.Label(f, text="Color and alpha over a particle's life. The curve is "
+                          "alpha; the band behind it is the color, faded by "
+                          "that alpha the way the DS composites it.",
+                  wraplength=480, justify="left").pack(anchor="w")
 
-        self.color_strip = tk.Canvas(f, height=24, background="#000")
-        self.color_strip.pack(fill=tk.X, pady=8)
-        self._refresh_color_list()
+        self.color_graph = LifeGraph(f, self, "color")
+        self.color_graph.pack(fill=tk.BOTH, expand=True, pady=(6, 2))
+
+        ttk.Label(f, text=GRAPH_HINT_TEXT, foreground=GRAPH_HINT,
+                  wraplength=480, justify="left").pack(anchor="w")
+
+        self._build_key_row(f, self.color_graph, "Alpha", with_color=True)
 
     def _build_size_tab(self):
         f = ttk.Frame(self.nb, padding=8)
         self.nb.add(f, text="Size over life")
-        ttk.Label(f, text="Keyframes (t = 0..1000, size in world units):").pack(anchor="w")
-        self.size_list = tk.Listbox(f, height=10)
-        self.size_list.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        bar = ttk.Frame(f); bar.pack(fill=tk.X)
-        ttk.Button(bar, text="Add",  command=self._add_size_key   ).pack(side=tk.LEFT)
-        ttk.Button(bar, text="Edit", command=self._edit_size_key  ).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bar, text="Delete", command=self._delete_size_key).pack(side=tk.LEFT)
+        ttk.Label(f, text="Size in world units over a particle's life.",
+                  justify="left").pack(anchor="w")
 
-        self.size_curve = tk.Canvas(f, height=120, background="#202830", highlightthickness=0)
-        self.size_curve.pack(fill=tk.X, pady=8)
-        self._refresh_size_list()
+        self.size_graph = LifeGraph(f, self, "size")
+        self.size_graph.pack(fill=tk.BOTH, expand=True, pady=(6, 2))
+
+        ttk.Label(f, text=GRAPH_HINT_TEXT, foreground=GRAPH_HINT,
+                  wraplength=480, justify="left").pack(anchor="w")
+
+        self._build_key_row(f, self.size_graph, "Size")
+
+    def _build_key_row(self, parent, graph, value_label, with_color=False):
+        """The numeric editor under a graph, matching the animmat editor's."""
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.X, pady=6)
+
+        ttk.Label(row, text="t ").pack(side=tk.LEFT)
+        graph.t_var = tk.StringVar()
+        e1 = ttk.Entry(row, textvariable=graph.t_var, width=6)
+        e1.pack(side=tk.LEFT)
+        e1.bind("<Return>", lambda ev: self._apply_key_row(graph))
+
+        ttk.Label(row, text=f"  {value_label} ").pack(side=tk.LEFT)
+        graph.v_var = tk.StringVar()
+        e2 = ttk.Entry(row, textvariable=graph.v_var, width=10)
+        e2.pack(side=tk.LEFT)
+        e2.bind("<Return>", lambda ev: self._apply_key_row(graph))
+
+        ttk.Button(row, text="Set",
+                   command=lambda: self._apply_key_row(graph)).pack(
+            side=tk.LEFT, padx=4)
+
+        if with_color:
+            graph.color_btn = ttk.Button(
+                row, text="Pick color...",
+                command=lambda: self._pick_key_color(graph))
+            graph.color_btn.pack(side=tk.LEFT)
+        else:
+            graph.color_btn = None
+
+        self.on_graph_select(graph)
+
+    def on_graph_select(self, graph):
+        """Mirror the graph's selected key into its numeric boxes."""
+        if not hasattr(graph, "t_var"):
+            return
+
+        keys = graph.keys
+        if graph.sel is None or not (0 <= graph.sel < len(keys)):
+            graph.t_var.set("")
+            graph.v_var.set("")
+            if graph.color_btn is not None:
+                graph.color_btn.configure(state="disabled")
+            return
+
+        key = keys[graph.sel]
+        graph.t_var.set(str(key[0]))
+        graph.v_var.set(f"{key[4]}" if graph.mode == "color"
+                        else f"{key[1]:.3f}")
+        if graph.color_btn is not None:
+            graph.color_btn.configure(state="normal")
+
+    def _apply_key_row(self, graph):
+        keys = list(graph.keys)
+        if graph.sel is None or not (0 <= graph.sel < len(keys)):
+            return
+
+        try:
+            t = max(0, min(1000, int(graph.t_var.get())))
+            value = float(graph.v_var.get())
+        except ValueError:
+            return
+
+        if any(j != graph.sel and k[0] == t for j, k in enumerate(keys)):
+            messagebox.showwarning(
+                "That time already has a key",
+                f"There is already a key at t={t}.\n\nTwo keys at one time "
+                "leave a zero-length span, which the sampler skips, so one of "
+                "them would do nothing.")
+            return
+
+        edited = graph._with_y(keys[graph.sel], t, value)
+        keys[graph.sel] = edited
+        keys.sort(key=lambda k: k[0])
+
+        graph._set_keys(keys)
+        graph.sel = keys.index(edited)
+
+        self.on_graph_select(graph)
+        self._mark_dirty()
+        graph.redraw()
+
+    def _pick_key_color(self, graph):
+        keys = list(graph.keys)
+        if graph.sel is None or not (0 <= graph.sel < len(keys)):
+            return
+
+        t, r, g, b, a = keys[graph.sel]
+        rgb, _ = colorchooser.askcolor(initialcolor=(r, g, b), parent=self.root)
+        if rgb is None:
+            return
+
+        keys[graph.sel] = (t, int(rgb[0]), int(rgb[1]), int(rgb[2]), a)
+        graph._set_keys(keys)
+
+        self._mark_dirty()
+        graph.redraw()
 
     def _build_flags_tab(self):
         f = ttk.Frame(self.nb, padding=8)
@@ -504,139 +856,6 @@ class NpeEditor:
         self._add_check(f, r, "Additive blending",  "additive");     r += 1
         self._add_check(f, r, "Sprite-sheet animation", "spritesheet"); r += 1
         self._add_check(f, r, "Velocity-stretched (reserved)", "stretch"); r += 1
-
-    # -- Color keys --------------------------------------------------------
-
-    def _refresh_color_list(self):
-        self.color_list.delete(0, tk.END)
-        for (t, r, g, b, a) in self.effect["color_keys"]:
-            self.color_list.insert(tk.END, f"t={t:>4}   RGB=({r:3},{g:3},{b:3})   A={a:3}")
-        # Strip preview.
-        self.color_strip.delete("all")
-        w = max(1, self.color_strip.winfo_width() or 360)
-        h = 22
-        for x in range(w):
-            t = int(1000 * x / max(1, w - 1))
-            r, g, b, a = Simulator._sample_color(self.effect["color_keys"], t)
-            # Blend with dark background to show alpha
-            br, bg_, bb = 16, 24, 32
-            af = a / 255.0
-            cr = int(br * (1 - af) + r * af)
-            cg = int(bg_ * (1 - af) + g * af)
-            cb = int(bb * (1 - af) + b * af)
-            self.color_strip.create_line(x, 0, x, h, fill=f"#{cr:02x}{cg:02x}{cb:02x}")
-
-    def _add_color_key(self):
-        self.effect["color_keys"].append((500, 255, 255, 255, 255))
-        self.effect["color_keys"].sort()
-        self._refresh_color_list()
-        self._mark_dirty()
-
-    def _edit_color_key(self):
-        sel = self.color_list.curselection()
-        if not sel: return
-        i = sel[0]
-        t, r, g, b, a = self.effect["color_keys"][i]
-        # Time prompt
-        new_t = self._prompt_int("Time (0..1000)", t)
-        if new_t is None: return
-        # Color picker
-        ((nr, ng, nb), _hex) = colorchooser.askcolor(initialcolor=(r, g, b),
-                                                     parent=self.root) or ((None,)*3, None)
-        if nr is None: return
-        new_a = self._prompt_int("Alpha (0..255)", a)
-        if new_a is None: return
-        self.effect["color_keys"][i] = (max(0, min(1000, new_t)),
-                                        int(nr), int(ng), int(nb),
-                                        max(0, min(255, new_a)))
-        self.effect["color_keys"].sort()
-        self._refresh_color_list()
-        self._mark_dirty()
-
-    def _delete_color_key(self):
-        sel = self.color_list.curselection()
-        if not sel: return
-        del self.effect["color_keys"][sel[0]]
-        self._refresh_color_list()
-        self._mark_dirty()
-
-    # -- Size keys ---------------------------------------------------------
-
-    def _refresh_size_list(self):
-        self.size_list.delete(0, tk.END)
-        for (t, sz) in self.effect["size_keys"]:
-            self.size_list.insert(tk.END, f"t={t:>4}   size={sz:.3f}")
-        # Curve preview.
-        self.size_curve.delete("all")
-        w = max(1, self.size_curve.winfo_width() or 360)
-        h = 118
-        max_s = max((s for _, s in self.effect["size_keys"]), default=1.0) or 1.0
-        # Axis
-        self.size_curve.create_line(0, h - 1, w, h - 1, fill="#555")
-        pts = []
-        for x in range(w):
-            t = int(1000 * x / max(1, w - 1))
-            s = Simulator._sample_size(self.effect["size_keys"], t, 0)
-            y = h - 1 - int((s / max_s) * (h - 2))
-            pts.extend([x, y])
-        if len(pts) >= 4:
-            self.size_curve.create_line(*pts, fill="#7fd")
-
-    def _add_size_key(self):
-        self.effect["size_keys"].append((500, 1.0))
-        self.effect["size_keys"].sort()
-        self._refresh_size_list()
-        self._mark_dirty()
-
-    def _edit_size_key(self):
-        sel = self.size_list.curselection()
-        if not sel: return
-        i = sel[0]
-        t, s = self.effect["size_keys"][i]
-        new_t = self._prompt_int("Time (0..1000)", t)
-        if new_t is None: return
-        new_s = self._prompt_float("Size (world units)", s)
-        if new_s is None: return
-        self.effect["size_keys"][i] = (max(0, min(1000, new_t)),
-                                       max(0.0, float(new_s)))
-        self.effect["size_keys"].sort()
-        self._refresh_size_list()
-        self._mark_dirty()
-
-    def _delete_size_key(self):
-        sel = self.size_list.curselection()
-        if not sel: return
-        del self.effect["size_keys"][sel[0]]
-        self._refresh_size_list()
-        self._mark_dirty()
-
-    # -- Small prompt dialogs ---------------------------------------------
-
-    def _prompt_int(self, label, initial):
-        return self._prompt_value(label, initial, parser=lambda s: int(s))
-
-    def _prompt_float(self, label, initial):
-        return self._prompt_value(label, initial, parser=lambda s: float(s))
-
-    def _prompt_value(self, label, initial, parser):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Edit")
-        dlg.transient(self.root); dlg.grab_set()
-        ttk.Label(dlg, text=label).pack(padx=8, pady=(8, 4))
-        var = tk.StringVar(value=str(initial))
-        e = ttk.Entry(dlg, textvariable=var); e.pack(padx=8, pady=4); e.focus_set()
-        result = {"value": None}
-        def ok():
-            try:
-                result["value"] = parser(var.get())
-                dlg.destroy()
-            except Exception:
-                messagebox.showerror("Invalid", "Could not parse value")
-        ttk.Button(dlg, text="OK",     command=ok).pack(side=tk.LEFT, padx=8, pady=8)
-        ttk.Button(dlg, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=8, pady=8)
-        dlg.bind("<Return>", lambda e: ok())
-        dlg.wait_window()
-        return result["value"]
 
     # -- File I/O ----------------------------------------------------------
 

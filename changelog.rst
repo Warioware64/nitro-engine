@@ -4,6 +4,74 @@ Changelog
 Unreleased
 ----------
 
+**Both mesh exporters gained ``--smooth-normals``.** Neither could produce smooth
+shading from geometry, and ``md5_to_dsma.py`` could not produce it at all: both
+its skinning paths computed one normal per triangle and handed it to all three
+corners, so every MD5 model NEA has ever exported was faceted. The ``tentacle``
+test asset is a ten-sided cylinder that had exactly **ten distinct normals across
+its 780 triangles** for that reason.
+
+``obj2dl.py`` passed through whatever ``vn`` entries the OBJ carried, and when a
+file had none it emitted no ``NORMAL`` command at all -- leaving the GPU to light
+the mesh with whatever normal the previous draw had left behind, silently.
+
+- The flag takes an optional crease angle, defaulting to 60 degrees, and averages
+  the faces meeting at a vertex that are shallower than that. Sharper edges stay
+  hard: ``cube.obj`` at 60 comes out byte-identical to flat, and only rounds over
+  at 120.
+- **Omitting the flag changes nothing.** Every exporter output in the tree is
+  byte-identical without it.
+- Smoothing runs over the **whole model** before it is split by material, so a
+  surface that continues across a material boundary does not gain a lighting
+  seam there.
+- Adjacency is by **position**, not by vertex index. An OBJ exported per-face has
+  a separate vertex entry for every corner, so index-based adjacency would find
+  no neighbours and silently produce flat output on exactly those files.
+- Averaging is area-weighted, which the cross product gives for free: its
+  magnitude is twice the triangle's area, so a fan of slivers cannot outvote the
+  one large face a vertex mostly belongs to. The angle test uses normalised
+  normals so the threshold does not depend on triangle size.
+- The Blender addon exposes it for both pipelines, with the crease angle greyed
+  out until the checkbox is on.
+- ``examples/assets/tentacle`` is now exported smooth, and its example says the
+  banding is the texture rather than the shading.
+
+Smoothing changes the display list in two directions at once, and which wins
+depends on the mesh. Corners that used to differ only by which triangle they
+belonged to now share a strip vertex key, so fewer vertices are emitted -- the
+sphere goes from 180 to 132. But ``DisplayList.normal()`` only skips a ``NORMAL``
+command when it repeats the previous one, and a flat mesh repeats it for a whole
+strip while a smooth one does not, so each corner starts costing its own. The
+sphere ends up smaller (2356 to 2312 bytes) and the robot larger (18820 to
+20620), because most of the robot's edges are sharper than 60 degrees and get no
+merging to pay for the extra normals.
+
+**npe_editor's curves are graphs now, matching the animmat editor.** Colour and
+size over a particle's life are keyframed curves exactly like a material
+animation track, but they were edited through a listbox and a chain of modal
+prompts -- moving one colour key meant answering three dialogs in a row, and the
+only picture of the result was a read-only 24 pixel strip. They use the same
+timeline the animmat editor does, down to the palette and the wording:
+
+- **Size over life** is a draggable curve. Click a key to select it, drag to
+  move it, double-click empty space to add one, right-click to delete.
+- **Colour over life** puts the colour itself behind the graph as a band, faded
+  by its own alpha the way the DS composites it, and plots **alpha as the
+  curve** -- because a colour is not a height but alpha is, and alpha is the
+  channel that decides whether a particle is visible at all. Each key is a
+  swatch you can drag in time and in alpha, with a picker for its RGB.
+- Both carry the numeric ``t`` / value / **Set** row underneath, so a key can be
+  placed exactly rather than by eye.
+- The curve is sampled through the same functions the simulator and the runtime
+  use, so the graph cannot disagree with the preview beside it.
+- Dropping a key onto a time that already has one is refused, on drag and on
+  typed edits alike. Two keys at one time leave a zero-length span that the
+  samplers skip, so one of them would silently stop mattering -- the same defect
+  that was fixed in the animmat timeline.
+
+That removed the keyframe listboxes, their add/edit/delete buttons and the
+prompt dialogs behind them, about 130 lines.
+
 **Particle pipeline fixes.** An audit of ``NEAParticle.c`` against the format
 module and the editor's simulator turned up six defects.
 
