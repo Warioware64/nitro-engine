@@ -82,14 +82,35 @@ class NEA_BoneCollisionProps(bpy.types.PropertyGroup):
     offset_x: FloatProperty(name="X", default=0.0)
     offset_y: FloatProperty(name="Y", default=0.0)
     offset_z: FloatProperty(name="Z", default=0.0)
+    axis_mode: EnumProperty(
+        items=[
+            ('bone', 'Along Bone',
+             'Shape lies along the bone (bone-local Y). The default, and what '
+             'every shape did before this option existed'),
+            ('custom', 'Custom Axis',
+             'Point the shape along an arbitrary bone-local direction. Only '
+             '.b3col carries this: Box3D can rotate a shape, .boncol has no '
+             'room for an orientation and ignores it'),
+        ],
+        name="Orientation",
+        description="Which way the shape points in bone-local space",
+        default='bone',
+    )
+    axis_x: FloatProperty(name="X", default=0.0)
+    axis_y: FloatProperty(name="Y", default=1.0)
+    axis_z: FloatProperty(name="Z", default=0.0)
 
 
 # Viewport overlay draw handler
 _collision_draw_handler = None
 
 
-def _make_circle_points(center, radius, axis, segments=16):
-    """Generate circle vertices around center in the given plane."""
+def _make_circle_points(center, radius, axis, segments=16, frame=None):
+    """Generate circle vertices around center in the given plane.
+
+    `frame` is an optional 3x3 rotation the circle is drawn in, so a shape can
+    follow its bone (and its own axis) instead of the world axes.
+    """
     pts = []
     for i in range(segments + 1):
         a = 2 * math.pi * i / segments
@@ -101,8 +122,45 @@ def _make_circle_points(center, radius, axis, segments=16):
             v = mu.Vector((c_a, 0, s_a))
         else:
             v = mu.Vector((c_a, s_a, 0))
+        if frame is not None:
+            v = frame @ v
         pts.append(center + v)
     return pts
+
+
+def _collision_shape_axis(props):
+    """Bone-local direction a shape points along, or None for the Y default.
+
+    Returns None when the shape keeps the Y-aligned convention, which is what
+    tells the writer to omit `axis` entirely and keep the file byte-identical
+    to what it produced before this option existed.
+    """
+    if props.axis_mode != 'custom':
+        return None
+
+    v = mu.Vector((props.axis_x, props.axis_y, props.axis_z))
+    if v.length < 1e-6:
+        return None
+
+    v.normalize()
+    if (v - mu.Vector((0.0, 1.0, 0.0))).length < 1e-6:
+        return None
+
+    return v
+
+
+def _collision_shape_rotation(props):
+    """Rotation taking bone-local Y onto the shape's axis.
+
+    The viewport counterpart of md5_to_dsma's quat_from_y_to_axis(): the
+    overlay has to apply the same rotation the .b3col writer bakes, or the
+    wireframe shows one orientation and the device another.
+    """
+    axis = _collision_shape_axis(props)
+    if axis is None:
+        return mu.Matrix.Identity(3)
+
+    return mu.Vector((0.0, 1.0, 0.0)).rotation_difference(axis).to_matrix()
 
 
 def _draw_collision_overlays():
@@ -133,6 +191,12 @@ def _draw_collision_overlays():
         offset = mu.Vector((props.offset_x, props.offset_y, props.offset_z))
         center = bone_mat @ offset
 
+        # Everything below is drawn in the shape's own frame: the bone's
+        # rotation, then the shape's Y -> axis rotation. Drawing in world axes
+        # would show a shape the runtime never uses -- .b3col bakes exactly
+        # this rotation into the per-bone entry.
+        frame = bone_mat.to_3x3().normalized() @ _collision_shape_rotation(props)
+
         if props.col_type == 'sphere':
             for axis in ('X', 'Y', 'Z'):
                 pts = _make_circle_points(center, props.radius, axis)
@@ -142,21 +206,19 @@ def _draw_collision_overlays():
         elif props.col_type == 'capsule':
             r = props.radius
             hh = props.half_height
-            rot3 = bone_mat.to_3x3()
-            top = center + rot3 @ mu.Vector((0, hh, 0))
-            bot = center + rot3 @ mu.Vector((0, -hh, 0))
+            top = center + frame @ mu.Vector((0, hh, 0))
+            bot = center + frame @ mu.Vector((0, -hh, 0))
             for c in (top, bot):
                 for axis in ('X', 'Z'):
-                    pts = _make_circle_points(c, r, axis)
+                    pts = _make_circle_points(c, r, axis, frame=frame)
                     for i in range(len(pts) - 1):
                         lines.extend([pts[i][:], pts[i + 1][:]])
             # Connecting lines at 4 cardinal points
             for angle in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
                 dx = r * math.cos(angle)
                 dz = r * math.sin(angle)
-                p1 = top + mu.Vector((dx, 0, dz))
-                p2 = bot + mu.Vector((dx, 0, dz))
-                lines.extend([p1[:], p2[:]])
+                d = frame @ mu.Vector((dx, 0, dz))
+                lines.extend([(top + d)[:], (bot + d)[:]])
 
         elif props.col_type == 'aabb':
             hx, hy, hz = props.half_x, props.half_y, props.half_z
@@ -165,7 +227,8 @@ def _draw_collision_overlays():
                 for sy in (-1, 1):
                     for sz in (-1, 1):
                         corners.append(
-                            (center + mu.Vector((sx * hx, sy * hy, sz * hz)))[:])
+                            (center + frame
+                             @ mu.Vector((sx * hx, sy * hy, sz * hz)))[:])
             edges = [
                 (0, 1), (2, 3), (4, 5), (6, 7),
                 (0, 2), (1, 3), (4, 6), (5, 7),
@@ -880,6 +943,16 @@ class NEA_ToolSettings(bpy.types.PropertyGroup):
                     "together. MD5 meshes are flat-shaded without this")
     md5_multi_material: BoolProperty(
         name="Multi-Material (DLMM)", default=False)
+    md5_collision: BoolProperty(
+        name="Bone Collision (.boncol)", default=False,
+        description="Feed the .md5collimesh written next to the .md5mesh "
+                    "through md5_to_dsma. Requires having ticked 'Export bone "
+                    "collision' on the MD5 mesh export")
+    md5_collision_b3: BoolProperty(
+        name="Also Box3D (.b3col)", default=False,
+        description="Additionally write per-bone Box3D shapes for "
+                    "NEA_Phys3DBodyAddBoneShape(). This is the only output "
+                    "that carries a shape's orientation")
     md5_skin_format: EnumProperty(
         name="Skin Format",
         description="Skeletal skinning format to export",
@@ -1556,6 +1629,23 @@ class NEA_OT_RunMd5ToDsma(bpy.types.Operator):
             cmd.extend(['--smooth-normals', str(ts.md5_smooth_angle)])
         cmd.extend(['--format', ts.md5_skin_format])
 
+        # --collision takes the path to the .md5collimesh, which the MD5 mesh
+        # export writes next to the .md5mesh under the same basename. Without
+        # this the per-bone shapes authored in Blender never reach a .boncol
+        # unless md5_to_dsma is re-run by hand.
+        if ts.md5_collision:
+            collimesh_path = os.path.splitext(mesh_path)[0] + '.md5collimesh'
+            if not os.path.isfile(collimesh_path):
+                self.report({'WARNING'},
+                            f"No .md5collimesh next to the .md5mesh "
+                            f"({collimesh_path}). Re-export the MD5 mesh with "
+                            f"'Export bone collision' ticked.")
+                return {'CANCELLED'}
+            cmd.extend(['--collision', collimesh_path])
+            # md5_to_dsma requires --collision alongside it.
+            if ts.md5_collision_b3:
+                cmd.append('--collision-b3')
+
         print(f"NEA: Running: {' '.join(cmd)}")
         if not _run_tool(cmd, self.report):
             return {'CANCELLED'}
@@ -1709,6 +1799,10 @@ class VIEW3D_PT_nea_tools(bpy.types.Panel):
         sub2 = box2.row()
         sub2.enabled = ts.md5_smooth_normals
         sub2.prop(ts, "md5_smooth_angle")
+        box2.prop(ts, "md5_collision")
+        sub3 = box2.row()
+        sub3.enabled = ts.md5_collision
+        sub3.prop(ts, "md5_collision_b3")
         row2 = box2.row()
         row2.scale_y = 1.4
         row2.operator("nea.run_md5_to_dsma", icon='EXPORT')
@@ -2540,6 +2634,13 @@ def write_md5collimesh(filepath, bones):
                             f'{props.half_y:.6f} {props.half_z:.6f}\n')
                 f.write(f'  offset {props.offset_x:.6f} '
                         f'{props.offset_y:.6f} {props.offset_z:.6f}\n')
+                # Omitted unless the shape actually leaves the Y convention:
+                # an absent `axis` is what every file written before this
+                # option existed looks like, and md5_to_dsma reads absence as
+                # Y-aligned. Only .b3col carries it; .boncol ignores it.
+                axis = _collision_shape_axis(props)
+                if axis is not None:
+                    f.write(f'  axis {axis.x:.6f} {axis.y:.6f} {axis.z:.6f}\n')
             else:
                 # Auto-generated capsule from bone geometry
                 f.write(f'  type {data["type"]}\n')
@@ -3099,6 +3200,16 @@ class BONE_PT_nea_collision(bpy.types.Panel):
             row.prop(props, "offset_x")
             row.prop(props, "offset_y")
             row.prop(props, "offset_z")
+
+            box = layout.box()
+            box.prop(props, "axis_mode")
+            if props.axis_mode == 'custom':
+                row = box.row(align=True)
+                row.prop(props, "axis_x")
+                row.prop(props, "axis_y")
+                row.prop(props, "axis_z")
+                box.label(text="Box3D (.b3col) only; .boncol stays Y-aligned",
+                          icon='INFO')
 
         layout.separator()
         row = layout.row()
