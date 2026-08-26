@@ -1,0 +1,22 @@
+# A single quad with the aspect ratio of the 256x160 banner texture, with UVs
+# spanning the whole image. obj2dl bakes the UVs in texel units against the
+# real (untrimmed) height, which is what both the trimmed and the padded
+# conversion of banner.png stores in rows 0..159.
+#
+# This file is part of Nitro Engine Advanced
+
+o Banner
+
+v -1.600000 -1.000000 0.000000
+v  1.600000 -1.000000 0.000000
+v  1.600000  1.000000 0.000000
+v -1.600000  1.000000 0.000000
+
+vt 0.000000 0.000000
+vt 1.000000 0.000000
+vt 1.000000 1.000000
+vt 0.000000 1.000000
+
+vn 0.000000 0.000000 1.000000
+
+f 1/1/1 2/2/1 3/3/1 4/4/1

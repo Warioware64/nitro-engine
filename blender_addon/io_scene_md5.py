@@ -338,6 +338,41 @@ class NEA_AddonPreferences(bpy.types.AddonPreferences):
 ### Texture VRAM size calculation
 ###
 
+NDS_TEXTURE_SIZES = (8, 16, 32, 64, 128, 256, 512, 1024)
+
+
+def _next_nds_size(size):
+    """Size the GPU is told for a texture of this many pixels, or None."""
+    for valid in NDS_TEXTURE_SIZES:
+        if size <= valid:
+            return valid
+    return None
+
+
+def _can_trim_t(tex_format, height):
+    """Whether ptexconv -tt can trim this height for this format.
+
+    The T axis is only worth trimming when the height isn't already a power of
+    two. tex4x4 stores rows of 4x4 blocks, so it can only trim in steps of 4.
+    """
+    if _next_nds_size(height) in (None, height):
+        return False
+    if tex_format == 'tex4x4':
+        return height % 4 == 0
+    return True
+
+
+def _stored_tex_height(ptex, height):
+    """Rows that will actually end up in VRAM for this material.
+
+    Trimming stores the real height, otherwise ptexconv pads up to the next
+    power of two and every one of those rows is uploaded.
+    """
+    if ptex.trim_t and _can_trim_t(ptex.tex_format, height):
+        return height
+    return _next_nds_size(height) or height
+
+
 def _calc_texture_vram(tex_format, width, height):
     """Calculate NDS texture VRAM usage in bytes for a given format and size.
     Returns (tex_bytes, pal_bytes) tuple."""
@@ -399,7 +434,8 @@ def _calc_scene_total_vram(context):
                         w, h = node.image.size[0], node.image.size[1]
                         break
             if w > 0 and h > 0:
-                tb, pb = _calc_texture_vram(ptex.tex_format, w, h)
+                tb, pb = _calc_texture_vram(ptex.tex_format, w,
+                                            _stored_tex_height(ptex, h))
                 total_tex += tb
                 total_pal += pb
     return (total_tex, total_pal)
@@ -561,6 +597,13 @@ class NEA_PtexconvProps(bpy.types.PropertyGroup):
         description="Dithering level (0-100)",
         default=0, min=0, max=100,
     )
+    trim_t: BoolProperty(
+        name="Trim T Axis",
+        description="ptexconv -tt: store only the real rows of a texture whose "
+                    "height isn't a power of two instead of padding it up. The "
+                    "GPU is told the padded height, so Wrap T must be off",
+        default=True,
+    )
 
 
 class NEA_TextureFlagsProps(bpy.types.PropertyGroup):
@@ -660,13 +703,41 @@ class MATERIAL_PT_nea_ptexconv(bpy.types.Panel):
                 if node.type == 'TEX_IMAGE' and node.image:
                     w, h = node.image.size[0], node.image.size[1]
                     break
+
+        trimmable = w > 0 and h > 0 and _can_trim_t(ptex.tex_format, h)
+        row = box.row()
+        row.enabled = trimmable
+        row.prop(ptex, "trim_t")
+
         if w > 0 and h > 0:
-            tb, pb = _calc_texture_vram(ptex.tex_format, w, h)
+            padded = _next_nds_size(h)
             vram_box = box.box()
             vram_box.label(text=f"Texture: {w}x{h}")
-            vram_box.label(text=f"VRAM: {_format_vram_size(tb)} tex"
-                           f" + {_format_vram_size(pb)} pal"
-                           f" = {_format_vram_size(tb + pb)}")
+
+            if trimmable and ptex.trim_t:
+                tb, pb = _calc_texture_vram(ptex.tex_format, w,
+                                            _stored_tex_height(ptex, h))
+                full, _ = _calc_texture_vram(ptex.tex_format, w, padded)
+                vram_box.label(text=f"VRAM: {_format_vram_size(tb)} tex"
+                               f" + {_format_vram_size(pb)} pal"
+                               f" = {_format_vram_size(tb + pb)}")
+                vram_box.label(text=f"Trimmed: GPU sees {w}x{padded}, saving "
+                                    f"{_format_vram_size(full - tb)}",
+                               icon='CHECKMARK')
+            elif padded is None:
+                vram_box.label(text="Height over 1024, unusable", icon='ERROR')
+            else:
+                tb, pb = _calc_texture_vram(ptex.tex_format, w, padded)
+                vram_box.label(text=f"VRAM: {_format_vram_size(tb)} tex"
+                               f" + {_format_vram_size(pb)} pal"
+                               f" = {_format_vram_size(tb + pb)}")
+                if padded != h:
+                    vram_box.label(text=f"Padded up to {w}x{padded}",
+                                   icon='INFO')
+
+            if _next_nds_size(w) != w:
+                vram_box.label(text="Width must be a power of two",
+                               icon='ERROR')
 
         box2 = layout.box()
         box2.label(text="Texture Flags:")
@@ -1693,13 +1764,16 @@ class NEA_OT_RunPtexconv(bpy.types.Operator):
             return {'CANCELLED'}
 
         ptex = mat.nea_ptexconv
+        flags = mat.nea_tex_flags
 
         # Find texture image from material's node tree
         tex_path = None
+        tex_w, tex_h = 0, 0
         if mat.node_tree:
             for node in mat.node_tree.nodes:
                 if node.type == 'TEX_IMAGE' and node.image:
                     img = node.image
+                    tex_w, tex_h = img.size[0], img.size[1]
                     if img.packed_file:
                         tmp = os.path.join(tempfile.gettempdir(),
                                            img.name + '.png')
@@ -1715,6 +1789,20 @@ class NEA_OT_RunPtexconv(bpy.types.Operator):
                         "Assign a texture via Image Texture node.")
             return {'CANCELLED'}
 
+        # The S axis has to be an exact NDS texture size. The T axis doesn't:
+        # it can be trimmed instead of padded, which is what -tt does below.
+        if _next_nds_size(tex_w) != tex_w:
+            self.report({'ERROR'},
+                        f"Texture is {tex_w}x{tex_h}: the width must be one of "
+                        f"{list(NDS_TEXTURE_SIZES)}")
+            return {'CANCELLED'}
+
+        if _next_nds_size(tex_h) is None:
+            self.report({'ERROR'},
+                        f"Texture is {tex_w}x{tex_h}: the height must be at "
+                        "most 1024")
+            return {'CANCELLED'}
+
         ts = context.scene.nea_tool_settings
         out_dir = _resolve_output_dir(ts)
         if not out_dir:
@@ -1725,19 +1813,56 @@ class NEA_OT_RunPtexconv(bpy.types.Operator):
         mat_dir = os.path.join(out_dir, mat_name)
         os.makedirs(mat_dir, exist_ok=True)
 
+        # -o takes a base name, not a directory: ptexconv appends _tex/_pal/_idx
+        # to it. Passing the directory alone would drop the files next to it.
+        out_base = os.path.join(mat_dir, mat_name)
+
         cmd = [ptexconv_path,
                '-gt', '-ob',
-               '-o', mat_dir,
+               '-o', out_base,
                tex_path,
                '-f', ptex.tex_format]
+
+        if ptex.dithering > 0:
+            cmd += ['-d', str(ptex.dithering)]
+        if ptex.tex_format == 'tex4x4' and ptex.compression > 0:
+            cmd += ['-ct', str(ptex.compression)]
+
+        trimmed = False
+        if ptex.trim_t and _next_nds_size(tex_h) != tex_h:
+            if _can_trim_t(ptex.tex_format, tex_h):
+                cmd.append('-tt')
+                trimmed = True
+            else:
+                # tex4x4 stores rows of 4x4 blocks, so it can only trim in
+                # steps of 4. Padding is the only option here.
+                self.report({'WARNING'},
+                            f"Height {tex_h} is not a multiple of 4, so a "
+                            "tex4x4 texture can't be trimmed. Padding instead.")
+
+        if trimmed and flags.wrap_t:
+            # The GPU is told the padded height, so it wraps there, past the end
+            # of the data that was actually stored.
+            self.report({'WARNING'},
+                        "Wrap T is on for a trimmed texture: the GPU wraps at "
+                        f"{_next_nds_size(tex_h)}, not {tex_h}, and will sample "
+                        "unallocated VRAM. Turn Wrap T off.")
 
         print(f"NEA: Running: {' '.join(cmd)}")
         if not _run_tool(cmd, self.report):
             return {'CANCELLED'}
 
-        self.report({'INFO'},
-                    f"OK: {mat_dir} ({ptex.tex_format})")
-        print(f"NEA: Done -> {mat_dir}")
+        if trimmed:
+            saved = (_calc_texture_vram(ptex.tex_format, tex_w,
+                                        _next_nds_size(tex_h))[0]
+                     - _calc_texture_vram(ptex.tex_format, tex_w, tex_h)[0])
+            msg = (f"OK: {out_base} ({ptex.tex_format}, {tex_w}x{tex_h} "
+                   f"trimmed, saved {_format_vram_size(saved)})")
+        else:
+            msg = f"OK: {out_base} ({ptex.tex_format})"
+
+        self.report({'INFO'}, msg)
+        print(f"NEA: Done -> {out_base}")
         return {'FINISHED'}
 
 

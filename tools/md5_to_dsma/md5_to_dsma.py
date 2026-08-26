@@ -18,8 +18,25 @@ class MD5FormatError(Exception):
 
 VALID_TEXTURE_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024]
 
-def is_valid_texture_size(size):
+def is_valid_texture_width(size):
+    """The S axis must be an exact NDS texture size."""
     return size in VALID_TEXTURE_SIZES
+
+def is_valid_texture_height(size):
+    """The T axis may be trimmed (ptexconv -tt).
+
+    Nitro Engine Advanced stores only the real rows and tells the GPU the next
+    power of two, so any height up to 1024 works. UVs are still scaled by the
+    real height, which is what the trimmed data holds.
+    """
+    return 1 <= size <= 1024
+
+def next_texture_pow2(size):
+    """The height the GPU is told for a (possibly trimmed) texture."""
+    for valid in VALID_TEXTURE_SIZES:
+        if size <= valid:
+            return valid
+    return None
 
 def get_image_dimensions(path):
     """Read width and height from a PNG or JPEG file without external deps."""
@@ -997,12 +1014,21 @@ def convert_md5mesh(model_file, name, output_folder, texture_size,
                 if os.path.isfile(shader_path):
                     try:
                         w, h = get_image_dimensions(shader_path)
-                        if is_valid_texture_size(w) and is_valid_texture_size(h):
-                            mesh_tex_size = [w, h]
+                        if not is_valid_texture_width(w):
+                            raise ValueError(
+                                f"Shader image {mesh.shader} is {w}x{h}: the "
+                                f"width must be one of {VALID_TEXTURE_SIZES}")
+                        if not is_valid_texture_height(h):
+                            raise ValueError(
+                                f"Shader image {mesh.shader} is {w}x{h}: the "
+                                f"height must be between 1 and 1024")
+                        mesh_tex_size = [w, h]
+                        padded = next_texture_pow2(h)
+                        if padded == h:
                             print(f"  Shader '{mesh.shader}': detected {w}x{h}")
                         else:
-                            print(f"  WARNING: Shader image {mesh.shader} has non-power-of-2 "
-                                  f"size {w}x{h}, using fallback {mesh_tex_size}")
+                            print(f"  Shader '{mesh.shader}': detected {w}x{h} "
+                                  f"(trimmed T axis, GPU sees {w}x{padded})")
                     except ValueError as e:
                         print(f"  WARNING: Cannot read shader image: {e}")
                 else:
@@ -1626,12 +1652,21 @@ def convert_md5mesh_nsmw(model_file, name, output_folder, texture_size,
             if os.path.isfile(shader_path):
                 try:
                     w, h = get_image_dimensions(shader_path)
-                    if is_valid_texture_size(w) and is_valid_texture_size(h):
-                        mesh_tex_size = [w, h]
+                    if not is_valid_texture_width(w):
+                        raise ValueError(
+                            f"Shader image {mesh.shader} is {w}x{h}: the width "
+                            f"must be one of {VALID_TEXTURE_SIZES}")
+                    if not is_valid_texture_height(h):
+                        raise ValueError(
+                            f"Shader image {mesh.shader} is {w}x{h}: the height "
+                            f"must be between 1 and 1024")
+                    mesh_tex_size = [w, h]
+                    padded = next_texture_pow2(h)
+                    if padded == h:
                         print(f"  Shader '{mesh.shader}': detected {w}x{h}")
                     else:
-                        print(f"  WARNING: Shader image {mesh.shader} has non-power-of-2 "
-                              f"size {w}x{h}, using fallback {mesh_tex_size}")
+                        print(f"  Shader '{mesh.shader}': detected {w}x{h} "
+                              f"(trimmed T axis, GPU sees {w}x{padded})")
                 except ValueError as e:
                     print(f"  WARNING: Cannot read shader image: {e}")
             else:
@@ -2193,7 +2228,7 @@ if __name__ == "__main__":
                         help="input md5mesh file")
     parser.add_argument("--texture", required=False, type=int, default=[],
                         nargs="+", action="extend",
-                        help="texture width and height (e.g. '--texture 32 64')")
+                        help="texture width and height (e.g. '--texture 32 64'). The width must be a power of two; the height may be any value up to 1024, which is how a T-axis trimmed texture (ptexconv -tt) is declared")
     parser.add_argument("--anims", required=False, type=str, default=[],
                         nargs="+", action="extend",
                         help="list of md5anim files to convert")
@@ -2280,12 +2315,14 @@ if __name__ == "__main__":
                 sys.exit(1)
 
         if len(args.texture) == 2:
-            if not is_valid_texture_size(args.texture[0]):
+            if not is_valid_texture_width(args.texture[0]):
                 print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
                 sys.exit(1)
 
-            if not is_valid_texture_size(args.texture[1]):
-                print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
+            if not is_valid_texture_height(args.texture[1]):
+                print("Invalid texture height. It must be between 1 and 1024 "
+                      "(a height that isn't a power of two is a T-axis trimmed "
+                      "texture, see ptexconv -tt)")
                 sys.exit(1)
 
     if args.collision_b3 and args.collision is None:

@@ -21,8 +21,25 @@ class OBJFormatError(Exception):
 
 VALID_TEXTURE_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024]
 
-def is_valid_texture_size(size):
+def is_valid_texture_width(size):
+    """The S axis must be an exact NDS texture size."""
     return size in VALID_TEXTURE_SIZES
+
+def is_valid_texture_height(size):
+    """The T axis may be trimmed (ptexconv -tt).
+
+    Nitro Engine Advanced stores only the real rows and tells the GPU the next
+    power of two, so any height up to 1024 works. UVs are still scaled by the
+    real height, which is what the trimmed data holds.
+    """
+    return 1 <= size <= 1024
+
+def next_texture_pow2(size):
+    """The height the GPU is told for a (possibly trimmed) texture."""
+    for valid in VALID_TEXTURE_SIZES:
+        if size <= valid:
+            return valid
+    return None
 
 def get_image_dimensions(path):
     """Read width and height from a PNG or JPEG file without external deps."""
@@ -917,12 +934,21 @@ def convert_obj(input_file, output_file, texture_size,
                 tex_path = os.path.join(mtl_dir, map_kd)
                 if os.path.isfile(tex_path):
                     w, h = get_image_dimensions(tex_path)
-                    if is_valid_texture_size(w) and is_valid_texture_size(h):
-                        mat_tex_size = [w, h]
+                    if not is_valid_texture_width(w):
+                        raise OBJFormatError(
+                            f"Texture {map_kd} is {w}x{h}: the width must be "
+                            f"one of {VALID_TEXTURE_SIZES}")
+                    if not is_valid_texture_height(h):
+                        raise OBJFormatError(
+                            f"Texture {map_kd} is {w}x{h}: the height must be "
+                            f"between 1 and 1024")
+                    mat_tex_size = [w, h]
+                    padded = next_texture_pow2(h)
+                    if padded == h:
                         print(f"  Texture: {map_kd} ({w}x{h})")
                     else:
-                        print(f"  Warning: {map_kd} has non-NDS size {w}x{h}, "
-                              f"using fallback {mat_tex_size}")
+                        print(f"  Texture: {map_kd} ({w}x{h}, trimmed T axis, "
+                              f"GPU sees {w}x{padded})")
                 else:
                     print(f"  Warning: texture not found: {tex_path}")
 
@@ -989,7 +1015,7 @@ if __name__ == "__main__":
     # Optional arguments
     parser.add_argument("--texture", default=None, type=int,
                         nargs="+", action="extend",
-                        help="texture width and height (e.g. '--texture 32 64')")
+                        help="texture width and height (e.g. '--texture 32 64'). The width must be a power of two; the height may be any value up to 1024, which is how a T-axis trimmed texture (ptexconv -tt) is declared")
     parser.add_argument("--translation", default=[0, 0, 0], type=float,
                         nargs="+", action="extend",
                         help="translate model by this value")
@@ -1044,11 +1070,13 @@ if __name__ == "__main__":
         if len(args.texture) != 2:
             print("Please, provide exactly 2 values to the --texture argument")
             sys.exit(1)
-        if not is_valid_texture_size(args.texture[0]):
+        if not is_valid_texture_width(args.texture[0]):
             print(f"Invalid texture width. Valid values: {VALID_TEXTURE_SIZES}")
             sys.exit(1)
-        if not is_valid_texture_size(args.texture[1]):
-            print(f"Invalid texture height. Valid values: {VALID_TEXTURE_SIZES}")
+        if not is_valid_texture_height(args.texture[1]):
+            print("Invalid texture height. It must be between 1 and 1024 (a "
+                  "height that isn't a power of two is a T-axis trimmed "
+                  "texture, see ptexconv -tt)")
             sys.exit(1)
         texture_size = args.texture
     elif not args.multi_material:

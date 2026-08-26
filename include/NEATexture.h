@@ -139,7 +139,13 @@ void NEA_MaterialSetTexGen(NEA_Material *tex, NEA_TextureFlags texgen);
 /// Textures with a height that isn't a power of two don't need to be resized,
 /// and they actually save VRAM space (you tell the GPU that the texture is
 /// bigger, but then you ignore the additional space, as it will be used by
-/// other textures).
+/// other textures). ptexconv generates textures in this form with its "-tt"
+/// option, which trims the T axis instead of padding it.
+///
+/// Because the GPU is told the padded height, it also wraps at the padded
+/// height. Don't pass NEA_TEXTURE_WRAP_T with a height that isn't a power of
+/// two: the rows past the real height hold whatever texture was allocated
+/// after this one. Keep the texture coordinates inside the real height.
 ///
 /// Textures with the 4x4 Texel format (NEA_TEX4X4) are normally split into two
 /// parts: one that goes into texture slots 0 or 2 and another one that goes
@@ -160,7 +166,8 @@ int NEA_MaterialTexLoadFAT(NEA_Material *tex, NEA_TextureFormat fmt,
 /// Loads a texture in Texel 4x4 format from the filesystem and assigns it to a
 /// material object.
 ///
-/// Width and height need to be powers of two.
+/// The width needs to be a power of two, the height only a multiple of 4 (up
+/// to 1024). See NEA_MaterialTex4x4Load().
 ///
 /// @param tex Material.
 /// @param sizeX (sizeX, sizeY) Texture size.
@@ -176,6 +183,16 @@ int NEA_MaterialTex4x4LoadFAT(NEA_Material *tex, int sizeX, int sizeY,
 /// Loads a texture in any format from a GRF file to a material and palette.
 ///
 /// The size and format are obtained from the GRF header.
+///
+/// That includes a height that isn't a power of two. "ptexconv -gt -og -tt"
+/// writes the trimmed rows to the GRF and stores the real height in the header,
+/// so such a file loads here with no extra work: the texture takes up only the
+/// rows it really has, and the GPU is told the next power of two. See
+/// NEA_MaterialTexLoad() for what that costs you.
+///
+/// In short, keep the texture coordinates inside the real height, and don't
+/// pass NEA_TEXTURE_WRAP_T: the GPU wraps at the height it was told, not at the
+/// real one.
 ///
 /// @param tex Material.
 /// @param pal Palette. If the format is 16 bit, nothing will be loaded here.
@@ -231,6 +248,9 @@ NEA_AsyncFile *NEA_MaterialTex4x4LoadFATAsync(NEA_Material *tex,
 /// Note: decoding a large compressed GRF runs as a single step in the worker
 /// thread and may cause a single dropped frame, unlike the chunked file read.
 ///
+/// A GRF with a trimmed height ("ptexconv -tt") works here as well, with the
+/// same rules as NEA_MaterialTexLoadGRF().
+///
 /// The material and palette must not be deleted until the load reaches
 /// NEA_ASYNC_DONE.
 ///
@@ -252,7 +272,13 @@ NEA_AsyncFile *NEA_MaterialTexLoadGRFAsync(NEA_Material *tex, NEA_Palette *pal,
 /// Textures with a height that isn't a power of two don't need to be resized,
 /// and they actually save VRAM space (you tell the GPU that the texture is
 /// bigger, but then you ignore the additional space, as it will be used by
-/// other textures).
+/// other textures). ptexconv generates textures in this form with its "-tt"
+/// option, which trims the T axis instead of padding it.
+///
+/// Because the GPU is told the padded height, it also wraps at the padded
+/// height. Don't pass NEA_TEXTURE_WRAP_T with a height that isn't a power of
+/// two: the rows past the real height hold whatever texture was allocated
+/// after this one. Keep the texture coordinates inside the real height.
 ///
 /// Textures with the 4x4 Texel format (NEA_TEX4X4) are normally split into two
 /// parts: one that goes into texture slots 0 or 2 and another one that goes
@@ -272,7 +298,12 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
 
 /// Loads a texture from RAM and assigns it to a material object.
 ///
-/// Width and height need to be powers of two.
+/// The width needs to be a power of two. The height only needs to be a
+/// multiple of 4 (up to 1024), because the texels are stored as rows of 4x4
+/// blocks, so a height that isn't a power of two can be stored trimmed
+/// (ptexconv -tt) and save VRAM the same way it does for other formats. As
+/// with NEA_MaterialTexLoad(), don't combine a trimmed height with
+/// NEA_TEXTURE_WRAP_T.
 ///
 /// @param tex Material.
 /// @param sizeX (sizeX, sizeY) Texture size.

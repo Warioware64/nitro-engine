@@ -84,6 +84,26 @@ static int ne_tex_raw_size(int size)
     return 0;
 }
 
+#ifdef NEA_DEBUG
+// A texture with a height that isn't a power of two is stored trimmed: only the
+// real rows are in VRAM, but the GPU is told the padded height. It therefore
+// wraps at the padded height, not at the real one, so repeating on the T axis
+// samples the rows past the end of the data, which belong to whatever texture
+// was allocated after this one.
+static void ne_warn_trimmed_wrap_t(int sizeY, NEA_TextureFlags flags)
+{
+    if ((ne_is_valid_tex_size(sizeY) != sizeY)
+        && (flags & NEA_TEXTURE_WRAP_T))
+    {
+        NEA_DebugPrint("NEA_TEXTURE_WRAP_T with a height that isn't a power of 2 "
+                       "(%d): the GPU wraps at %d and samples unallocated VRAM",
+                       sizeY, ne_is_valid_tex_size(sizeY));
+    }
+}
+#else
+#define ne_warn_trimmed_wrap_t(sizeY, flags) ((void)0)
+#endif
+
 // The provided address must be in VRAM_A
 static inline void *slot0_to_slot1(void *ptr)
 {
@@ -1124,13 +1144,23 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
         return ne_material_tex_stash(tex, NEA_TEX4X4, sizeX, sizeY, flags,
                                      texture02, texture1);
 
-    // For tex4x4 textures, both width and height must be valid
-    if ((ne_is_valid_tex_size(sizeX) != sizeX)
-        || (ne_is_valid_tex_size(sizeY) != sizeY))
+    // The width of a tex4x4 texture must be a power of 2. The height doesn't
+    // need to be one: the texels are stored as rows of 4x4 blocks, so a height
+    // that is a multiple of 4 can be stored trimmed (ptexconv -tt) and the GPU
+    // told the next power of 2 instead. See NEA_MaterialTexLoad().
+    if (ne_is_valid_tex_size(sizeX) != sizeX)
     {
-        NEA_DebugPrint("Width and height of tex4x4 textures must be a power of 2");
+        NEA_DebugPrint("Width of tex4x4 textures must be a power of 2");
         return 0;
     }
+
+    if ((sizeY < 4) || (sizeY & 3) || (ne_is_valid_tex_size(sizeY) == 0))
+    {
+        NEA_DebugPrint("Height of tex4x4 textures must be a multiple of 4, up to 1024");
+        return 0;
+    }
+
+    ne_warn_trimmed_wrap_t(sizeY, flags);
 
     // Check if a texture exists
     if (tex->texindex != NEA_NO_TEXTURE)
@@ -1267,6 +1297,17 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
         NEA_DebugPrint("Width of textures must be a power of 2");
         return 0;
     }
+
+    // ne_is_valid_tex_size() returns 0 for anything over 1024. Without this
+    // check ne_tex_raw_size(0) would encode an 8 pixel tall texture instead of
+    // failing, and the load would silently produce garbage.
+    if ((sizeY < 1) || (ne_is_valid_tex_size(sizeY) == 0))
+    {
+        NEA_DebugPrint("Height of textures must be between 1 and 1024");
+        return 0;
+    }
+
+    ne_warn_trimmed_wrap_t(sizeY, flags);
 
     // Check if a texture exists
     if (tex->texindex != NEA_NO_TEXTURE)

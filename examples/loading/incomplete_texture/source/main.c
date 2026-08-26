@@ -19,6 +19,17 @@
 //
 // - They save space in the final ROM, but you can achieve the same effect
 //   compressing them with LZSS compression, for example.
+//
+// "ptexconv -tt" converts an image straight into this form: it trims the T axis
+// instead of padding it up to a power of two. See examples/loading/trimmed_texture
+// for the same idea applied to a textured model, where obj2dl scales the texture
+// coordinates by the real height so one display list serves both forms, and the
+// trimmed_texture_model, trimmed_texture_animated, trimmed_texture_tex4x4 and
+// trimmed_texture_grf examples next to it for models, the compressed format and
+// GRF files.
+//
+// Whichever way the texture is produced, don't pass NEA_TEXTURE_WRAP_T with it:
+// the GPU wraps at the height it was told, not at the real one.
 
 #include <NEAMain.h>
 
