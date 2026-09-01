@@ -119,6 +119,23 @@ Features:
   can be mounted at once under names you choose. Build one with
   ``tools/npac/npac.py``. See ``examples/loading/npac_archive`` and
   ``examples/loading/npac_multi_archive``.
+- **Stylus pattern recognition (NEAPattern)**: turns a drawn shape into a
+  meaning, the way retail DS games did for handwriting entry and gesture
+  commands. ``NEA_PatternStrokesFeedTouch()`` collects the ink, and
+  ``NEA_PatternRecognize()`` ranks it against a bank of prototypes loaded from
+  a ``.neaptn`` file -- from NitroFS, FAT or an NPAC archive, like any other
+  asset. A gesture matches at any size and anywhere on the screen; the number
+  of strokes and the direction each is drawn in are what must agree. Three
+  algorithms trade cost against tolerance: **Light** compares stroke direction
+  only and needs no scratch memory, **Standard** weights direction by position
+  so it can tell a ``T`` from a ``+``, and **Fine** pairs the points with
+  dynamic programming so a hand that lingers part way through still matches.
+  Banks can also be built at run time from gestures the player draws
+  (``NEA_PatternBankCreate()`` / ``NEA_PatternBankAdd()``) and saved to a
+  filesystem. Author them with ``tools/pattern_editor/pattern_editor.py``,
+  whose live scores are the scores the DS produces --
+  ``tests/pattern_eval`` is what keeps the two evaluators identical. See
+  ``examples/other/pattern_recognition``.
 
 For features not covered by NEA (e.g. advanced 2D tilemaps, scrolling engines),
 you can also use libnds directly, or a library like `NFlib
@@ -382,6 +399,17 @@ Nitro Engine Advanced includes the following conversion tools under ``tools/``:
   ``auto`` unless ``--allow-huffman`` is given, because melonDS's default HLE
   BIOS decodes it to the wrong bytes without reporting an error -- hardware and
   a real BIOS dump are both fine.
+- **pattern_editor**: Draws, tests and packs the ``.neaptn`` pattern banks
+  ``NEA_PatternBankLoad()`` reads. ``pattern_editor.py`` is an interactive
+  editor whose test pane recognises what you draw with the same evaluator the
+  ARM9 runs, so a pair of shapes that will be confused on hardware is confused
+  here too. ``pattern_import.py`` converts a dictionary written as text.
+
+  .. code:: bash
+
+      python3 tools/pattern_editor/pattern_editor.py hero.neaptn
+      python3 tools/pattern_editor/pattern_import.py \
+          --input patterns.txt --output patterns.neaptn
 
 Blender Addon
 =============

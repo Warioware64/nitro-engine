@@ -285,6 +285,13 @@ static void ne_systems_end_all(void)
     if (NEA_Hw2DSystemEnd)
         NEA_Hw2DSystemEnd();
 
+    // Weak reference: the pattern system is only linked when the user
+    // recognises a gesture. It goes first because it owns nothing any other
+    // system is holding, so nothing depends on when it lets go.
+    extern void NEA_PatternSystemEnd(void) __attribute__((weak));
+    if (NEA_PatternSystemEnd)
+        NEA_PatternSystemEnd();
+
     // Weak reference: the NPAC module is only linked when the user mounts an
     // archive. It goes before the asset systems are torn down, because a
     // mounted archive is where some of them may still be reading from.

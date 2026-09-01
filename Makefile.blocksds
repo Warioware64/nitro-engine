@@ -274,6 +274,7 @@ install: all
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/npe_editor \
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/cell_editor \
 	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/npac \
+	                  $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/pattern_editor \
 					  $(BLOCKSDSEXT)/$(INSTALLNAME)/blender_addon
 	$(V)$(CP) -r include lib $(BLOCKSDSEXT)/$(INSTALLNAME)/
 	$(V)$(CP) -r blender_addon/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/blender_addon
@@ -284,6 +285,7 @@ install: all
 	$(V)$(CP) -r tools/npe_editor/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/npe_editor
 	$(V)$(CP) -r tools/cell_editor/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/cell_editor
 	$(V)$(CP) -r tools/npac/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/npac
+	$(V)$(CP) -r tools/pattern_editor/*.py $(BLOCKSDSEXT)/$(INSTALLNAME)/tools/pattern_editor
 	$(V)$(CP) -r licenses $(BLOCKSDSEXT)/$(INSTALLNAME)/
 
 clean:

@@ -135,16 +135,45 @@ The following tools are used to export models created on the PC to the NDS:
   This tool has been deprecated. You should only use it for the depth bitmap
   (DEPTHBMP), as this conversion isn't supported by any other tool.
 
+- **pattern_import**
+
+  Turns a stylus pattern dictionary written as text into the ``.neaptn``
+  binary ``NEA_PatternBankLoad()`` reads::
+
+      python3 tools/pattern_editor/pattern_import.py \
+          --input patterns.txt --output patterns.neaptn --normalize-size 64
+
+  One prototype per line, ``#`` comments ignored::
+
+      "T" 2 0 64 | 4,8 60,8 | 32,8 32,60 |
+       ^   ^ ^  ^   ^--- strokes, separated by |
+       |   | |  '------ the space these points are written in
+       |   | '--------- correction, 4096 = 1.0, biasing the score toward 1
+       |   '----------- kind, a bitmask matched against the recognition mask
+       '--------------- the meaning; lines sharing a name share a code
+
+  Several lines may share a name, and usually should: that is how one shape
+  gets a prototype per stroke order, or per the way different hands draw it.
+  ``--export`` goes the other way, which is how a gesture trained on the DS
+  with ``NEA_PatternBankAdd()`` gets back into a dictionary you can edit.
+
+  ``pattern_format.py`` is the reader/writer, and its module docstring is the
+  format specification. It is also a full Python mirror of the recognizer, and
+  ``source/NEAPattern.c`` computes the same integers -- ``tests/pattern_eval``
+  is what keeps the two honest.
+
 Editors
 =======
 
-Two of the tools are interactive rather than command-line. Both need Python's
-``tkinter`` and `Pillow <https://pypi.org/project/Pillow/>`_::
+Four of the tools are interactive rather than command-line. All of them need
+Python's ``tkinter``; the three that preview artwork also need `Pillow
+<https://pypi.org/project/Pillow/>`_::
 
     pip install Pillow
 
 Pillow is what lets their previews rotate, scale, tint and alpha-composite real
-artwork, none of which Tk can do on its own.
+artwork, none of which Tk can do on its own. ``pattern_editor`` draws nothing
+but lines and needs only Tk.
 
 - **npe_editor**
 
@@ -188,8 +217,32 @@ artwork, none of which Tk can do on its own.
   that path builds the bank only -- run ``cell_import.py`` to get the artwork
   too.
 
-None of these three formats records the artwork it animates -- each names a
-material that the runtime resolves later -- so the editors take the image
+- **pattern_editor**
+
+  Edits a ``.neaptn`` stylus pattern bank: draw a prototype with the mouse the
+  way it would be drawn with a stylus, and the test pane recognises it against
+  the rest of the bank and lists the ranked scores::
+
+      python3 tools/pattern_editor/pattern_editor.py hero.neaptn
+
+  Those scores come from ``pattern_format.recognize()``, which is the
+  evaluator ``NEAPattern.c`` implements and ``tests/pattern_eval`` pins them
+  together -- so "will these two shapes be told apart?" is answered while
+  authoring rather than on hardware. The circles drawn over the ink are the
+  points the matching actually compared, which is what makes a resample
+  threshold set too high visible rather than merely suspected, and the
+  selected prototype is ghosted underneath so a new one can be traced over it.
+
+  **Bank → Confusion report** scores every prototype against the bank and
+  lists the narrowest margins first, which is the quickest way to find the
+  pair a dictionary will get wrong.
+
+  It reads and writes the ``pattern_import`` text syntax through
+  **File → Import text** and **File → Export text**.
+
+The first three formats record none of the artwork they animate -- each names
+a material that the runtime resolves later -- so those editors take the image
 separately, through **File → Import image**, and remember it in a
 ``<file>.editor.json`` sidecar. The binary itself is never touched by that, and
-losing the sidecar costs the preview and nothing else.
+losing the sidecar costs the preview and nothing else. ``pattern_editor`` has
+no such sidecar: a pattern bank contains the only thing it draws.

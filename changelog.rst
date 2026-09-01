@@ -4,6 +4,61 @@ Changelog
 Unreleased
 ----------
 
+**New: stylus pattern recognition.** ``NEAPattern.h`` turns a drawn shape into
+a meaning -- a gesture, a digit, a letter -- the way retail DS games did for
+handwriting entry and gesture commands. ``NEA_PatternStrokesFeedTouch()``
+collects the ink a frame at a time and ``NEA_PatternRecognize()`` ranks it
+against a bank of prototypes.
+
+- **A gesture matches at any size and anywhere on the screen.** The whole shape
+  is fitted to the bank's coordinate space before anything is compared. What is
+  not forgiven is the number of strokes, which must match exactly, or the
+  direction each one is drawn in -- both are information, and throwing them
+  away would make a ``6`` and a ``9`` the same shape.
+- **Three algorithms, chosen per recognizer.** ``NEA_PATTERN_LIGHT`` compares
+  stroke direction only: no scratch memory at all, and blind to where the
+  strokes sit, so it cannot tell a ``T`` from a ``+``. ``NEA_PATTERN_STANDARD``
+  weights direction agreement by how close the points are and tells them apart,
+  still with no scratch. ``NEA_PATTERN_FINE`` pairs the points with dynamic
+  programming rather than assuming both shapes were drawn at proportional
+  speeds, so a hand that lingers part way through still matches; its tables are
+  allocated the first time it is selected, so a ROM that never asks for it
+  never pays the 12.5 KB.
+- **Four ways to reduce a gesture** before matching, defaulting to a
+  Ramer-Douglas-Peucker pass that keeps the points carrying the shape.
+  ``NEA_PatternRecognizerGetInputPoints()`` hands back exactly what the
+  matching compared, which is what makes a threshold set too high visible
+  rather than merely suspected.
+- **Banks load like any other asset.** ``NEA_PatternBankLoadFAT()`` takes a
+  path, so a bank comes off NitroFS, off FAT, or out of a mounted NPAC archive
+  with no new code. Names live in the file rather than in a parallel table the
+  application has to keep in step.
+- **Patterns can also be trained on the DS.** ``NEA_PatternBankCreate()`` and
+  ``NEA_PatternBankAdd()`` build a bank from gestures the player draws, and
+  ``NEA_PatternBankSaveFAT()`` keeps it.
+- **Callers allocate nothing.** A bank owns its own preprocessed features and a
+  recognizer owns its scratch, rather than making the caller size and hold four
+  separate buffers.
+- **Tools**: ``tools/pattern_editor/`` -- ``pattern_editor.py`` (a tkinter
+  editor whose test pane recognises what you draw, with a confusion report over
+  the whole bank), ``pattern_import.py`` (a dictionary written as text, in
+  either direction) and ``pattern_format.py``, whose module docstring is the
+  format spec. It needs Tk but not Pillow: it draws only lines.
+- **The editor's scores are the DS's scores.** ``pattern_format.py`` is a full
+  Python mirror of the runtime, down to the fixed point: ``mulf32`` is an
+  arithmetic shift on both sides, the DS divider truncates toward zero the way
+  C does, and the square root floors. ``atan2`` is the one primitive libnds
+  does not have and whose table the host cannot mirror, so it is generated from
+  the Python side into ``source/NEAPatternAtan.h``.
+- **Tests**: ``tests/pattern_eval`` runs 14 gestures through every algorithm,
+  every resampling method and a sweep of thresholds and kind masks -- 672 cases,
+  4800 checks -- comparing the reduced point set and the whole ranked result
+  list against what the Python evaluator says. The two agree exactly.
+- **Example**: ``examples/other/pattern_recognition``, which recognises digits
+  and gestures, draws the winning prototype next to the points it actually
+  compared, and lets you switch algorithms to watch Light score a ``T`` and a
+  ``+`` identically while Standard separates them.
+
 **New: NPAC archive containers.** ``NEANPAC.h`` packs a directory tree into one
 file, the way NARC does in retail games, and mounts it as a drive of its own:
 ``NEA_NpacMount("levels", "nitro:/levels.npac")`` makes ``levels:/robot.bin`` a
