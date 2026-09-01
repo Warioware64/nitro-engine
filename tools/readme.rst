@@ -36,6 +36,32 @@ The following tools are used to export models created on the PC to the NDS:
   — ``b3MeshData`` opens with a ``uint64_t`` and the ARM9 reads one with
   ``LDRD``, which faults on a 4-aligned address.
 
+- **npac**
+
+  Packs a directory tree into an NPAC archive container -- one file holding a
+  whole asset group, mounted at run time by ``NEA_NpacMount()`` as a drive of
+  its own, so ``levels:/robot.bin`` works anywhere a path does::
+
+      python3 npac.py create --input assets/ --output levels.npac
+      python3 npac.py list    --input levels.npac
+      python3 npac.py extract --input levels.npac --output out/
+
+  ``--compress`` selects the codec: ``auto`` (the default) tries each and keeps
+  whichever wins, ``lzss`` / ``huffman`` / ``rle`` force one, ``none`` stores
+  everything. The compression itself is done by the Wonderful Toolchain
+  encoders, so the streams carry the BIOS headers the DS decompresses; the
+  runtime inflates a member when it is opened.
+
+  Huffman is not among the codecs ``auto`` considers unless ``--allow-huffman``
+  is passed. It is correct on hardware, but melonDS's HLE BIOS -- what it uses
+  by default -- decodes it to the wrong bytes and reports nothing, and Huffman
+  seldom beats LZ77 on DS assets, so choosing it automatically would trade a
+  rare few percent for a silent corruption nobody asked for.
+
+  ``npac_format.py`` is the reader/writer, and its module docstring is the
+  format specification. ``source/NEANPAC.c`` reads exactly what it writes --
+  ``tests/npac_fs`` is what keeps the two honest.
+
 - **md5_to_dsma**
 
   Converts MD5 models with skeletal animation (md5mesh and md5anim files) into a

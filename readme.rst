@@ -108,6 +108,17 @@ Features:
   tkinter editor with a live 2D preview that runs the same simulation logic
   as the runtime. See the ``examples/effects/particles`` example for fire /
   smoke / explosion presets.
+- **Archive containers (NEANPAC / NPAC)**: packs a directory tree into one
+  file, the way NARC does in retail games, and mounts it as a drive:
+  ``NEA_NpacMount("levels", "nitro:/levels.npac")`` makes ``levels:/robot.bin``
+  a path like any other. It registers with libnds as a ``device_io``
+  filesystem, so ``fopen()``, ``opendir()``, ``stat()`` and every existing
+  ``NEA_*LoadFAT()`` call reach it without changing -- there are no new loaders.
+  Members are compressed individually by the packer and inflated transparently
+  on ``open()``, so ``stat()`` reports the decompressed size. Several archives
+  can be mounted at once under names you choose. Build one with
+  ``tools/npac/npac.py``. See ``examples/loading/npac_archive`` and
+  ``examples/loading/npac_multi_archive``.
 
 For features not covered by NEA (e.g. advanced 2D tilemaps, scrolling engines),
 you can also use libnds directly, or a library like `NFlib
@@ -357,6 +368,20 @@ Nitro Engine Advanced includes the following conversion tools under ``tools/``:
   ``--collision-b3`` writes the same bones as Box3D shapes (``.b3col``).
 - **img2ds**: Converts images to NDS textures and palettes (deprecated, except
   for DEPTHBMP conversion).
+- **npac**: Packs a directory tree into an NPAC archive container, which
+  ``NEA_NpacMount()`` mounts as a drive at run time.
+
+  .. code:: bash
+
+      python3 tools/npac/npac.py create --input assets/ --output levels.npac
+
+  ``extract`` and ``list`` go the other way. Compression is per file and is
+  done by the Wonderful Toolchain encoders (``wf-nnpack-lzss``,
+  ``wf-nnpack-huffman``, ``wf-nnpack-rle``); ``--compress auto``, the default,
+  tries each and stores the file when none of them wins. Huffman is left out of
+  ``auto`` unless ``--allow-huffman`` is given, because melonDS's default HLE
+  BIOS decodes it to the wrong bytes without reporting an error -- hardware and
+  a real BIOS dump are both fine.
 
 Blender Addon
 =============

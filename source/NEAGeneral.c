@@ -285,6 +285,13 @@ static void ne_systems_end_all(void)
     if (NEA_Hw2DSystemEnd)
         NEA_Hw2DSystemEnd();
 
+    // Weak reference: the NPAC module is only linked when the user mounts an
+    // archive. It goes before the asset systems are torn down, because a
+    // mounted archive is where some of them may still be reading from.
+    extern void NEA_NpacSystemEnd(void) __attribute__((weak));
+    if (NEA_NpacSystemEnd)
+        NEA_NpacSystemEnd();
+
     NEA_GUISystemEnd();
     NEA_SpriteSystemEnd();
     NEA_PhysicsSystemEnd();

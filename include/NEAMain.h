@@ -56,6 +56,7 @@ extern "C" {
 #include "NEACell.h"
 #include "NEAParticle.h"
 #include "NEAPostFX.h"
+#include "NEANPAC.h"
 
 /// Major version of Nitro Engine Advanced
 #define NITRO_ENGINE_ADVANCED_MAJOR (2)

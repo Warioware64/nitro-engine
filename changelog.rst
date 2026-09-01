@@ -4,6 +4,48 @@ Changelog
 Unreleased
 ----------
 
+**New: NPAC archive containers.** ``NEANPAC.h`` packs a directory tree into one
+file, the way NARC does in retail games, and mounts it as a drive of its own:
+``NEA_NpacMount("levels", "nitro:/levels.npac")`` makes ``levels:/robot.bin`` a
+path like any other. Hundreds of loose assets stop wasting ROM on per-file
+NitroFS padding, and members can be compressed, which loose files had nowhere
+to put.
+
+- **Nothing above it had to change.** The archive is registered with libnds as
+  a ``device_io`` filesystem, so ``fopen()``, ``opendir()`` and ``stat()`` reach
+  it, and so does every existing ``NEA_*LoadFAT()`` function. There are no new
+  loaders -- ``NEA_ModelLoadStaticMeshFAT(Model, "levels:/robot.bin")`` is the
+  whole integration.
+- **Per-file compression, inflated on open.** The packer picks a codec per file
+  and keeps it only when it wins; the runtime decompresses on ``open()``, so
+  ``stat()`` and ``fseek(SEEK_END)`` report the decompressed size and callers
+  size their buffers correctly. Stored members are read straight out of the
+  archive with no RAM cost.
+- **Several archives at once**, under names the caller chooses. One libnds
+  device serves all of them, which it has to: libnds allows five devices and
+  reserves three, so a device per archive would cap the whole thing at two.
+- **The index lives in RAM, the data stays on disk.** Path lookup, ``stat()``
+  and ``readdir()`` touch no I/O at all, unlike libnds' own NitroFS, which
+  re-walks the FNT off the card through a 512 byte window.
+- **The container is NARC's**, with an ``NPAC`` magic and one extra chunk for
+  the compression table, so a plain NARC mounts too.
+- **Tools**: ``tools/npac/`` -- ``npac.py`` (``create`` / ``extract`` /
+  ``list``) and ``npac_format.py``, whose module docstring is the format spec.
+  Compression is done by the Wonderful Toolchain encoders. Huffman is supported
+  but left out of ``--compress auto`` unless ``--allow-huffman`` is given,
+  because melonDS's default HLE BIOS decodes it to the wrong bytes without
+  saying so; hardware and a real BIOS dump are both fine.
+- **Tests**: ``tests/npac_fs`` mounts a generated archive and checks it against
+  a table written by the Python side -- one member per compression method, an
+  empty file, a size that is neither word-aligned nor a single block, a
+  127 character name, a three-deep directory, plus the seeks, listings, error
+  cases, ``chdir()`` and unmount/remount.
+- **Examples**: ``examples/loading/npac_archive`` (a model and its texture
+  loaded from an archive with the ordinary calls) and
+  ``examples/loading/npac_multi_archive`` (two archives mounted at once, a
+  directory tree walked with ``readdir()``, ``chdir()`` into an archive, and an
+  unmount).
+
 **New: a cell animation system.** ``NEACell.h`` adds retail-style 2D cell
 animation -- a cell is a list of parts, a sequence steps through cells with
 per-frame durations and an optional scale/rotate/translate -- driven from one
