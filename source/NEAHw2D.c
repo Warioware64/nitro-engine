@@ -1578,7 +1578,28 @@ void NEA_Hw2DOBJSetRotScaleI(NEA_Hw2DEngine engine, int rot_index,
                               int angle, int32_t sx, int32_t sy)
 {
     OamState *oam = (engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
-    oamRotateScale(oam, rot_index, angle, sx, sy);
+
+    // Translate NEA's units into libnds's. A full turn is 512 here and
+    // 1 << 15 there, and oamRotateScale() wants the *inverse* scale in 1.7.8:
+    // the affine entry maps screen pixels back to texture pixels, so making a
+    // sprite twice as big means halving the step through its graphics.
+    int lnds_angle = (angle << 6) & 0xFFFF;
+    if (lnds_angle > 32767)
+        lnds_angle -= 65536;
+
+    int inv_sx = (sx != 0) ? (int)(((int64_t)256 * 4096) / sx) : (256 << 8);
+    int inv_sy = (sy != 0) ? (int)(((int64_t)256 * 4096) / sy) : (256 << 8);
+
+    oamRotateScale(oam, rot_index, lnds_angle, inv_sx, inv_sy);
+}
+
+void NEA_Hw2DOBJSetAffineMatrix(NEA_Hw2DEngine engine, int rot_index,
+                                 int hdx, int hdy, int vdx, int vdy)
+{
+    NEA_Assert(rot_index >= 0 && rot_index < 32, "Affine index out of range");
+
+    OamState *oam = (engine == NEA_ENGINE_MAIN) ? &oamMain : &oamSub;
+    oamAffineTransformation(oam, rot_index, hdx, hdy, vdx, vdy);
 }
 
 void NEA_Hw2DOBJUpdate(NEA_Hw2DEngine engine)
@@ -1610,13 +1631,20 @@ void NEA_Hw2DOBJUpdate(NEA_Hw2DEngine engine)
         if (!o->used)
             continue;
 
+        // Step to the current frame. gfx_size is bytes and gfx is a u16 *,
+        // hence the halving. Without this NEA_Hw2DOBJSetFrame() stored a
+        // number that nothing ever read, and a flipbook never advanced.
+        u16 *gfx = o->gfx;
+        if (gfx != NULL && o->frame > 0 && o->gfx_size > 0)
+            gfx += ((size_t)o->frame * (size_t)o->gfx_size) / 2;
+
         oamSet(oam, o->oam_index,
                o->x, o->y,
                o->priority,
                o->palette_slot,
                ne_hw2d_obj_size(o->nea_size),
                ne_hw2d_obj_color(o->color),
-               o->gfx,
+               gfx,
                o->affine_index,
                o->double_size,
                !o->visible,  // oamSet: hide = true to hide

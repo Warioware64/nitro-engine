@@ -154,6 +154,19 @@ void NEA_CameraRotateFree(NEA_Camera *cam, int rx, int ry, int rz);
 int NEA_CameraSystemReset(int max_cameras);
 
 /// Ends camera system and all memory used by it.
+/// Camera-facing basis vectors, for drawing a billboard.
+///
+/// Returns the world-space right and up vectors of the plane that faces the
+/// camera: forward is normalized from @p cam, crossed with the camera's up to
+/// get right, then crossed back to re-orthogonalise up.
+///
+/// @param cam   The camera to face. NULL returns false and touches nothing.
+/// @param right Output right vector, f32.
+/// @param up    Output up vector, f32.
+/// @return true if a basis was produced.
+bool NEA_CameraBillboardBasis(const NEA_Camera *cam, int32_t right[3],
+                              int32_t up[3]);
+
 void NEA_CameraSystemEnd(void);
 
 /// Deletes a camera object.

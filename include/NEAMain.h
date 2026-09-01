@@ -53,6 +53,7 @@ extern "C" {
 #include "NEASound.h"
 #include "NEAAnimMat.h"
 #include "NEAHw2D.h"
+#include "NEACell.h"
 #include "NEAParticle.h"
 #include "NEAPostFX.h"
 

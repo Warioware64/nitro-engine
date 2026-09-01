@@ -63,6 +63,44 @@ The following tools are used to export models created on the PC to the NDS:
   frame from the animated skeleton — a single rigid body cannot deform, so a
   hitbox set is bodies, not several shapes on one body.
 
+- **cell_pack** and **cell_import**
+
+  The two ways to get a ``.neacell`` cell bank, in ``tools/cell_editor/``.
+
+  ``cell_pack.py`` slices a PNG spritesheet, trims each frame to its alpha
+  bounding box, grows it to one of the twelve hardware OBJ sizes, packs the
+  result into a power-of-two atlas and writes the bank plus every piece of
+  artwork the runtime needs::
+
+      python3 tools/cell_editor/cell_pack.py sheet.png --grid 8x4 \
+          --out walk --fps 12 --anchor-bottom
+
+  ``cell_import.py`` does the same job starting from retail NCER/NANR/NCGR/NCLR
+  files, decompressing the LZ, RLE or Huffman wrapper they usually carry::
+
+      python3 tools/cell_editor/cell_import.py --ncer c.NCER --nanr c.NANR \
+          --ncgr c.NCGR --nclr c.NCLR --out chars
+
+  The atlas is packed to the smallest power-of-two rectangle that fits, sizing
+  width and height independently -- the DS does, and rounding both up to a
+  square costs texture VRAM for nothing.
+
+  Both write five files: the bank, a linear atlas texture and its palette for
+  the 3D backends, and a ``.ncgfx`` tile blob plus ``.ncpal`` for the hardware
+  OBJ backend. The same pixels in two orders, because the two renderers want
+  them differently and quantising twice would let them disagree about what a
+  colour index means. The ``.ncgfx`` has to stay resident in main RAM: it is
+  what ``NEA_CellAnimBindOAM()`` streams each frame's tiles out of.
+
+  ``--bank-ext .bin`` writes the bank with a ``.bin`` extension, which is what
+  an example needs, because the build only runs ``bin2c`` over ``*.bin``.
+
+  Neither builds a **multi-cell** -- an entity composed of several sequences
+  running on their own clocks. There is no grid or retail file that expresses
+  one, so it comes from the editor or from a script calling ``cell_format``
+  directly; ``examples/2d_system/cell_composition/graphics/make_assets.py`` is
+  a worked example of the latter.
+
 - **img2ds**
 
   Converts images in several formats to NDS textures and palettes. It is
@@ -103,8 +141,29 @@ artwork, none of which Tk can do on its own.
   Its evaluator is checked frame-for-frame against the C runtime by
   ``tests/animmat_eval``, which is what makes the preview trustworthy.
 
-Neither format records the artwork it animates -- both name a material that the
-runtime resolves later -- so the editors take the image separately, through
-**File → Import image**, and remember it in a ``<file>.editor.json`` sidecar.
-The binary itself is never touched by that, and losing the sidecar costs the
-preview and nothing else.
+- **cell_editor**
+
+  Edits a ``.neacell`` cell bank: composes cells by dragging parts, builds
+  sequences on a timeline whose frame widths are their durations, and animates
+  parts with keyframe tracks over a parent hierarchy::
+
+      python3 tools/cell_editor/cell_editor.py hero.neacell
+
+  Its preview has a backend switch. **3D quads** shows full fidelity;
+  **hardware OBJ** drops everything the OBJ hardware could not draw and lists
+  what it dropped, so "will this still work as sprites?" is answered while
+  authoring rather than at build time; **billboard** foreshortens the plane
+  with a yaw slider, which is the one thing about that backend easy to get
+  wrong without noticing. All three run
+  ``cell_format.evaluate_sequence()``, which ``tests/cell_eval`` checks
+  tick-for-tick against ``NEACell.c``.
+
+  It can also import retail NCER/NANR through **File → Import retail**, though
+  that path builds the bank only -- run ``cell_import.py`` to get the artwork
+  too.
+
+None of these three formats records the artwork it animates -- each names a
+material that the runtime resolves later -- so the editors take the image
+separately, through **File → Import image**, and remember it in a
+``<file>.editor.json`` sidecar. The binary itself is never touched by that, and
+losing the sidecar costs the preview and nothing else.

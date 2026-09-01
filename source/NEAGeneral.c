@@ -273,6 +273,13 @@ void NEA_SetFov(int fovValue)
 
 static void ne_systems_end_all(void)
 {
+    // Weak reference: the cell system is only linked when user calls
+    // NEA_Cell*. It goes before Hw2D because a bound instance owns OAM
+    // entries, OBJ VRAM and palette slots that Hw2D is about to tear down.
+    extern void NEA_CellSystemEnd(void) __attribute__((weak));
+    if (NEA_CellSystemEnd)
+        NEA_CellSystemEnd();
+
     // Weak reference: Hw2D module is only linked when user calls NEA_Hw2D*
     extern void NEA_Hw2DSystemEnd(void) __attribute__((weak));
     if (NEA_Hw2DSystemEnd)
@@ -2058,7 +2065,7 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if (ne_two_pass_enabled && ne_two_pass_frame != 0)
         flags &= ~(NEA_UPDATE_ANIMATIONS | NEA_UPDATE_PHYSICS
                    | NEA_UPDATE_ANIM_MAT | NEA_UPDATE_PARTICLES
-                   | NEA_UPDATE_PHYS3D);
+                   | NEA_UPDATE_PHYS3D | NEA_UPDATE_CELL);
 
     // One completed frame, counted here rather than at the end of the function
     // because the NEA_CAN_SKIP_VBL path below returns early -- and a frame that
@@ -2091,6 +2098,13 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     extern void NEA_AnimMatUpdateAll(void) __attribute__((weak));
     if ((flags & NEA_UPDATE_ANIM_MAT) && NEA_AnimMatUpdateAll)
         NEA_AnimMatUpdateAll();
+
+    // Weak reference: cell animations are only linked when the user calls
+    // any NEA_Cell* function. This runs before the HW2D flush below, so a
+    // pose pushed into OAM this frame is the one that gets written out.
+    extern void NEA_CellAnimUpdateAll(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_CELL) && NEA_CellAnimUpdateAll)
+        NEA_CellAnimUpdateAll();
 
     // Weak reference: Hw2D OAM flush is only linked when
     // the user calls any NEA_Hw2D* function.

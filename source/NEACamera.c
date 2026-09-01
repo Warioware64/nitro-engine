@@ -445,3 +445,29 @@ void NEA_ViewScaleI(int x, int y, int z)
     MATRIX_SCALE = y;
     MATRIX_SCALE = z;
 }
+
+bool NEA_CameraBillboardBasis(const NEA_Camera *cam, int32_t right[3],
+                              int32_t up[3])
+{
+    if (cam == NULL)
+        return false;
+
+    // forward = normalize(to - from)
+    int32_t f[3] = {
+        cam->to[0] - cam->from[0],
+        cam->to[1] - cam->from[1],
+        cam->to[2] - cam->from[2]
+    };
+    normalizef32(f);
+
+    int32_t up_cam[3] = { cam->up[0], cam->up[1], cam->up[2] };
+
+    // right = normalize(cross(forward, up))
+    crossf32(f, up_cam, right);
+    normalizef32(right);
+
+    // up' = cross(right, forward) -- re-orthogonalize.
+    crossf32(right, f, up);
+
+    return true;
+}

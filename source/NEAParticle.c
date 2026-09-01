@@ -933,33 +933,13 @@ void NEA_ParticleUpdateAll(void)
 
 // Compute world-space right and up vectors for billboarding from the camera.
 // Returns false if no camera was set.
+//
+// The maths moved to NEA_CameraBillboardBasis() when the cell system needed
+// the same basis; this stays as the emitter's entry point so the camera it
+// uses is still the one NEA_ParticleSystemSetCamera() stored.
 static bool ne_billboard_basis(int32_t right[3], int32_t up[3])
 {
-    if (ne_part_camera == NULL)
-        return false;
-
-    // forward = normalize(to - from)
-    int32_t f[3] = {
-        ne_part_camera->to[0] - ne_part_camera->from[0],
-        ne_part_camera->to[1] - ne_part_camera->from[1],
-        ne_part_camera->to[2] - ne_part_camera->from[2]
-    };
-    normalizef32(f);
-
-    int32_t up_cam[3] = {
-        ne_part_camera->up[0],
-        ne_part_camera->up[1],
-        ne_part_camera->up[2]
-    };
-
-    // right = normalize(cross(forward, up))
-    crossf32(f, up_cam, right);
-    normalizef32(right);
-
-    // up' = cross(right, forward) — re-orthogonalize.
-    crossf32(right, f, up);
-
-    return true;
+    return NEA_CameraBillboardBasis(ne_part_camera, right, up);
 }
 
 // ARM mode: 8 __aeabi_lmul calls in Thumb, paid per emitter per frame.

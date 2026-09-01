@@ -507,6 +507,11 @@ void NEA_Hw2DOBJSetAffine(NEA_Hw2DOBJ *obj, int rot_index, bool double_size);
 
 /// Set rotation and scale for an affine matrix.
 ///
+/// The units are NEA's, not libnds's: the angle runs 0-511 like
+/// NEA_SpriteSetRot(), and the scales are ordinary f32 factors where 4096 is
+/// 1.0 and a larger number makes the sprite bigger. The conversion to the
+/// inverse 1.7.8 matrix the hardware actually stores happens here.
+///
 /// @param engine    NEA_ENGINE_MAIN or NEA_ENGINE_SUB.
 /// @param rot_index Affine matrix index (0-31).
 /// @param angle     Rotation angle (0-511, 512 = full rotation).
@@ -514,6 +519,25 @@ void NEA_Hw2DOBJSetAffine(NEA_Hw2DOBJ *obj, int rot_index, bool double_size);
 /// @param sy        Vertical scale (f32 fixed-point, 4096 = 1.0).
 void NEA_Hw2DOBJSetRotScaleI(NEA_Hw2DEngine engine, int rot_index,
                               int angle, int32_t sx, int32_t sy);
+
+/// Write an affine matrix directly.
+///
+/// Use this when the transform is not an angle plus a per-axis scale -- a
+/// shear, or a bone chain's composed 2x2, neither of which
+/// NEA_Hw2DOBJSetRotScaleI() can express.
+///
+/// The matrix the hardware stores maps screen pixels *back* to texture pixels,
+/// so it is the inverse of the transform you want to see, in 1.7.8 fixed point
+/// (256 = 1.0).
+///
+/// @param engine    NEA_ENGINE_MAIN or NEA_ENGINE_SUB.
+/// @param rot_index Affine matrix index (0-31).
+/// @param hdx       Change in texture x per screen x.
+/// @param hdy       Change in texture y per screen x.
+/// @param vdx       Change in texture x per screen y.
+/// @param vdy       Change in texture y per screen y.
+void NEA_Hw2DOBJSetAffineMatrix(NEA_Hw2DEngine engine, int rot_index,
+                                 int hdx, int hdy, int vdx, int vdy);
 
 /// Flush OAM data for a specific engine. Called internally during VBL.
 void NEA_Hw2DOBJUpdate(NEA_Hw2DEngine engine);

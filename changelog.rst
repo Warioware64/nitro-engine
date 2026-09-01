@@ -4,6 +4,130 @@ Changelog
 Unreleased
 ----------
 
+**New: a cell animation system.** ``NEACell.h`` adds retail-style 2D cell
+animation -- a cell is a list of parts, a sequence steps through cells with
+per-frame durations and an optional scale/rotate/translate -- driven from one
+``.neacell`` file onto three renderers.
+
+- **Three backends, one format.** ``NEA_CellAnimDraw2D()`` draws textured quads
+  in screen space through the 3D engine, ``NEA_CellAnimDrawBillboard()`` draws
+  the same pose as camera-facing quads in a 3D scene, and
+  ``NEA_CellAnimApplyOAM()`` drives hardware OBJ sprites. All three consume the
+  same resolved pose, so they cannot drift apart.
+- **Beyond retail**, three things NCER and NANR could not do: per-part
+  scale/rotate/translate keyframe tracks with interpolation, a parent hierarchy
+  so a chain of parts composes, and per-part colour and alpha on the 3D paths.
+  Sequences default to stepped playback, so an imported NANR plays exactly as
+  it did in the game it came from.
+- **Multi-cell.** ``NEA_CellAnimPlayMulti()`` seats one child instance per node,
+  each running its own clock, which is what retail NMCR composition was for.
+- **The hardware backend streams graphics.** Only the tiles the current frame
+  shows live in OBJ VRAM; the companion ``.ncgfx`` stays in main RAM and each
+  part's tiles are copied in as the cell changes, and only when they actually
+  change. That is NCER's VRAM-transfer animation, at part granularity, and it
+  is what lets a cell bank far larger than the OBJ bank play.
+- **New update flag** ``NEA_UPDATE_CELL`` (``BIT(13)``), dispatched through a
+  weak reference like the other opt-in systems, so a ROM that never animates a
+  cell links none of this. It is stripped on the right pass in two-pass mode,
+  because it is scene state.
+- **Tools**: ``tools/cell_editor/`` -- ``cell_editor.py`` (tkinter/Pillow
+  editor with a backend-switchable preview), ``cell_format.py`` (read/write
+  plus a Python mirror of the C evaluator), ``cell_pack.py`` (PNG spritesheet
+  to ``.neacell`` plus both backends' artwork) and ``cell_import.py`` (real
+  NCER/NANR/NCGR/NCLR, including the LZ/RLE/Huffman wrappers retail files
+  usually carry).
+- **Tests**: ``tests/cell_eval`` checks the C evaluator against the Python one
+  tick for tick across every sequence kind, playback mode, storage mode and
+  interpolation mode, plus a three-deep hierarchy and a multi-cell with coprime
+  node clocks. ``tests/cell_import`` round-trips synthesised retail files.
+- **Examples**: ``examples/2d_system/cell_anim`` (quads),
+  ``examples/hw2d/cell_anim_oam`` (both backends at once, one per screen),
+  ``examples/2d_system/cell_billboard`` (billboards in a 3D scene) and
+  ``examples/2d_system/cell_composition`` (a four-node multi-cell, drawn as
+  quads and as hardware sprites at the same time, with per-node control).
+
+**VRAM: the atlas packer no longer rounds up to a square.**
+
+``cell_pack.py`` and ``cell_import.py`` chose a square power-of-two atlas, so
+eight 32x32 frames landed in a 128x128 texture when 128x64 would do. The DS
+sizes the two axes of a texture independently, and the two examples using that
+sheet were each paying twice the texture VRAM they needed -- the composition
+example four times. Width and height are now chosen independently, smallest
+area first: the ``cell_anim`` atlas went from 8 KB to 4 KB and the
+``cell_composition`` one from 8 KB to 2 KB.
+
+The examples also stopped hardcoding the atlas dimensions and read them from
+the bank, which is what makes repacking the art safe.
+
+There is no way to draw a textured polygon out of main RAM -- the geometry
+engine samples texture VRAM and nothing else -- so a cell drawn as quads has to
+have its atlas resident. The hardware OBJ backend does not: its graphics stream
+a frame at a time out of the ``.ncgfx`` blob in main RAM.
+``examples/hw2d/cell_anim_oam`` now demonstrates exactly that, with a
+RAM-backed atlas that can be evicted from texture VRAM with A: the quads
+vanish, the sprites keep animating, and the free-VRAM figure goes back up by
+the whole size of the atlas. A cell system drawn only as sprites should not
+create the material at all.
+
+Relatedly, the 3D backends now skip a part whose material has been evicted,
+rather than drawing it as an untextured block of flat colour.
+
+**A hardware-2D ordering trap, found while writing those examples.**
+``consoleDemoInit()`` assigns the whole sub display register. That clears the
+sprite-enable bit, which is obvious, and also resets OBJ mapping from 1D back
+to 2D, which is not: a sprite whose tiles were laid out for 1D then draws only
+its first row of tiles and looks like a sliver of itself. Both examples now run
+``consoleDemoInit()`` *before* ``NEA_Hw2DInit()`` so that ``oamInit()`` has the
+last word on the OBJ bits, and put the console's background layer back
+afterwards.
+
+**Two cell-system fixes after the first pass.**
+
+- ``NEA_CellAnimSetTransformI()`` rotated and scaled about the *cell origin*
+  rather than about the cell. For a bank whose origin is not its centre --
+  anything packed with ``cell_pack --anchor-bottom``, where the origin is at a
+  character's feet -- spinning swung the sprite around in an arc instead of
+  turning it in place. Both now pivot on the instance's anchor, which is the
+  bounding-box centre by default and is the same point the billboard backend
+  stands the cell on. ``NEA_CellAnimSetAnchor()`` therefore now means one thing
+  on every backend instead of being billboard-only.
+
+  The instance transform was runtime state that the Python mirror did not
+  model, so ``tests/cell_eval`` could not have caught this. It does now:
+  every sequence is evaluated under four instance transforms covering all
+  three anchors, a negative scale and a negative angle.
+
+- **Multi-cell nodes and the hardware backend.** A node seated *after*
+  ``NEA_CellAnimBindOAM()`` got no OBJ pool, so composing an entity after
+  binding produced something that drew as quads but not as sprites; nodes are
+  now bound in either order. Relatedly, ``compute_budget()`` only walked
+  multi-cells named by a ``MULTI`` sequence, so a bank whose compositions are
+  played directly with ``NEA_CellAnimPlayMulti()`` was given a budget sized for
+  a single node. A parent seated on a multi-cell also no longer reserves
+  sprites of its own, since its nodes hold the poses.
+
+**Three hardware-2D fixes fell out of building it.**
+
+- ``NEA_Hw2DOBJSetFrame()`` had no effect on screen. The frame index was stored
+  and never applied to the graphics pointer handed to OAM, so every flipbook
+  showed frame 0 forever.
+- ``NEA_Hw2DOBJSetRotScaleI()`` documented units libnds does not use. libnds
+  ``oamRotateScale()`` takes a full turn of ``1 << 15`` and *inverse* scale
+  factors, not the "0-511, 4096 = 1.0" the header claimed -- so passing 511
+  rotated by about six degrees and passing 4096 scaled to a sixteenth. The
+  function now converts, and the documented units are the ones that work.
+- New ``NEA_Hw2DOBJSetAffineMatrix()`` writes an affine entry directly, for the
+  transforms ``oamRotateScale()`` cannot express: a shear, or a bone chain's
+  composed 2x2.
+
+``ne_billboard_basis()`` moved out of ``NEAParticle.c`` and became
+``NEA_CameraBillboardBasis()`` in ``NEACamera.h``, so the particle and cell
+systems share one implementation. Particle output is unchanged.
+
+``make install`` now also installs ``tools/cell_editor``, and while there
+``tools/animmat_editor`` and ``tools/npe_editor``, which had never been
+installed at all.
+
 **The scene system and the ARM7 rigid body system were removed.** Both were
 designed badly enough to be unusable in practice, and neither was load-bearing:
 nothing inside the engine ever called into the scene system, and the rigid body

@@ -486,7 +486,12 @@ typedef enum {
     /// Only the capture-based effects need this; glow, flash, mosaic and
     /// windows are pure register state and keep working without it. Does
     /// nothing unless the project calls into NEAPostFX.h.
-    NEA_UPDATE_POSTFX = BIT(12)
+    NEA_UPDATE_POSTFX = BIT(12),
+    /// Advances every cell animation and re-resolves its pose
+    /// (calls NEA_CellAnimUpdateAll()).
+    ///
+    /// Does nothing unless the project calls into NEACell.h.
+    NEA_UPDATE_CELL = BIT(13)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.
