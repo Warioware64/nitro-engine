@@ -466,6 +466,28 @@ NEA_VRAMBankFlags NEA_Hw2DGetClaimedBanks(void)
     return ne_hw2d_state.claimed_banks;
 }
 
+int NEA_Hw2DOBJCountUsed(NEA_Hw2DEngine engine)
+{
+    if (!ne_hw2d_state.initialized)
+        return 0;
+
+    const NEA_Hw2DOBJ *objs = (engine == NEA_ENGINE_MAIN)
+                              ? ne_hw2d_state.objs_main
+                              : ne_hw2d_state.objs_sub;
+    int high_water = (engine == NEA_ENGINE_MAIN)
+                     ? ne_hw2d_state.next_oam_main
+                     : ne_hw2d_state.next_oam_sub;
+
+    int used = 0;
+    for (int i = 0; i < high_water; i++)
+    {
+        if (objs[i].used)
+            used++;
+    }
+
+    return used;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: Tiled backgrounds
 // ---------------------------------------------------------------------------
@@ -526,6 +548,14 @@ static int ne_hw2d_bg_params(NEA_Hw2DBGType type, int width, int height,
 
 NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
                               NEA_Hw2DBGType type, int width, int height)
+{
+    // 0 tile bytes means "the historical default", a single 16 KB block.
+    return NEA_Hw2DBGCreateTiles(engine, layer, type, width, height, 0);
+}
+
+NEA_Hw2DBG *NEA_Hw2DBGCreateTiles(NEA_Hw2DEngine engine, int layer,
+                                   NEA_Hw2DBGType type, int width, int height,
+                                   size_t tile_bytes)
 {
     NEA_Assert(ne_hw2d_state.initialized, "NEA_Hw2DBGCreate: Hw2D not init");
 
@@ -633,14 +663,23 @@ NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
     }
     else
     {
-        // Tiled BG: 1 tile block for the tileset, plus map slots
-        // proportional to the screen size (each 32x32 quadrant = 2 KB).
+        // Tiled BG: enough 16 KB blocks to hold the tileset the caller says it
+        // will load, plus map slots proportional to the screen size (each
+        // 32x32 quadrant = 2 KB).
+        //
+        // One block only holds 256 tiles at 8bpp, which is a quarter of what a
+        // 256x256 screen can address. A background whose artwork barely
+        // repeats needs the caller to ask for more, or NEA_Hw2DBGLoadTiles()
+        // clips its tileset and everything past the cut renders as garbage.
         map_blocks_needed = 1;
         if (width == 512)
             map_blocks_needed *= 2;
         if (height == 512)
             map_blocks_needed *= 2;
-        tile_blocks_needed = 1;
+
+        tile_blocks_needed = (tile_bytes == 0)
+                             ? 1
+                             : (int)((tile_bytes + 16383) / 16384);
 
         int tile_start = ne_find_contiguous(tile_blocks,
                                              NEA_HW2D_TILE_BANKS,
@@ -661,14 +700,15 @@ NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
             return NULL;
         }
 
-        tile_blocks[tile_start] = NEA_HW2D_BLOCK_USED;
+        for (int i = 0; i < tile_blocks_needed; i++)
+            tile_blocks[tile_start + i] = NEA_HW2D_BLOCK_USED;
         for (int i = 0; i < map_blocks_needed; i++)
             map_blocks[map_start + i] = NEA_HW2D_BLOCK_USED;
 
         tile_base = tile_start;
         map_base = map_start;
         alloc_slot->tile_base = tile_start;
-        alloc_slot->tile_blocks = 1;
+        alloc_slot->tile_blocks = tile_blocks_needed;
         alloc_slot->map_base = map_start;
         alloc_slot->map_blocks = map_blocks_needed;
     }
@@ -1249,6 +1289,30 @@ static int ne_hw2d_obj_height(NEA_OBJSize s)
     return h[s];
 }
 
+// First-fit allocation of an OAM slot for the engine. Returns the index, or -1
+// if every slot is in use.
+//
+// This has to scan rather than bump a counter: NEA_Hw2DOBJDelete() clears the
+// slot it was given, so a bump counter would consume the whole table over a
+// long session of create/delete cycles even though almost nothing is live.
+// 'next' is kept as a high-water mark, which is all NEA_Hw2DOBJUpdate() needs
+// to know how far to scan.
+static int ne_alloc_oam_index(NEA_Hw2DOBJ *objs, int *next)
+{
+    for (int i = 0; i < NEA_HW2D_MAX_OAM; i++)
+    {
+        if (objs[i].used)
+            continue;
+
+        if (i >= *next)
+            *next = i + 1;
+
+        return i;
+    }
+
+    return -1;
+}
+
 NEA_Hw2DOBJ *NEA_Hw2DOBJCreate(NEA_Hw2DEngine engine, NEA_OBJSize size,
                                 NEA_OBJColorMode mode)
 {
@@ -1273,14 +1337,12 @@ NEA_Hw2DOBJ *NEA_Hw2DOBJCreate(NEA_Hw2DEngine engine, NEA_OBJSize size,
         oam = &oamSub;
     }
 
-    if (*next >= NEA_HW2D_MAX_OAM)
+    int idx = ne_alloc_oam_index(objs, next);
+    if (idx < 0)
     {
         NEA_DebugPrint("NEA_Hw2DOBJCreate: OAM full");
         return NULL;
     }
-
-    int idx = *next;
-    (*next)++;
 
     ObjSize libnds_size = ne_hw2d_obj_size(size);
     SpriteColorFormat libnds_color = ne_hw2d_obj_color(mode);
@@ -1289,7 +1351,9 @@ NEA_Hw2DOBJ *NEA_Hw2DOBJCreate(NEA_Hw2DEngine engine, NEA_OBJSize size,
     if (gfx == NULL)
     {
         NEA_DebugPrint("NEA_Hw2DOBJCreate: gfx alloc failed");
-        (*next)--;
+        // The slot is still marked free (used == false), so it will be handed
+        // out again by the next call. The high-water mark must not be lowered:
+        // slots past this one may well be live.
         return NULL;
     }
 
@@ -2018,13 +2082,13 @@ NEA_Hw2DOBJ *NEA_Hw2DOBJCreateFromAsset(NEA_Hw2DOBJAsset *asset)
         objs = ne_hw2d_state.objs_sub;
     }
 
-    if (*next >= NEA_HW2D_MAX_OAM)
+    int idx = ne_alloc_oam_index(objs, next);
+    if (idx < 0)
     {
         NEA_DebugPrint("NEA_Hw2DOBJCreateFromAsset: OAM full");
         return NULL;
     }
 
-    int idx = (*next)++;
     NEA_Hw2DOBJ *obj = &objs[idx];
     memset(obj, 0, sizeof(*obj));
     obj->used = true;

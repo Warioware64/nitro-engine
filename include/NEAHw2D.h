@@ -199,6 +199,15 @@ void NEA_Hw2DSystemEnd(void);
 /// Used by the texture system to avoid allocating 3D textures in 2D banks.
 NEA_VRAMBankFlags NEA_Hw2DGetClaimedBanks(void);
 
+/// Returns how many hardware OBJ slots of an engine are currently in use.
+///
+/// Useful to check that a scene's OBJs are really being released: the number
+/// must come back to its previous value after every create/delete cycle.
+///
+/// @param engine Engine to query.
+/// @return Number of live NEA_Hw2DOBJ objects, 0 if Hw2D isn't initialized.
+int NEA_Hw2DOBJCountUsed(NEA_Hw2DEngine engine);
+
 // ---------------------------------------------------------------------------
 // Tiled backgrounds
 // ---------------------------------------------------------------------------
@@ -216,6 +225,33 @@ NEA_VRAMBankFlags NEA_Hw2DGetClaimedBanks(void);
 /// @return Pointer to the BG handle, or NULL on error.
 NEA_Hw2DBG *NEA_Hw2DBGCreate(NEA_Hw2DEngine engine, int layer,
                               NEA_Hw2DBGType type, int width, int height);
+
+/// Same as NEA_Hw2DBGCreate(), but reserves enough tile VRAM for a tileset of
+/// @p tile_bytes instead of the default single 16 KB block.
+///
+/// A 16 KB block only holds 256 tiles at 8bpp (512 at 4bpp), a quarter of what
+/// a 256x256 screen can address. Artwork that barely repeats needs more than
+/// that, and NEA_Hw2DBGLoadTiles() clips whatever doesn't fit, so the part of
+/// the background past the cut renders as garbage. Pass the size of the tile
+/// data you are about to load (the GFX chunk of a GRF file) to get a big
+/// enough background.
+///
+/// The blocks are allocated contiguously from the engine's BG banks, so the
+/// bank configured in NEA_Hw2DInit() has to be large enough: the first block
+/// is reserved for map data, leaving (bank size / 16 KB) - 1 for tilesets.
+///
+/// @param engine     NEA_ENGINE_MAIN or NEA_ENGINE_SUB.
+/// @param layer      BG layer (1-3 for main, 0-3 for sub).
+/// @param type       Background type.
+/// @param width      Width in pixels (256 or 512 for tiled, 256 for bitmap).
+/// @param height     Height in pixels (256 or 512 for tiled, 256 for bitmap).
+/// @param tile_bytes Tile data this background must hold, or 0 for one block.
+///                   Ignored for bitmap backgrounds, which are sized by their
+///                   dimensions.
+/// @return Pointer to the BG handle, or NULL on error.
+NEA_Hw2DBG *NEA_Hw2DBGCreateTiles(NEA_Hw2DEngine engine, int layer,
+                                   NEA_Hw2DBGType type, int width, int height,
+                                   size_t tile_bytes);
 
 /// Delete a background and free its resources.
 ///
