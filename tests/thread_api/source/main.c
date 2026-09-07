@@ -374,6 +374,104 @@ static void test_teardown(void)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Handle lifetime
+//
+// NEA_ThreadSystemEnd() frees every task handle, whether or not the app still
+// holds one. Touching a handle afterwards used to read freed memory and then
+// free it a second time.
+// ---------------------------------------------------------------------------
+
+// Set by done_resubmit() so the test can see whether the pool let it in.
+static bool resubmit_attempted = false;
+static NEA_Task *resubmit_result = (NEA_Task *)1;
+
+// Submitting from a completion callback during teardown used to queue a task
+// that was then freed without ever running, leaving the caller with a handle
+// to freed memory.
+static void done_resubmit(NEA_Task *task, void *user)
+{
+    (void)task;
+    resubmit_attempted = true;
+    resubmit_result = NEA_TaskSubmit(job_count, NULL, user);
+}
+
+static void test_handle_lifetime(void)
+{
+    // --- a released handle is stale, and releasing it again is refused -----
+    {
+        TestJob j = { .iterations = 10, .result = 0 };
+        NEA_Task *task = NEA_TaskSubmit(job_count, NULL, &j);
+        CHECK(task != NULL, "submitted");
+        CHECK(PumpUntilDone(task) == NEA_TASK_DONE, "finished");
+
+        NEA_TaskRelease(task);
+
+        CHECK(NEA_TaskGetState(task) == NEA_TASK_ERROR,
+              "state of a freed handle");
+        CHECK(NEA_TaskGetResult(task) == -1, "result of a freed handle");
+        CHECK(NEA_TaskGetProgress(task) == 0, "progress of a freed handle");
+
+        // The double free this used to be would corrupt the heap and take out
+        // whatever ran next rather than failing here.
+        NEA_TaskRelease(task);
+        NEA_TaskCancel(task);
+
+        PumpFrames(2);
+    }
+
+    // --- teardown runs the completion callbacks it used to drop ------------
+    {
+        static TestJob j;
+        j = (TestJob){ .iterations = 20, .result = 0 };
+
+        NEA_Task *task = NEA_TaskSubmit(job_count, job_done, &j);
+        CHECK(task != NULL, "submitted before teardown");
+
+        // Let it finish, but do not pump a frame afterwards: the completion
+        // callback is now pending and teardown is what has to run it.
+        for (int i = 0; i < 60 && NEA_TaskGetState(task) == NEA_TASK_PENDING; i++)
+            NEA_WaitForVBL(0);
+        for (int i = 0; i < 60 && NEA_TaskGetState(task) == NEA_TASK_RUNNING; i++)
+            NEA_WaitForVBL(0);
+
+        CHECK(NEA_TaskGetState(task) == NEA_TASK_DONE, "finished, uncollected");
+        CHECK(!j.done_called, "callback still pending");
+
+        NEA_ThreadSystemEnd();
+        CHECK(j.done_called, "teardown ran the pending callback");
+
+        // The handle went away with the pool.
+        CHECK(NEA_TaskGetState(task) == NEA_TASK_ERROR,
+              "handle freed by teardown is stale");
+        NEA_TaskRelease(task);
+
+        CHECK(NEA_ThreadSystemReset(2, 8 * 1024) == 1, "pool comes back up");
+    }
+
+    // --- no submissions once teardown has started -------------------------
+    {
+        static TestJob j;
+        j = (TestJob){ .iterations = 20, .result = 0 };
+        resubmit_attempted = false;
+        resubmit_result = (NEA_Task *)1;
+
+        NEA_Task *task = NEA_TaskSubmit(job_count, done_resubmit, &j);
+        CHECK(task != NULL, "submitted with a resubmitting callback");
+
+        for (int i = 0; i < 60 && NEA_TaskGetState(task) == NEA_TASK_PENDING; i++)
+            NEA_WaitForVBL(0);
+        for (int i = 0; i < 60 && NEA_TaskGetState(task) == NEA_TASK_RUNNING; i++)
+            NEA_WaitForVBL(0);
+
+        NEA_ThreadSystemEnd();
+        CHECK(resubmit_attempted, "callback ran during teardown");
+        CHECK(resubmit_result == NULL, "submit during teardown refused");
+
+        CHECK(NEA_ThreadSystemReset(2, 8 * 1024) == 1, "pool comes back up");
+    }
+}
+
 static void test_stack_peak(void)
 {
     int peak = NEA_ThreadStackPeak(0);
@@ -416,6 +514,7 @@ int main(int argc, char *argv[])
     SECTION(test_progress);
     SECTION(test_frame_budget);
     SECTION(test_misuse);
+    SECTION(test_handle_lifetime);
     SECTION(test_stack_peak);
     SECTION(test_teardown);
 

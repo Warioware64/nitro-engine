@@ -4,6 +4,8 @@
 //
 // This file is part of Nitro Engine Advanced
 
+#include <malloc.h>
+
 #include <nds/arm9/dldi.h>
 #include <nds/cothread.h>
 
@@ -38,6 +40,20 @@
 // How many times cothread_create() may fail for a job before it is reported as
 // failed instead of being retried forever.
 #define NEA_ASYNC_MAX_START_ATTEMPTS 8
+
+#ifdef NEA_DEBUG
+// Pattern the worker stacks are filled with, so that the untouched part of a
+// stack can be told apart from the used part. Same trick as the task pool in
+// NEAThread.c.
+#define NEA_ASYNC_STACK_PATTERN 0xA5A5A5A5
+
+// Fraction of a worker stack that may be used before it is worth complaining
+// about, in eighths. Overflowing a cothread stack corrupts the neighbouring
+// heap block instead of faulting, so the crash surfaces somewhere unrelated and
+// moves whenever the allocation layout does. Warning early is the only way to
+// catch it near the cause.
+#define NEA_ASYNC_STACK_WARN_EIGHTHS 7
+#endif
 
 // Forward declaration. The full definition is below, after struct NEA_AsyncFile.
 static bool ne_async_is_cancelled(const NEA_AsyncFile *job);
@@ -144,6 +160,12 @@ char *__NEA_FATLoadDataSize(const char *filename, size_t *size)
     return ne_fat_read_file(filename, size, NULL);
 }
 
+char *__NEA_AsyncReadFile(NEA_AsyncFile *job, const char *filename,
+                          size_t *size)
+{
+    return ne_fat_read_file(filename, size, job);
+}
+
 size_t NEA_FATFileSize(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
@@ -208,6 +230,18 @@ struct NEA_AsyncFile {
     // never get a worker is failed instead of staying pending forever.
     int start_attempts;
 
+    // Number of NEA_AsyncWait() calls parked on this handle. While it is not
+    // zero the handle must not be freed: the waiter reads it again after every
+    // NEA_AsyncProcess(), and that call can run a user callback that releases
+    // this very handle. Freeing it there would leave the waiter reading freed
+    // memory, so a release with waiters pending only marks it cancelled and
+    // NEA_AsyncWait() does the destroying on its way out.
+    int waiters;
+
+    // Index into ne_async_stacks of the stack this job's worker is running on,
+    // or -1 when it has no worker. See ne_async_stack_acquire().
+    int stack_slot;
+
     // Engine objects that finalize() writes into (NEA_Material, NEA_Model...).
     // All NULL for generic NEA_FATLoadDataAsync() jobs. Deleting any of them
     // must abort the job, see __NEA_AsyncCancelTarget(). Two slots are enough
@@ -234,6 +268,94 @@ static NEA_AsyncFile *ne_async_list = NULL;
 // Number of worker threads currently running.
 static int ne_async_running = 0;
 
+// Worker stacks, owned by this module rather than by the scheduler.
+//
+// cothread_create() allocates and frees the stack itself, which leaves no way
+// to see how much of it a worker actually used. That matters here: a worker
+// that overflows its stack does not fault, it quietly writes over the next heap
+// block, and the resulting crash lands somewhere unrelated and moves whenever
+// the allocation layout changes. Owning the stacks makes the usage measurable.
+//
+// One per concurrent worker, allocated on first use and kept for the lifetime
+// of the program: a worker that could not get a stack would have to fail its
+// job, and reusing them costs nothing.
+static struct {
+    void *base;
+    bool in_use;
+} ne_async_stacks[NEA_ASYNC_MAX_WORKERS];
+
+// Claims a worker stack, returning its index or -1 if none is free or one could
+// not be allocated.
+static int ne_async_stack_acquire(void)
+{
+    for (int i = 0; i < NEA_ASYNC_MAX_WORKERS; i++)
+    {
+        if (ne_async_stacks[i].in_use)
+            continue;
+
+        if (ne_async_stacks[i].base == NULL)
+        {
+            // cothread_create_manual() requires 8 byte alignment.
+            ne_async_stacks[i].base = memalign(8, NEA_ASYNC_STACK_SIZE);
+            if (ne_async_stacks[i].base == NULL)
+                return -1;
+        }
+
+#ifdef NEA_DEBUG
+        // Refilled on every claim, so the peak reported below is this worker's
+        // and not the high-water mark of every job that used the stack before.
+        uint32_t *words = ne_async_stacks[i].base;
+        for (size_t j = 0; j < NEA_ASYNC_STACK_SIZE / 4; j++)
+            words[j] = NEA_ASYNC_STACK_PATTERN;
+#endif
+
+        ne_async_stacks[i].in_use = true;
+        return i;
+    }
+
+    return -1;
+}
+
+// Releases a worker stack. Only ever called from the main thread, once the
+// worker has been observed to have finished, so the stack is no longer in use.
+static void ne_async_stack_release(int slot)
+{
+    if (slot < 0 || slot >= NEA_ASYNC_MAX_WORKERS)
+        return;
+
+#ifdef NEA_DEBUG
+    // The stack grows down from the top, so the untouched region is at the
+    // bottom: the peak is whatever the fill pattern no longer covers.
+    const uint32_t *words = ne_async_stacks[slot].base;
+    size_t total = NEA_ASYNC_STACK_SIZE / 4;
+    size_t untouched = 0;
+    while (untouched < total && words[untouched] == NEA_ASYNC_STACK_PATTERN)
+        untouched++;
+
+    size_t used = (total - untouched) * 4;
+    if (used >= (NEA_ASYNC_STACK_SIZE / 8) * NEA_ASYNC_STACK_WARN_EIGHTHS)
+    {
+        NEA_DebugPrint("Async worker used %d of %d bytes of stack. Raise "
+                       "NEA_ASYNC_STACK_SIZE.", (int)used,
+                       (int)NEA_ASYNC_STACK_SIZE);
+    }
+#endif
+
+    ne_async_stacks[slot].in_use = false;
+}
+
+// Records that a job's worker has finished. Every path that observes a worker
+// exiting goes through here, so the running count and the stack it borrowed are
+// always released exactly once.
+static void ne_async_worker_reap(NEA_AsyncFile *job)
+{
+    job->worker_active = false;
+    ne_async_running--;
+
+    ne_async_stack_release(job->stack_slot);
+    job->stack_slot = -1;
+}
+
 // Signal ID a job's worker sends when it exits, so that code waiting for that
 // worker can block instead of polling. libnds reserves bit 31 of signal IDs for
 // its own use (comutex/cosema), and handles live in main RAM, so the address of
@@ -243,6 +365,23 @@ static uint32_t ne_async_signal_id(const NEA_AsyncFile *job)
     NEA_Assert(((uintptr_t)job & BIT(31)) == 0,
                "Async handle outside of the usable signal ID range");
     return (uint32_t)(uintptr_t)job;
+}
+
+// True if 'handle' is still a live job. Handles are bare heap pointers handed
+// to the app, and both __NEA_AsyncEnd() and a completion callback can destroy
+// one while the app still holds it, so every public entry point checks
+// membership of the list before touching the handle. It also catches the case
+// where the allocator hands a freed handle's address back to a new job: a stale
+// pointer then addresses a different, live job instead of freed memory.
+static bool ne_async_handle_valid(const NEA_AsyncFile *handle)
+{
+    for (const NEA_AsyncFile *job = ne_async_list; job != NULL; job = job->next)
+    {
+        if (job == handle)
+            return true;
+    }
+
+    return false;
 }
 
 // Used by ne_fat_read_file() to poll the cancel flags without exposing the
@@ -397,11 +536,20 @@ static void ne_async_try_start(void)
         // dangling context and jump into the reallocated block. A detached
         // thread is instead deleted by the scheduler itself right after it
         // returns, which is the case libnds handles correctly.
-        cothread_t thread = cothread_create(ne_async_worker_entry, job,
+        int slot = ne_async_stack_acquire();
+        cothread_t thread = -1;
+
+        if (slot >= 0)
+        {
+            thread = cothread_create_manual(ne_async_worker_entry, job,
+                                            ne_async_stacks[slot].base,
                                             NEA_ASYNC_STACK_SIZE,
                                             COTHREAD_DETACHED);
+        }
+
         if (thread == -1)
         {
+            ne_async_stack_release(slot);
             NEA_DebugPrint("Couldn't create async worker thread");
 
             // Out of memory. Retry on later calls, but don't let the job sit
@@ -415,6 +563,7 @@ static void ne_async_try_start(void)
         }
 
         (void)thread; // Detached: the ID must not be used after this point.
+        job->stack_slot = slot;
         job->worker_active = true;
         ne_async_running++;
     }
@@ -514,6 +663,8 @@ static NEA_AsyncFile *ne_async_queue_common(const char *filename)
     memcpy(job->filename, filename, len);
 
     job->state = NEA_ASYNC_PENDING;
+    // calloc() zeroed this, and 0 is a valid stack index.
+    job->stack_slot = -1;
 
     return job;
 }
@@ -654,6 +805,14 @@ void __NEA_AsyncCancelTarget(void *target)
         if (!match)
             continue;
 
+        // A job that already ran its finalize step has handed its result to the
+        // object and is no longer aimed at anything. Aborting it here would free
+        // a buffer the finalize may still reference and would report a load that
+        // actually succeeded as NEA_ASYNC_ERROR.
+        if (job->finalized || job->state == NEA_ASYNC_DONE
+            || job->state == NEA_ASYNC_ERROR)
+            continue;
+
         job->aborted = true;
 
         // The worker thread may be reading this file right now. It stops at the
@@ -685,8 +844,7 @@ void NEA_AsyncProcess(void)
             continue;
 
         // Detached: the scheduler frees the thread itself, nothing to delete.
-        job->worker_active = false;
-        ne_async_running--;
+        ne_async_worker_reap(job);
         job->needs_finish = true;
     }
 
@@ -703,6 +861,19 @@ void NEA_AsyncProcess(void)
         {
             if (!job->needs_finish)
                 continue;
+
+            // A finalize step uploads to VRAM, flips bank modes and can
+            // reallocate texture VRAM. None of that is safe while the app holds
+            // a raw VRAM pointer from NEA_TextureDrawingStart() or
+            // NEA_PaletteModificationStart(), so leave this job marked and
+            // finish it on a later call. 'finished_one' stays false, so the
+            // outer loop ends here too.
+            if (__NEA_VramSessionOpen())
+            {
+                NEA_DebugPrint("Finalize deferred: a VRAM editing session is "
+                               "open. Close it before pumping the frame.");
+                break;
+            }
 
             job->needs_finish = false;
             finished_one = true;
@@ -746,7 +917,10 @@ void NEA_AsyncProcess(void)
     while (job != NULL)
     {
         NEA_AsyncFile *next = job->next;
-        if (job->cancelled && !job->worker_active)
+        // A handle NEA_AsyncWait() is parked on stays alive until the waiter
+        // returns: it reads the handle again after this call, and the waiter
+        // destroys it itself on the way out.
+        if (job->cancelled && !job->worker_active && job->waiters == 0)
         {
             ne_async_unlink(job);
             ne_async_destroy(job);
@@ -761,7 +935,7 @@ void NEA_AsyncProcess(void)
 NEA_AsyncState NEA_AsyncGetState(const NEA_AsyncFile *handle)
 {
     NEA_AssertPointer(handle, "NULL handle pointer");
-    if (handle == NULL)
+    if (!ne_async_handle_valid(handle))
         return NEA_ASYNC_ERROR;
     return handle->state;
 }
@@ -769,7 +943,7 @@ NEA_AsyncState NEA_AsyncGetState(const NEA_AsyncFile *handle)
 char *NEA_AsyncGetData(NEA_AsyncFile *handle, size_t *size)
 {
     NEA_AssertPointer(handle, "NULL handle pointer");
-    if (handle == NULL)
+    if (!ne_async_handle_valid(handle))
         return NULL;
 
     if (handle->state != NEA_ASYNC_READY && handle->state != NEA_ASYNC_DONE)
@@ -790,48 +964,97 @@ char *NEA_AsyncGetData(NEA_AsyncFile *handle, size_t *size)
     if (size != NULL)
         *size = handle->size;
 
-    // Transfer ownership of the buffer to the caller.
+    // Transfer ownership of the buffer to the caller. The handle drops its own
+    // pointer as well, so calling this twice can't hand the same buffer to two
+    // owners and have them both free it.
+    char *buffer = handle->buffer;
+    handle->buffer = NULL;
     handle->buffer_owned = false;
-    return handle->buffer;
+    return buffer;
 }
 
 NEA_AsyncState NEA_AsyncWait(NEA_AsyncFile *handle)
 {
     NEA_AssertPointer(handle, "NULL handle pointer");
-    if (handle == NULL)
+    if (!ne_async_handle_valid(handle))
         return NEA_ASYNC_ERROR;
 
-    // The worker only runs while the main thread is yielding, so a plain poll
-    // loop on NEA_AsyncGetState() would hang forever.
-    while (handle->state == NEA_ASYNC_PENDING ||
-           handle->state == NEA_ASYNC_READY)
+    // Nothing here could ever make progress: NEA_AsyncProcess() refuses to run
+    // the finalize steps while a VRAM editing session is open, so this would
+    // spin until the frame budget ran out and then keep spinning.
+    NEA_Assert(!__NEA_VramSessionOpen(),
+               "NEA_AsyncWait() called inside a VRAM editing session");
+
+    // NEA_AsyncProcess() below runs the user callback, and releasing your own
+    // handle from it is the ordinary fire-and-forget pattern. Claiming the
+    // handle here turns that release into a deferred one, so the loop can keep
+    // reading the handle instead of dereferencing freed memory.
+    handle->waiters++;
+
+    NEA_AsyncState state;
+
+    while (1)
     {
-        if (handle->worker_active)
+        state = handle->state;
+
+        // Released from under us. The handle is ours to destroy below, and its
+        // state means nothing to a caller that has given it up.
+        if (handle->cancelled)
+        {
+            state = NEA_ASYNC_ERROR;
+            break;
+        }
+
+        if (state != NEA_ASYNC_PENDING && state != NEA_ASYNC_READY)
+            break;
+
+        // The worker only runs while the main thread is yielding, so a plain
+        // poll loop on NEA_AsyncGetState() would hang forever.
+        //
+        // 'worker_done' has to be checked as well as 'worker_active': a signal
+        // is delivered to whoever is parked at the time and is not remembered,
+        // so a worker that has already finished and signalled -- which is the
+        // case whenever frames were pumped without NEA_UPDATE_ASSETS, leaving
+        // it unreaped -- would never send another one and this would park for
+        // good. In that state there is nothing to wait for anyway: the vertical
+        // blank below is what reaps it.
+        if (handle->worker_active && !handle->worker_done)
         {
             // A worker is reading this file: block until it signals that it has
             // finished, instead of spinning.
             cothread_yield_signal(ne_async_signal_id(handle));
         }
-        else
-        {
-            // No worker to wait for. Either this job is queued behind others, or
-            // its data is already in RAM and only the main-thread finalize step
-            // is left. Neither will ever send a signal, so wait for the frame
-            // instead: NEA_AsyncProcess() below is what makes progress.
-            cothread_yield_irq(IRQ_VBLANK);
-        }
+
+        // Only ever finish jobs from the vertical blank, never straight off the
+        // signal wake. A finalize step uploads to VRAM and flips banks to LCD
+        // mode, and the signal fires at whatever scanline the worker happened to
+        // exit on -- in the dual 3D modes those banks are the framebuffers being
+        // displayed. This is also what makes progress when there is no worker to
+        // wait for, because the job is queued behind others or its data is in
+        // RAM already and only the main-thread finalize step is left.
+        cothread_yield_irq(IRQ_VBLANK);
 
         NEA_AsyncProcess();
     }
 
-    return handle->state;
+    handle->waiters--;
+
+    // Nothing else frees a handle that has a waiter, so a release that arrived
+    // while this loop was running left the job here to be destroyed.
+    if (handle->waiters == 0 && handle->cancelled && !handle->worker_active)
+    {
+        ne_async_unlink(handle);
+        ne_async_destroy(handle);
+    }
+
+    return state;
 }
 
 void NEA_AsyncSetCallback(NEA_AsyncFile *handle, NEA_AsyncCallback callback,
                           void *user)
 {
     NEA_AssertPointer(handle, "NULL handle pointer");
-    if (handle == NULL)
+    if (!ne_async_handle_valid(handle))
         return;
     handle->user_cb = callback;
     handle->user_data = user;
@@ -842,9 +1065,36 @@ void NEA_AsyncRelease(NEA_AsyncFile *handle)
     if (handle == NULL)
         return;
 
+    // Releasing a handle twice, or holding one across NEA_End(), used to read
+    // and then free memory that is already gone.
+    if (!ne_async_handle_valid(handle))
+    {
+        NEA_DebugPrint("Async handle released twice or after NEA_End()");
+        return;
+    }
+
+    // A write job that borrowed the caller's buffer is the one case that can't
+    // simply be abandoned: the worker may be parked inside fwrite() and would
+    // resume reading from a buffer the app frees as soon as this returns. It
+    // only polls the cancel flag at chunk boundaries, so wait it out here --
+    // which is what NEA_FATWriteDataAsync() already promises for BORROW.
+    if (handle->worker_active && handle->is_write && !handle->buffer_owned)
+    {
+        handle->cancelled = true;
+        handle->user_cb = NULL;
+
+        while (!handle->worker_done)
+            cothread_yield_signal(ne_async_signal_id(handle));
+
+        // Reaped here, so NEA_AsyncProcess() must not count this worker again.
+        ne_async_worker_reap(handle);
+    }
+
     // If a worker thread is reading this file it can't be freed yet. Mark it
     // cancelled and let NEA_AsyncProcess() free it once the thread has stopped.
-    if (handle->worker_active)
+    // A handle NEA_AsyncWait() is parked on is deferred the same way, and is
+    // destroyed by the waiter instead.
+    if (handle->worker_active || handle->waiters > 0)
     {
         handle->cancelled = true;
         handle->user_cb = NULL;
@@ -931,8 +1181,7 @@ void __NEA_AsyncEnd(void)
         while (!job->worker_done)
             cothread_yield_signal(ne_async_signal_id(job));
 
-        job->worker_active = false;
-        ne_async_running--;
+        ne_async_worker_reap(job);
     }
 
     NEA_AsyncFile *job = ne_async_list;
@@ -943,6 +1192,11 @@ void __NEA_AsyncEnd(void)
         job = next;
     }
     ne_async_list = NULL;
+
+    // Every worker has been waited out above, so this is already zero unless
+    // the count drifted. Force it, so that re-initialising the engine can't
+    // start with a phantom worker throttling the queue forever.
+    ne_async_running = 0;
 }
 
 //--------------------------------------------------------------------------

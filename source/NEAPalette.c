@@ -29,9 +29,20 @@ static NEA_VRAMBankFlags ne_pal_banks;
 // LCD-mode base address of the palette VRAM region (for GFX_PAL_FORMAT offset calc)
 static uintptr_t ne_pal_lcd_base;
 
+// Depth of nested ne_pal_to_lcd() calls. NEA_PaletteLoad() flips the banks
+// itself, and it can run from inside an open NEA_PaletteModificationStart()
+// session -- directly, or through an asynchronous palette load finalizing.
+// Without the count the inner call would restore TEX_PALETTE mode behind the
+// session's back, and every later NEA_PaletteRGB256SetColor() would write into
+// a bank the CPU cannot reach and be silently dropped.
+static int ne_pal_lcd_depth = 0;
+
 // Switch palette bank(s) to LCD mode (enables CPU writes)
 static void ne_pal_to_lcd(void)
 {
+    if (ne_pal_lcd_depth++ > 0)
+        return;
+
     if (ne_pal_banks & NEA_VRAM_E)
         vramSetBankE(VRAM_E_LCD);
     if (ne_pal_banks & NEA_VRAM_F)
@@ -40,9 +51,15 @@ static void ne_pal_to_lcd(void)
         vramSetBankG(VRAM_G_LCD);
 }
 
-// Switch palette bank(s) back to TEX_PALETTE mode
+// Switch palette bank(s) back to TEX_PALETTE mode. Only the outermost caller
+// actually restores the mode, see ne_pal_lcd_depth.
 static void ne_pal_to_tex(void)
 {
+    NEA_Assert(ne_pal_lcd_depth > 0, "Unbalanced palette VRAM bank switch");
+
+    if (ne_pal_lcd_depth == 0 || --ne_pal_lcd_depth > 0)
+        return;
+
     if (ne_pal_banks & NEA_VRAM_E)
         vramSetBankE(VRAM_E_TEX_PALETTE);
 
@@ -535,6 +552,10 @@ void *NEA_PaletteModificationStart(const NEA_Palette *pal)
     // Enable CPU accesses to palette VRAM
     ne_pal_to_lcd();
 
+    // palette_adress is a raw pointer into palette VRAM: hold off the async
+    // finalize steps until the session closes.
+    __NEA_VramSessionEnter();
+
     return palette_adress;
 }
 
@@ -557,6 +578,8 @@ void NEA_PaletteModificationEnd(void)
 
     // Disable CPU accesses to palette VRAM
     ne_pal_to_tex();
+
+    __NEA_VramSessionExit();
 
     palette_adress = NULL;
 }

@@ -116,7 +116,9 @@ typedef enum {
     NEA_ASYNC_WRITE_TAKE,
     /// The engine writes straight out of the caller's buffer without copying
     /// it. The buffer must stay valid and unmodified until the handle reaches
-    /// NEA_ASYNC_DONE or NEA_ASYNC_ERROR, or until it is released.
+    /// NEA_ASYNC_DONE or NEA_ASYNC_ERROR, or until it is released. Releasing a
+    /// borrowed write that is still running blocks until the worker has let go
+    /// of the buffer, so the buffer really is free to release afterwards.
     NEA_ASYNC_WRITE_BORROW
 } NEA_AsyncWriteMode;
 
@@ -170,9 +172,17 @@ char *NEA_AsyncGetData(NEA_AsyncFile *handle, size_t *size);
 ///
 /// The worker thread only runs while the main thread yields, so polling
 /// NEA_AsyncGetState() in a tight loop hangs forever. This function yields to
-/// the worker and runs NEA_AsyncProcess() until the load reaches a terminal
-/// state. It defeats the point of loading asynchronously, so it is only meant
-/// for shutdown paths and loading screens.
+/// the worker and runs NEA_AsyncProcess() once per vertical blank, so it needs
+/// the vertical blank interrupt to be enabled and it costs at least one frame.
+/// That is deliberate: the finalize step flips VRAM bank modes, and running it
+/// at an arbitrary scanline shows a frame of garbage.
+///
+/// It defeats the point of loading asynchronously, so it is only meant for
+/// shutdown paths and loading screens.
+///
+/// Must not be called with a NEA_TextureDrawingStart() or
+/// NEA_PaletteModificationStart() session open: NEA_AsyncProcess() refuses to
+/// finalize anything while one is, so this would never make progress.
 ///
 /// @param handle Async handle.
 /// @return The final state, NEA_ASYNC_DONE or NEA_ASYNC_ERROR.
@@ -190,8 +200,16 @@ void NEA_AsyncSetCallback(NEA_AsyncFile *handle, NEA_AsyncCallback callback,
 
 /// Releases an asynchronous load handle.
 ///
-/// If the operation is still in progress it is cancelled. It is safe to call
-/// this at any time. After this call the handle must not be used again.
+/// If the operation is still in progress it is cancelled. After this call the
+/// handle must not be used again.
+///
+/// This returns without waiting, except for a NEA_ASYNC_WRITE_BORROW write that
+/// is still running: there the worker is still reading the caller's buffer, so
+/// this blocks until it has stopped.
+///
+/// Releasing a handle twice, or releasing one that NEA_End() has already freed,
+/// is detected and ignored instead of corrupting the heap. Do not rely on that:
+/// it is a safety net, not a licence.
 ///
 /// @param handle Async handle.
 void NEA_AsyncRelease(NEA_AsyncFile *handle);
@@ -203,10 +221,17 @@ int NEA_AsyncPendingCount(void);
 
 /// Advances pending asynchronous loads and runs finalize steps.
 ///
-/// Call this once per frame. It reaps finished worker threads and performs the
-/// finalize step (such as uploading a texture to VRAM) on the main thread. It
-/// is also called automatically when NEA_UPDATE_ASSETS is passed to
-/// NEA_WaitForVBL().
+/// Call this once per frame, during the vertical blank. It reaps finished
+/// worker threads and performs the finalize step (such as uploading a texture
+/// to VRAM) on the main thread. It is also called automatically when
+/// NEA_UPDATE_ASSETS is passed to NEA_WaitForVBL(), which is where the vertical
+/// blank requirement is met for you.
+///
+/// The finalize steps flip VRAM bank modes, so calling this outside the
+/// vertical blank shows a frame of garbage. For the same reason it will not run
+/// them at all while a NEA_TextureDrawingStart() or
+/// NEA_PaletteModificationStart() session is open: those hand out a raw VRAM
+/// pointer that a finalize could invalidate. Jobs simply finish a frame later.
 void NEA_AsyncProcess(void);
 
 /// @}
@@ -254,6 +279,13 @@ void __NEA_AsyncAddTarget(NEA_AsyncFile *handle, void *target);
 // NEA_AsyncRelease(). Call this from the destructor of any object that can be
 // the target of an asynchronous load, before freeing it.
 void __NEA_AsyncCancelTarget(void *target);
+
+// Reads a whole file the way a job's own file is read: in chunks, yielding
+// between them, and abandoning the read as soon as the job is cancelled or the
+// object it loads into is deleted. Only valid from a worker stage 2 callback,
+// which is the only code that runs on a job's worker thread.
+char *__NEA_AsyncReadFile(NEA_AsyncFile *job, const char *filename,
+                          size_t *size);
 
 // Returns the file data buffer of a job (no ownership transfer).
 char *__NEA_AsyncBuffer(NEA_AsyncFile *handle, size_t *size);

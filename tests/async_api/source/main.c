@@ -566,6 +566,186 @@ static void test_concurrency(void)
     CHECK(NEA_AsyncPendingCount() == 0, "queue drained");
 }
 
+// ---------------------------------------------------------------------------
+// Handle lifetime
+//
+// Every case here used to read or free memory that was already gone. They are
+// the reason async crashes showed up as unpredictable Data aborts: the faults
+// are allocation-layout sensitive, so they move or vanish whenever anything
+// else about the run changes.
+// ---------------------------------------------------------------------------
+
+// Set by ReleaseFromCallback() so the test can tell it actually ran.
+static int cb_ran = 0;
+
+// Releasing your own handle from its completion callback is the ordinary
+// fire-and-forget pattern. It used to free the job while NEA_AsyncWait() was
+// still parked on it, and the wait loop then read freed memory.
+static void ReleaseFromCallback(NEA_AsyncFile *handle, void *user)
+{
+    (void)user;
+    cb_ran++;
+    NEA_AsyncRelease(handle);
+}
+
+static void test_lifetime(void)
+{
+    // Every case below reads this file, and an earlier section may have left
+    // something else at that path.
+    {
+        uint8_t *tiles = malloc(TILES_SIZE);
+        for (int i = 0; i < TILES_SIZE; i++)
+            tiles[i] = (uint8_t)i;
+        CHECK(WriteSync(TILES_PATH, tiles, TILES_SIZE), "lifetime fixture");
+        free(tiles);
+    }
+
+    // --- release from the completion callback, under NEA_AsyncWait() -------
+    {
+        cb_ran = 0;
+        NEA_AsyncFile *job = NEA_FATLoadDataAsync(TILES_PATH);
+        CHECK(job != NULL, "wait+release queued");
+        if (job != NULL)
+        {
+            NEA_AsyncSetCallback(job, ReleaseFromCallback, NULL);
+
+            // Returns a value, not a dereference of the freed handle.
+            NEA_AsyncState state = NEA_AsyncWait(job);
+            CHECK(cb_ran == 1, "callback ran once");
+            CHECK(state == NEA_ASYNC_ERROR, "wait reports the release");
+
+            // The handle is gone; asking about it must be refused, not obeyed.
+            CHECK(NEA_AsyncGetState(job) == NEA_ASYNC_ERROR,
+                  "released handle is stale");
+        }
+        PumpFrames(2);
+    }
+
+    // --- waiting on a job whose worker already finished --------------------
+    {
+        // Frames pumped without NEA_UPDATE_ASSETS let the worker run to
+        // completion but never reap it, so it has already sent its exit signal
+        // by the time the wait starts. Signals are not remembered, so parking
+        // on one here used to block for good.
+        NEA_AsyncFile *job = NEA_FATLoadDataAsync(TILES_PATH);
+        CHECK(job != NULL, "unreaped wait queued");
+        if (job != NULL)
+        {
+            for (int i = 0; i < 30; i++)
+                NEA_WaitForVBL(0);
+
+            CHECK(NEA_AsyncWait(job) == NEA_ASYNC_DONE, "wait on unreaped job");
+            NEA_AsyncRelease(job);
+        }
+        PumpFrames(2);
+    }
+
+    // --- a stale handle is detected instead of being acted on --------------
+    {
+        NEA_AsyncFile *job = NEA_FATLoadDataAsync(TILES_PATH);
+        CHECK(job != NULL, "stale handle queued");
+        if (job != NULL)
+        {
+            CHECK(PumpUntilDone(job) == NEA_ASYNC_DONE, "stale handle done");
+            NEA_AsyncRelease(job);
+
+            CHECK(NEA_AsyncGetState(job) == NEA_ASYNC_ERROR,
+                  "state of a freed handle");
+            CHECK(NEA_AsyncGetData(job, NULL) == NULL,
+                  "data of a freed handle");
+
+            // The double free this used to be would corrupt the heap and take
+            // out whatever ran next rather than failing here.
+            NEA_AsyncRelease(job);
+        }
+        PumpFrames(2);
+        CHECK(NEA_AsyncPendingCount() == 0, "queue drained after stale use");
+    }
+
+    // --- the buffer is handed over exactly once ---------------------------
+    {
+        NEA_AsyncFile *job = NEA_FATLoadDataAsync(TILES_PATH);
+        CHECK(job != NULL, "getdata queued");
+        if (job != NULL)
+        {
+            CHECK(PumpUntilDone(job) == NEA_ASYNC_DONE, "getdata done");
+
+            size_t size = 0;
+            char *first = NEA_AsyncGetData(job, &size);
+            CHECK(first != NULL && size == TILES_SIZE, "first GetData");
+
+            // Used to return the same pointer again, so both callers would
+            // free it.
+            CHECK(NEA_AsyncGetData(job, NULL) == NULL, "second GetData");
+
+            NEA_AsyncRelease(job);
+            free(first);
+        }
+    }
+
+    // --- deleting the target of a load that already finished ---------------
+    {
+        NEA_Hw2DBG *bg = NEA_Hw2DBGCreate(NEA_ENGINE_SUB, 0,
+                                          NEA_HW2D_BG_TILED_8BPP, 256, 256);
+        CHECK(bg != NULL, "BG created for cancel test");
+        if (bg != NULL)
+        {
+            NEA_AsyncFile *job = NEA_Hw2DBGLoadTilesFATAsync(bg, TILES_PATH);
+            CHECK(job != NULL, "late cancel queued");
+            CHECK(PumpUntilDone(job) == NEA_ASYNC_DONE, "late cancel done");
+
+            // The load is finished and its result belongs to the BG now.
+            // Deleting the BG used to abort the job anyway: it reported a
+            // successful load as an error and freed a buffer the finalize step
+            // may still have been pointing at.
+            NEA_Hw2DBGDelete(bg);
+            CHECK(NEA_AsyncGetState(job) == NEA_ASYNC_DONE,
+                  "finished job stays DONE");
+
+            NEA_AsyncRelease(job);
+        }
+        PumpFrames(2);
+    }
+
+    // --- releasing a borrowed write waits for the worker -------------------
+    {
+        char *baseline = malloc(PAYLOAD_SIZE);
+        memset(baseline, 'P', PAYLOAD_SIZE);
+        CHECK(WriteSync(SAVE_PATH, baseline, PAYLOAD_SIZE),
+              "borrow baseline written");
+        free(baseline);
+
+        char *buf = malloc(PAYLOAD_SIZE);
+        memset(buf, 'Q', PAYLOAD_SIZE);
+
+        NEA_AsyncFile *job = NEA_FATWriteDataAsync(SAVE_PATH, buf,
+                                                   PAYLOAD_SIZE,
+                                                   NEA_ASYNC_WRITE_BORROW);
+        CHECK(job != NULL, "borrowed write queued");
+
+        // One frame so the worker really starts and parks inside the write.
+        PumpFrames(1);
+
+        // Used to return with the worker still reading 'buf'. Freeing it here
+        // then let the worker write out of freed memory.
+        NEA_AsyncRelease(job);
+
+        memset(buf, 0, PAYLOAD_SIZE);
+        free(buf);
+
+        // A cancelled write leaves the temporary file gone and the previous
+        // contents untouched.
+        CHECK(!FileExists(TEMP_PATH), "borrow temp cleaned up");
+        char *back = NEA_FATLoadData(SAVE_PATH);
+        CHECK(back != NULL && back[0] == 'P' && back[PAYLOAD_SIZE - 1] == 'P',
+              "borrow cancel left the old file");
+        free(back);
+
+        PumpFrames(2);
+        CHECK(NEA_AsyncPendingCount() == 0, "queue drained after borrow");
+    }
+}
+
 int main(int argc, char *argv[])
 {
     irqEnable(IRQ_HBLANK);
@@ -618,6 +798,7 @@ int main(int argc, char *argv[])
     SECTION(test_hw2d_async);
     SECTION(test_bg_overflow_clamp);
     SECTION(test_concurrency);
+    SECTION(test_lifetime);
 
     // Tearing the 2D system down with nothing in flight must be uneventful.
     NEA_Hw2DSystemEnd();

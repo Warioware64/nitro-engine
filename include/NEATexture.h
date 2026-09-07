@@ -638,6 +638,24 @@ void NEA_TexturePutPixelRGB256(u32 x, u32 y, u8 palettecolor);
 /// Use this during VBL.
 void NEA_TextureDrawingEnd(void);
 
+/// Internal use. True while a VRAM editing session is open, that is, between
+/// NEA_TextureDrawingStart() and NEA_TextureDrawingEnd(), or between
+/// NEA_PaletteModificationStart() and NEA_PaletteModificationEnd().
+///
+/// While one is open the caller holds a raw pointer into VRAM and the banks
+/// involved are in LCD mode, so NEA_AsyncProcess() must not run the finalize
+/// step of a load: it reallocates texture VRAM and puts the banks back.
+///
+/// @return True if a session is open.
+bool __NEA_VramSessionOpen(void);
+
+/// Internal use. Opens a VRAM editing session. Sessions nest.
+void __NEA_VramSessionEnter(void);
+
+/// Internal use. Closes a VRAM editing session opened by
+/// __NEA_VramSessionEnter().
+void __NEA_VramSessionExit(void);
+
 /// @}
 
 /// @defgroup texture_matrix Texture matrix

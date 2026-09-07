@@ -26,6 +26,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+
+#include <nds/cothread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -53,6 +55,8 @@ typedef struct {
     bool used;
     char name[NEA_NPAC_MAX_DRIVE_NAME + 1];
     int fd;                 // Archive file, held open for the mount's lifetime
+    // Held across the seek+read pair on 'fd'. See ne_npac_io_lock().
+    volatile bool io_busy;
     uint32_t img_offset;    // Offset of the file image within the archive file
     uint32_t img_size;
     uint8_t *fat;           // num_files * 8 bytes
@@ -117,28 +121,63 @@ static inline uint32_t ne_rd32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static int ne_npac_read_at(int fd, uint32_t offset, void *dst, size_t len)
+// Serialises the seek+read pair on a mount's archive descriptor.
+//
+// Every open member of an archive reads through the one descriptor held for the
+// mount's lifetime, and the seek and the read are not atomic: with DLDI on the
+// ARM7, read() yields to other cothreads while it waits for the card. So with
+// two asynchronous loads running against the same archive, one worker's lseek()
+// can land between the other's lseek() and read(), and that read then returns
+// bytes from the wrong file -- silently, with no error anywhere.
+//
+// Cooperative scheduling makes a plain flag a sufficient lock: nothing can
+// preempt the test-and-set below, only an explicit yield can switch away.
+static void ne_npac_io_lock(ne_npac_mount_t *m)
+{
+    while (m->io_busy)
+        cothread_yield();
+
+    m->io_busy = true;
+}
+
+static void ne_npac_io_unlock(ne_npac_mount_t *m)
+{
+    m->io_busy = false;
+}
+
+static int ne_npac_read_at(ne_npac_mount_t *m, uint32_t offset, void *dst,
+                           size_t len)
 {
     if (len == 0)
         return 0;
 
-    if (lseek(fd, (off_t)offset, SEEK_SET) != (off_t)offset)
+    ne_npac_io_lock(m);
+
+    if (lseek(m->fd, (off_t)offset, SEEK_SET) != (off_t)offset)
+    {
+        ne_npac_io_unlock(m);
         return -1;
+    }
 
     uint8_t *out = dst;
     size_t done = 0;
     while (done < len)
     {
-        ssize_t got = read(fd, out + done, len - done);
+        ssize_t got = read(m->fd, out + done, len - done);
         if (got <= 0)
+        {
+            ne_npac_io_unlock(m);
             return -1;
+        }
         done += (size_t)got;
     }
 
+    ne_npac_io_unlock(m);
     return 0;
 }
 
-static uint8_t *ne_npac_read_chunk(int fd, uint32_t offset, uint32_t len)
+static uint8_t *ne_npac_read_chunk(ne_npac_mount_t *m, uint32_t offset,
+                                   uint32_t len)
 {
     uint8_t *buf = malloc(len ? len : 1);
     if (buf == NULL)
@@ -147,7 +186,7 @@ static uint8_t *ne_npac_read_chunk(int fd, uint32_t offset, uint32_t len)
         return NULL;
     }
 
-    if (ne_npac_read_at(fd, offset, buf, len) != 0)
+    if (ne_npac_read_at(m, offset, buf, len) != 0)
     {
         free(buf);
         return NULL;
@@ -163,7 +202,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
 {
     uint8_t header[16];
 
-    if (ne_npac_read_at(m->fd, 0, header, sizeof(header)) != 0)
+    if (ne_npac_read_at(m, 0, header, sizeof(header)) != 0)
     {
         NEA_DebugPrint("Couldn't read the NPAC header");
         errno = EIO;
@@ -204,7 +243,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
     {
         uint8_t chunk[8];
 
-        if (ne_npac_read_at(m->fd, pos, chunk, sizeof(chunk)) != 0)
+        if (ne_npac_read_at(m, pos, chunk, sizeof(chunk)) != 0)
             break;
 
         uint32_t size = ne_rd32(chunk + 4);
@@ -227,7 +266,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
             }
 
             uint8_t count[4];
-            if (ne_npac_read_at(m->fd, payload, count, sizeof(count)) != 0)
+            if (ne_npac_read_at(m, payload, count, sizeof(count)) != 0)
             {
                 errno = EIO;
                 return -1;
@@ -241,7 +280,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
                 return -1;
             }
 
-            m->fat = ne_npac_read_chunk(m->fd, payload + 4,
+            m->fat = ne_npac_read_chunk(m, payload + 4,
                                         (uint32_t)m->num_files * 8);
             if (m->fat == NULL)
                 return -1;
@@ -249,7 +288,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
         else if (memcmp(chunk, "BTNF", 4) == 0)
         {
             m->fnt_size = payload_size;
-            m->fnt = ne_npac_read_chunk(m->fd, payload, payload_size);
+            m->fnt = ne_npac_read_chunk(m, payload, payload_size);
             if (m->fnt == NULL)
                 return -1;
         }
@@ -285,7 +324,9 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
     // answer; npac_format.py reads it the same way.
     if (img_is_last)
     {
+        ne_npac_io_lock(m);
         off_t end = lseek(m->fd, 0, SEEK_END);
+        ne_npac_io_unlock(m);
 
         if ((end > 0) && ((uint32_t)end > m->img_offset))
             m->img_size = (uint32_t)end - m->img_offset;
@@ -300,7 +341,7 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
             return -1;
         }
 
-        m->cmp = ne_npac_read_chunk(m->fd, cmp_offset + 4,
+        m->cmp = ne_npac_read_chunk(m, cmp_offset + 4,
                                     (uint32_t)m->num_files * 4);
         if (m->cmp == NULL)
             return -1;
@@ -740,7 +781,7 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
             return -1;
         }
 
-        if (ne_npac_read_at(m->fd, f->offset, src, stored) != 0)
+        if (ne_npac_read_at(m, f->offset, src, stored) != 0)
         {
             free(src);
             free(f);
@@ -810,7 +851,7 @@ static ssize_t ne_npac_read_cb(int fd, void *ptr, size_t len)
     {
         memcpy(ptr, f->ram + f->position, len);
     }
-    else if (ne_npac_read_at(f->mnt->fd, f->offset + f->position, ptr, len) != 0)
+    else if (ne_npac_read_at(f->mnt, f->offset + f->position, ptr, len) != 0)
     {
         errno = EIO;
         return -1;

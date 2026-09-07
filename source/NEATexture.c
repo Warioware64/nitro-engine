@@ -755,7 +755,11 @@ static bool ne_async_tex4x4_stage2(NEA_AsyncFile *job)
 {
     ne_async_tex4x4_param *p = __NEA_AsyncParam(job);
 
-    p->texture1 = NEA_FATLoadData(p->path1);
+    // Chunked and cancellable, unlike NEA_FATLoadData(): this is the second
+    // half of a texture that may be several hundred KB, and reading it in one
+    // blocking call would stall every other cothread for the whole transfer and
+    // ignore a delete of the material it is being loaded into.
+    p->texture1 = __NEA_AsyncReadFile(job, p->path1, NULL);
     free(p->path1);
     p->path1 = NULL;
 
@@ -1742,6 +1746,27 @@ static int drawingtexture_type;
 static int drawingtexture_realx;
 static u32 ne_vram_saved;
 
+// Depth of open VRAM editing sessions. See __NEA_VramSessionOpen().
+static int ne_vram_session_depth = 0;
+
+bool __NEA_VramSessionOpen(void)
+{
+    return ne_vram_session_depth > 0;
+}
+
+void __NEA_VramSessionEnter(void)
+{
+    ne_vram_session_depth++;
+}
+
+void __NEA_VramSessionExit(void)
+{
+    NEA_Assert(ne_vram_session_depth > 0, "Unbalanced VRAM session");
+
+    if (ne_vram_session_depth > 0)
+        ne_vram_session_depth--;
+}
+
 void *NEA_TextureDrawingStart(const NEA_Material *tex)
 {
     NEA_AssertPointer(tex, "NULL pointer");
@@ -1759,6 +1784,12 @@ void *NEA_TextureDrawingStart(const NEA_Material *tex)
 
     ne_vram_saved = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
                                         VRAM_D_LCD);
+
+    // drawingtexture_address is a raw pointer into texture VRAM. An async
+    // finalize running now would call NEA_MaterialTexLoad(), which can free and
+    // reissue that very range, so hold off the finalize steps until the session
+    // closes.
+    __NEA_VramSessionEnter();
 
     return drawingtexture_address;
 }
@@ -1798,6 +1829,8 @@ void NEA_TextureDrawingEnd(void)
     NEA_Assert(drawingtexture_address != NULL, "No active texture");
 
     vramRestorePrimaryBanks(ne_vram_saved);
+
+    __NEA_VramSessionExit();
 
     drawingtexture_address = NULL;
 }

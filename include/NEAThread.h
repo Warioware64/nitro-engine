@@ -107,10 +107,10 @@ typedef void (*NEA_TaskDoneFn)(NEA_Task *task, void *user);
 
 /// Reserves the worker pool. Call once, at startup.
 ///
-/// Every stack is allocated here and never grows, so the memory cost of the
-/// task system is fixed and visible at startup rather than appearing gradually
-/// during play. After this succeeds, NEA_TaskSubmit() can only fail because
-/// too many tasks are already live, never because the heap ran out.
+/// Every stack is allocated here and never grows, so the stack cost of the task
+/// system is fixed and visible at startup rather than appearing gradually
+/// during play. The task handles themselves are still allocated per submission,
+/// so NEA_TaskSubmit() can return NULL on a full heap.
 ///
 /// Calling it again tears down the existing pool first. Tasks still in flight
 /// are cancelled and waited for.
@@ -126,8 +126,15 @@ int NEA_ThreadSystemReset(int max_workers, size_t stack_size);
 /// Stops every worker and frees the pool. Called automatically by NEA_End().
 ///
 /// Tasks that are still running are asked to stop and waited for, so a task
-/// that ignores NEA_TaskShouldStop() will hang here. In debug builds this also
-/// prints the stack high-water mark of each worker.
+/// that ignores NEA_TaskShouldStop() will hang here. Pending completion
+/// callbacks are run before the handles go away, so a callback that frees what
+/// its task allocated still gets its chance. In debug builds this also prints
+/// the stack high-water mark of each worker.
+///
+/// Every task handle is freed here, whether or not the app still holds it. A
+/// handle kept across this call is stale; calling NEA_TaskRelease() or any
+/// NEA_TaskGet*() on it afterwards is detected and ignored rather than acted
+/// on, but the value it would have reported is gone.
 void NEA_ThreadSystemEnd(void);
 
 /// Maximum number of workers the pool can be asked for.
@@ -156,8 +163,12 @@ void NEA_TaskCancel(NEA_Task *task);
 
 /// Releases a task handle.
 ///
-/// If the task is still running it is cancelled first. It is safe to call at
-/// any time. After this call the handle must not be used again.
+/// If the task is still running it is cancelled first. After this call the
+/// handle must not be used again.
+///
+/// Releasing a handle twice, or releasing one that NEA_ThreadSystemEnd() has
+/// already freed, is detected and ignored instead of corrupting the heap. Do
+/// not rely on that: it is a safety net, not a licence.
 ///
 /// @param task Task handle.
 void NEA_TaskRelease(NEA_Task *task);

@@ -81,6 +81,9 @@ static volatile bool ne_thread_shutdown = false;
 // All live task handles, in submission order.
 static NEA_Task *ne_task_list = NULL;
 
+// Defined next to NEA_ThreadProcess(), which is the other caller.
+static void ne_task_run_completions(void);
+
 // Finds the worker running right now, so that the in-task helpers don't need
 // the caller to pass anything around. Returns NULL on the main thread, which is
 // what makes NEA_TaskYield() and friends safe to call from anywhere.
@@ -101,9 +104,28 @@ static int ne_frame_budget = NEA_TASK_BUDGET_DEFAULT;
 // Scanlines every worker has used between them so far this frame. Shared on
 // purpose: the budget is a slice of the frame, not a per-worker allowance.
 static int ne_budget_used = 0;
+// The frame ne_budget_used belongs to. Everything that charges the budget opens
+// a new window first if the vertical blank counter has moved on, so an app that
+// never passes NEA_UPDATE_TASKS still gets a budget that resets once per frame
+// instead of one that fills up and wedges every task at one yield per frame.
+// Kept here rather than in the interrupt handler so that the read-modify-write
+// on ne_budget_used stays confined to cothread context.
+static uint32_t ne_budget_frame = 0;
 
 // Incremented by the vertical blank handler, sampled by the stall detector.
 static volatile uint32_t ne_vbl_counter = 0;
+
+// Starts a new budget window if the frame has changed since the last one.
+static void ne_budget_refresh(void)
+{
+    uint32_t now = ne_vbl_counter;
+
+    if (ne_budget_frame != now)
+    {
+        ne_budget_frame = now;
+        ne_budget_used = 0;
+    }
+}
 #ifdef NEA_DEBUG
 // A stall spotted by the vertical blank handler, waiting to be reported.
 //
@@ -111,9 +133,11 @@ static volatile uint32_t ne_vbl_counter = 0;
 // reach the console reliably, so the message is emitted by NEA_ThreadProcess()
 // on the main thread instead.
 static volatile bool ne_stall_pending = false;
-static NEA_Task *ne_stall_task = NULL;
-static int ne_stall_worker = 0;
-static uint32_t ne_stall_frames = 0;
+// Written by the interrupt, read by NEA_ThreadProcess(). Only ever formatted
+// with %p / %d, never dereferenced, so a stale ne_stall_task is harmless.
+static NEA_Task *volatile ne_stall_task = NULL;
+static volatile int ne_stall_worker = 0;
+static volatile uint32_t ne_stall_frames = 0;
 // So that one badly behaved task is reported once, not every frame.
 static bool ne_stall_reported = false;
 #endif
@@ -154,6 +178,23 @@ static int ne_scanlines_since(int mark)
     if (delta < 0)
         delta += NEA_TASK_SCANLINES_PER_FRAME;
     return delta;
+}
+
+// True if 'task' is still a live handle. Handles are bare heap pointers given
+// to the app, and NEA_ThreadSystemEnd() frees every one of them whether or not
+// the app still holds it, so every public entry point checks membership of the
+// list before touching a handle. It also catches a handle whose address the
+// allocator has since handed to a new task: that stale pointer then addresses a
+// different, live task rather than freed memory.
+static bool ne_task_handle_valid(const NEA_Task *task)
+{
+    for (const NEA_Task *it = ne_task_list; it != NULL; it = it->next)
+    {
+        if (it == task)
+            return true;
+    }
+
+    return false;
 }
 
 // Removes a task from the global list.
@@ -222,6 +263,7 @@ static int ne_task_worker_entry(void *arg)
         int ret = task->work != NULL ? task->work(task->user) : 0;
 
         // Charge whatever the task ran since its last yield to this frame.
+        ne_budget_refresh();
         ne_budget_used += ne_scanlines_since(self->budget_mark);
         self->current = NULL;
 
@@ -354,21 +396,46 @@ void NEA_ThreadSystemEnd(void)
     bool any_running = true;
     while (any_running)
     {
+        int running_before = 0;
+
         any_running = false;
         for (int i = 0; i < ne_worker_count; i++)
         {
             if (ne_workers[i].running)
+            {
                 any_running = true;
+                running_before++;
+            }
         }
 
-        if (any_running)
+        if (!any_running)
+            break;
+
+        // Wake anything parked waiting for work, then give them the CPU so
+        // they can see the shutdown flag.
+        ne_wake_all_workers();
+        cothread_yield();
+
+        int running_after = 0;
+        for (int i = 0; i < ne_worker_count; i++)
         {
-            // Wake anything parked waiting for work or for the next frame, then
-            // give them the CPU so they can see the shutdown flag.
-            ne_wake_all_workers();
-            cothread_yield();
+            if (ne_workers[i].running)
+                running_after++;
         }
+
+        // Nothing moved. The remaining workers are parked on the vertical blank
+        // waiting out an exhausted frame budget, and a signal can't reach them
+        // there, so only the interrupt will release them. Wait for it instead
+        // of spinning on cothread_yield(), which returns immediately when
+        // nothing else is ready and would burn a whole frame at 100% CPU.
+        if (running_after == running_before)
+            cothread_yield_irq(IRQ_VBLANK);
     }
+
+    // Every worker has stopped, so the tasks that finished are final. Run their
+    // completion callbacks before the handles go away: dropping them here would
+    // silently leak whatever the callback was going to release.
+    ne_task_run_completions();
 
 #ifdef NEA_DEBUG
     // Reported now that the workers have stopped, so the figure covers every
@@ -416,6 +483,15 @@ NEA_Task *NEA_TaskSubmit(NEA_TaskFn work, NEA_TaskDoneFn done, void *user)
         return NULL;
     }
 
+    // A task submitted from a completion callback during teardown would be
+    // queued and then freed without ever running, and the caller would be left
+    // holding a handle to freed memory.
+    if (ne_thread_shutdown)
+    {
+        NEA_DebugPrint("Task system is shutting down");
+        return NULL;
+    }
+
     if (work == NULL)
         return NULL;
 
@@ -456,6 +532,9 @@ void NEA_TaskCancel(NEA_Task *task)
     if (task == NULL)
         return;
 
+    if (!ne_task_handle_valid(task))
+        return;
+
     task->stop_requested = true;
 
     // If it hasn't started there is no work function to notice the flag, so
@@ -471,6 +550,15 @@ void NEA_TaskRelease(NEA_Task *task)
 {
     if (task == NULL)
         return;
+
+    // Releasing a handle twice, or holding one across NEA_ThreadSystemEnd()
+    // (which NEA_End() calls), used to read and then free memory that is
+    // already gone.
+    if (!ne_task_handle_valid(task))
+    {
+        NEA_DebugPrint("Task handle released twice or after teardown");
+        return;
+    }
 
     // Still owned by a worker: mark it and let NEA_ThreadProcess() free it once
     // the worker has let go. Dropping the callback here stops it running
@@ -490,7 +578,7 @@ void NEA_TaskRelease(NEA_Task *task)
 NEA_TaskState NEA_TaskGetState(const NEA_Task *task)
 {
     NEA_AssertPointer(task, "NULL task pointer");
-    if (task == NULL)
+    if (!ne_task_handle_valid(task))
         return NEA_TASK_ERROR;
     return task->state;
 }
@@ -498,7 +586,7 @@ NEA_TaskState NEA_TaskGetState(const NEA_Task *task)
 int NEA_TaskGetResult(const NEA_Task *task)
 {
     NEA_AssertPointer(task, "NULL task pointer");
-    if (task == NULL)
+    if (!ne_task_handle_valid(task))
         return -1;
     return task->result;
 }
@@ -521,6 +609,7 @@ void NEA_TaskYield(void)
         return;
 
     // Charge the run since the last yield to this frame's budget.
+    ne_budget_refresh();
     ne_budget_used += ne_scanlines_since(self->budget_mark);
 
     // Tell the stall detector this task is still alive.
@@ -582,39 +671,16 @@ void NEA_TaskSetProgress(int permille)
 int NEA_TaskGetProgress(const NEA_Task *task)
 {
     NEA_AssertPointer(task, "NULL task pointer");
-    if (task == NULL)
+    if (!ne_task_handle_valid(task))
         return 0;
     return task->progress;
 }
 
-void NEA_ThreadProcess(void)
+// Runs the pending completion callbacks. A callback may release its own handle
+// and any other, which unlinks and frees them, so the scan restarts from the
+// head after every one instead of holding a 'next' pointer across the call.
+static void ne_task_run_completions(void)
 {
-    if (!ne_thread_inited)
-        return;
-
-    // Open a new budget window and release whatever parked when the last one
-    // ran out.
-    // Workers waiting out an exhausted budget wake on the vertical blank by
-    // themselves, so opening the new window is just resetting the counter.
-    ne_budget_used = 0;
-
-#ifdef NEA_DEBUG
-    // Report a stall the vertical blank handler spotted. Doing it here, on the
-    // main thread, is what makes the message actually appear: printing from an
-    // interrupt handler doesn't reliably reach the console.
-    if (ne_stall_pending)
-    {
-        ne_stall_pending = false;
-        ne_stall_reported = true;
-        NEA_DebugPrint("Task %p on worker %d ran %d frames without yielding. "
-                       "Call NEA_TaskYield() more often.",
-                       ne_stall_task, ne_stall_worker, (int)ne_stall_frames);
-    }
-#endif
-
-    // Run the completion callbacks. A callback may release its own handle and
-    // any other, which unlinks and frees them, so the scan restarts from the
-    // head after every one instead of holding a 'next' pointer across the call.
     bool finished_one = true;
     while (finished_one)
     {
@@ -634,6 +700,41 @@ void NEA_ThreadProcess(void)
             break;
         }
     }
+}
+
+void NEA_ThreadProcess(void)
+{
+    if (!ne_thread_inited)
+        return;
+
+    // Open a new budget window and release whatever parked when the last one
+    // ran out.
+    // Workers waiting out an exhausted budget wake on the vertical blank by
+    // themselves, so opening the new window is just resetting the counter.
+    // Forced rather than left to ne_budget_refresh(), because this is the frame
+    // boundary as the app sees it even if no vertical blank has been counted.
+    ne_budget_frame = ne_vbl_counter;
+    ne_budget_used = 0;
+
+#ifdef NEA_DEBUG
+    // Report a stall the vertical blank handler spotted. Doing it here, on the
+    // main thread, is what makes the message actually appear: printing from an
+    // interrupt handler doesn't reliably reach the console.
+    if (ne_stall_pending)
+    {
+        // 'reported' first: it is the flag that keeps the interrupt from
+        // re-arming, and clearing 'pending' before setting it would leave a
+        // window where a vertical blank could overwrite the record half way
+        // through printing it.
+        ne_stall_reported = true;
+        ne_stall_pending = false;
+        NEA_DebugPrint("Task %p on worker %d ran %d frames without yielding. "
+                       "Call NEA_TaskYield() more often.",
+                       ne_stall_task, ne_stall_worker, (int)ne_stall_frames);
+    }
+#endif
+
+    ne_task_run_completions();
 
     // Free the handles the app gave up while they were still running.
     NEA_Task *task = ne_task_list;

@@ -67,6 +67,11 @@ typedef enum {
 NEA_ExecutionModes NEA_CurrentExecutionMode(void);
 
 /// Ends Nitro Engine Advanced and frees all memory used by it.
+///
+/// This also stops the asynchronous asset loader and the background task pool,
+/// and frees every NEA_AsyncFile and NEA_Task handle whether or not the app
+/// still holds it. Handles kept across this call are stale: releasing or
+/// querying one afterwards is detected and ignored rather than acted on.
 void NEA_End(void);
 
 /// Inits Nitro Engine Advanced and 3D mode in one screen.
