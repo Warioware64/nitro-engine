@@ -4,6 +4,65 @@ Changelog
 Unreleased
 ----------
 
+**New: the DSi's extended audio output.** A DSi drives its speakers over an I2S
+link to a TSC2117 codec that a DS does not have, and ``NEASound.h`` now reaches
+it. ``NEA_SoundEnableDSiOutput()`` switches that link between the DS's 32.73 kHz
+and the DSi's 47.61 kHz, and ``NEA_SoundSetDSiMixRatio()`` moves the fader
+between the DSi's Teak DSP and the legacy sixteen channels. Both are opt-in and
+both are no-ops on a DS, so a ROM that never asks sends nothing to the ARM7 and
+sounds exactly as it did.
+
+- **The request has to outlive initialization, so it does.** libnds'
+  ``soundEnable()`` forces the register back to 32 kHz and 100% legacy output
+  every time it runs, and ``NEA_SoundSystemReset()`` calls it. So the request is
+  recorded and pushed again afterwards, by all three reset entry points. That is
+  what makes ``NEA_SoundEnableDSiOutput()`` callable before the sound system is
+  up as readily as after -- which is the order a settings screen actually needs
+  -- and it survives ``NEA_SoundSystemEnd()``.
+- **It is re-applied before Maxmod is initialized, not after.** Changing the
+  rate is not a register write: the ARM7 drops the I2S enable bit, reprograms
+  the codec's PLL and clock dividers over SPI, then re-enables. TwlSDK requires
+  all audio, touch and microphone sampling stopped first, and the gap between
+  ``soundEnable()`` and ``mmInitDefaultMem()`` is the only moment where that is
+  guaranteed rather than merely hoped for -- Maxmod has no module, no effects
+  and no stream yet.
+- **Nothing is cached, and that is deliberate.** Skipping the send when the
+  requested rate matches the last one applied looks like an easy win and is
+  wrong: the tracked value goes stale the instant ``soundEnable()`` resets the
+  register behind us. The ARM7 already compares against SNDEXCNT itself and
+  returns without touching the codec when the rate matches, so asking for the
+  rate you already have is free anyway.
+- **A DS-only ROM on a DSi is still a no-op**, which is the case ``isDSiMode()``
+  gets wrong on its own -- it reports the console, not the ROM.
+  ``NEA_SoundDSiOutputAvailable()`` mirrors the ARM7's own test and checks the
+  ROM's DSi application flag too, since the codec hangs off an SPI bus a ROM
+  without TWL access rights cannot reach. The short-circuit order matters: on a
+  DS that header address is ordinary main RAM and would read back garbage.
+- **The mix ratio is a second master volume, not a quality setting.** It weighs
+  the DSP against the legacy channels, and Maxmod -- every module, effect and
+  stream this module plays -- is on the legacy side. Below 8 it simply
+  attenuates NEA's audio, to silence at 0. Worth saying out loud rather than
+  leaving to be discovered.
+- **Mute and the I2S enable bit are deliberately absent.** SNDEXCNT is at
+  0x04004700 and is ARM7-only, so every change goes through an ARM7 command, and
+  a stock BlocksDS ARM7 core implements commands for the frequency and the ratio
+  and nothing else. Reaching the other two bits would mean shipping a custom
+  ARM7 core in order to play a sound, so ``NEA_SoundDisableDSiOutput()`` restores
+  the stock configuration instead of switching the output off, and says so.
+- **Examples**: all three of ``examples/sound/`` gained a DSi panel, and between
+  them they cover the three ways playback has to be quiesced before the rate
+  moves. ``music_sfx`` pauses and resumes the module; ``spatial_sfx`` stops and
+  restarts its looping spatial sources, which re-trigger on a frame counter and
+  so will not fall silent on their own; ``streaming`` closes and reopens the
+  stream, because a timer-driven refill has no pause at all -- its circular
+  buffer is left alone, so audio resumes where it was and only the sample
+  position restarts. In each one ``SELECT`` switches the rate through the
+  documented recipe rather than demonstrating the trap, and L/R sweeps the mix.
+  The mix is the control to try first: 8 down to 0 fades the audio to silence
+  and back, which is the unmistakable proof the register is being written.
+
+Confirmed working on a retail DSi.
+
 **New: stylus pattern recognition.** ``NEAPattern.h`` turns a drawn shape into
 a meaning -- a gesture, a digit, a letter -- the way retail DS games did for
 handwriting entry and gesture commands. ``NEA_PatternStrokesFeedTouch()``

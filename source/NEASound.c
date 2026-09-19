@@ -15,9 +15,45 @@ static int ne_max_sound_sources;
 static bool ne_sound_system_inited = false;
 static NEA_Camera *ne_sound_listener = NULL;
 
+// Requested DSi extended output state. These deliberately survive
+// NEA_SoundSystemEnd(): libnds resets SNDEXCNT to 32 kHz / ratio 8 every time
+// sound is enabled, so the request has to outlive re-initialization to mean
+// anything. Same reasoning as NEA_DisplayListEnableNDMA().
+static NEA_DSiSoundFreq ne_sound_dsi_freq = NEA_DSI_SOUND_FREQ_32KHZ;
+static int ne_sound_dsi_ratio = 8;
+
 // =========================================================================
 // System lifecycle
 // =========================================================================
+
+// Mirrors libnds cdcIsAvailable(), which we can't call: it lives in
+// nds/arm7/codec.h, an ARM7-only header.
+//
+// The order of the && is a correctness requirement, not a style choice. On a DS
+// there is no DSi header at 0x02FFE000 -- the address folds through the main
+// RAM mirror to ordinary application-reachable memory, so appflags reads back
+// whatever the heap left there, and roughly half of arbitrary bytes have bit 0
+// set. It won't fault, it will just lie. isDSiMode() short-circuiting first is
+// what keeps the read from happening at all. Don't reorder it, and don't hoist
+// the appflags read out of here.
+static bool ne_sound_dsi_available(void)
+{
+    return isDSiMode() && (__DSiHeader->appflags & 0x01);
+}
+
+// Pushes the requested SNDEXCNT state to the ARM7. Always sends, and must never
+// be made to skip a send when the value looks unchanged: soundEnable() resets
+// the register behind our back, so our record goes stale exactly when the send
+// matters most. The ARM7 does the real comparison by reading SNDEXTCNT, and
+// returns without touching the codec when the rate already matches.
+static void ne_sound_dsi_apply(void)
+{
+    if (!ne_sound_dsi_available())
+        return;
+
+    soundExtSetFrequency(ne_sound_dsi_freq);
+    soundExtSetRatio(ne_sound_dsi_ratio);
+}
 
 static int ne_sound_alloc_pool(int max_sources)
 {
@@ -44,7 +80,15 @@ static int ne_sound_alloc_pool(int max_sources)
 
 int NEA_SoundSystemResetPool(int max_sources)
 {
-    return ne_sound_alloc_pool(max_sources);
+    int ret = ne_sound_alloc_pool(max_sources);
+    if (ret != 0)
+        return ret;
+
+    // No soundEnable() on this path -- the caller initializes Maxmod itself --
+    // but apply anyway so all three entry points leave SNDEXCNT in the state
+    // the app asked for.
+    ne_sound_dsi_apply();
+    return 0;
 }
 
 int NEA_SoundSystemReset(mm_addr soundbank, int max_sources)
@@ -54,6 +98,13 @@ int NEA_SoundSystemReset(mm_addr soundbank, int max_sources)
         return ret;
 
     soundEnable();
+
+    // soundEnable() resets SNDEXCNT to 32 kHz and ratio 8, so the request has
+    // to be re-applied after it. Doing it before Maxmod init is also the last
+    // moment at which nothing is playing, which is what switching the I2S rate
+    // requires.
+    ne_sound_dsi_apply();
+
     mmInitDefaultMem(soundbank);
     return 0;
 }
@@ -65,6 +116,9 @@ int NEA_SoundSystemResetFAT(const char *soundbank_path, int max_sources)
         return ret;
 
     soundEnable();
+
+    // See NEA_SoundSystemReset() for why this goes here.
+    ne_sound_dsi_apply();
 
     if (!mmInitDefault((char *)soundbank_path))
     {
@@ -87,6 +141,90 @@ void NEA_SoundSystemEnd(void)
     ne_sound_sources = NULL;
     ne_sound_listener = NULL;
     ne_sound_system_inited = false;
+}
+
+// =========================================================================
+// DSi extended audio output (SNDEXCNT)
+// =========================================================================
+
+bool NEA_SoundDSiOutputAvailable(void)
+{
+    return ne_sound_dsi_available();
+}
+
+int NEA_SoundEnableDSiOutput(NEA_DSiSoundFreq freq)
+{
+    if ((freq != NEA_DSI_SOUND_FREQ_32KHZ) && (freq != NEA_DSI_SOUND_FREQ_47KHZ))
+    {
+        NEA_DebugPrint("Invalid DSi output frequency");
+        return -1;
+    }
+
+    // Nothing is recorded when the request can't be honoured, so the getters
+    // never claim a rate the hardware isn't running. Availability is fixed
+    // before main(), so this can't become true later.
+    if (!ne_sound_dsi_available())
+    {
+        NEA_DebugPrint("DSi extended audio output not available");
+        return -1;
+    }
+
+#ifdef NEA_DEBUG
+    // Only a hint: mmActive() covers modules, not effects or streams. Enough
+    // to catch the common mistake without pretending to be a guarantee.
+    if ((freq != ne_sound_dsi_freq) && mmActive())
+        NEA_DebugPrint("Changing I2S rate while music is playing");
+#endif
+
+    ne_sound_dsi_freq = freq;
+
+    ne_sound_dsi_apply();
+    return 0;
+}
+
+void NEA_SoundDisableDSiOutput(void)
+{
+    if (!ne_sound_dsi_available())
+        return;
+
+    ne_sound_dsi_ratio = 8;
+    NEA_SoundEnableDSiOutput(NEA_DSI_SOUND_FREQ_32KHZ);
+}
+
+int NEA_SoundSetDSiMixRatio(int ratio)
+{
+    NEA_AssertMinMax(0, ratio, 8, "Mix ratio must be 0-8");
+
+    // The asserts print but don't abort, and compile out entirely without
+    // NEA_DEBUG, so clamp regardless.
+    if (ratio < 0)
+        ratio = 0;
+    else if (ratio > 8)
+        ratio = 8;
+
+    if (!ne_sound_dsi_available())
+    {
+        NEA_DebugPrint("DSi extended audio output not available");
+        return -1;
+    }
+
+    ne_sound_dsi_ratio = ratio;
+
+    // Only the ratio: a full apply would re-send the frequency too, and the
+    // whole point of this call being safe mid-playback is that it can't reach
+    // the codec.
+    soundExtSetRatio(ne_sound_dsi_ratio);
+    return 0;
+}
+
+NEA_DSiSoundFreq NEA_SoundGetDSiOutputFreq(void)
+{
+    return ne_sound_dsi_freq;
+}
+
+int NEA_SoundGetDSiMixRatio(void)
+{
+    return ne_sound_dsi_ratio;
 }
 
 // =========================================================================

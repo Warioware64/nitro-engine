@@ -7,6 +7,18 @@
 // WAV streaming example: demonstrates NEA_StreamOpen() and NEA_StreamClose()
 // by streaming a WAV file from NitroFS through a circular buffer. Based on
 // the BlocksDS maxmod streaming example.
+//
+// It is also the hardest case for the DSi extended audio output (SNDEXCNT),
+// which is why the controls are here. A stream is refilled off a hardware
+// timer, so there is no "pause" to hide behind: switching the I2S rate means
+// closing the stream, changing the rate, and opening it again. The circular
+// buffer is untouched across that, so playback carries on from where it was --
+// only NEA_StreamGetPosition() restarts, because maxmod counts samples per
+// stream rather than per file.
+//
+// SELECT switches the rate, L/R sweeps the DSP/ARM mix ratio. The ratio needs
+// none of this ceremony: it is a single register write and is safe to change
+// while the stream runs. On a DS both are no-ops.
 
 #include <stdio.h>
 #include <string.h>
@@ -236,8 +248,13 @@ int main(int argc, char *argv[])
     };
     mmInit(&mmSys);
 
-    // Initialize NEA sound system pool only (maxmod already inited above)
+    // Initialize NEA sound system pool only (maxmod already inited above).
+    // This path never calls soundEnable(), but it still pushes the DSi request
+    // so all three reset entry points behave the same.
+    NEA_SoundEnableDSiOutput(NEA_DSI_SOUND_FREQ_47KHZ);
     NEA_SoundSystemResetPool(1);
+
+    bool dsi_audio = NEA_SoundDSiOutputAvailable();
 
     // Open the stream using NEA wrapper
     mm_stream_formats fmt = getMMStreamType(wavHeader.numChannels,
@@ -246,6 +263,8 @@ int main(int argc, char *argv[])
                    fmt, MM_TIMER0);
 
     printf("Streaming WAV...\n\n");
+    printf("SELECT: DSi rate\n");
+    printf("L/R:    DSi mix ratio\n");
     printf("START: Return to loader\n");
 
     while (1)
@@ -255,11 +274,44 @@ int main(int argc, char *argv[])
         // Keep the circular buffer filled
         streamingFillBuffer(false);
 
-        printf("\x1b[12;0HPosition: %u samples\n",
+        printf("\x1b[14;0HPosition: %u samples\n",
                NEA_StreamGetPosition());
+
+        if (dsi_audio)
+        {
+            printf("DSi: %s  mix %d/8\n",
+                   NEA_SoundGetDSiOutputFreq() == NEA_DSI_SOUND_FREQ_47KHZ ?
+                   "47.61kHz" : "32.73kHz",
+                   NEA_SoundGetDSiMixRatio());
+        }
+        else
+        {
+            printf("DSi: output not available\n");
+        }
 
         scanKeys();
         uint16_t keys_down = keysDown();
+
+        // Switching the I2S rate reprograms the codec PLL, and a stream has no
+        // pause: close it, change the rate, open it again. The circular buffer
+        // is left alone, so audio resumes where it left off.
+        if (keys_down & KEY_SELECT)
+        {
+            NEA_DSiSoundFreq next =
+                (NEA_SoundGetDSiOutputFreq() == NEA_DSI_SOUND_FREQ_32KHZ) ?
+                NEA_DSI_SOUND_FREQ_47KHZ : NEA_DSI_SOUND_FREQ_32KHZ;
+
+            NEA_StreamClose();
+            NEA_SoundEnableDSiOutput(next);
+            NEA_StreamOpen(wavHeader.sampleRate, 2048, streamingCallback,
+                           fmt, MM_TIMER0);
+        }
+
+        // The ratio is hot-swappable, so no ceremony here.
+        if (keys_down & KEY_L)
+            NEA_SoundSetDSiMixRatio(NEA_SoundGetDSiMixRatio() - 1);
+        if (keys_down & KEY_R)
+            NEA_SoundSetDSiMixRatio(NEA_SoundGetDSiMixRatio() + 1);
 
         if (keys_down & KEY_START)
             break;
