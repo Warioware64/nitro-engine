@@ -2174,6 +2174,10 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if ((flags & NEA_UPDATE_POSTFX) && NEA_PostFXUpdate)
         NEA_PostFXUpdate();
 
+    extern void NEA_DspFXUpdate(void) __attribute__((weak));
+    if ((flags & NEA_UPDATE_DSPFX) && NEA_DspFXUpdate)
+        NEA_DspFXUpdate();
+
     ne_cpucount = 0;
 }
 

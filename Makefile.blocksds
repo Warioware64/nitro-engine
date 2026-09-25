@@ -101,7 +101,12 @@ ifneq ($(GFXDIRS),)
     INCLUDEDIRS	+= $(addprefix $(BUILDDIR)/,$(GFXDIRS))
 endif
 
-SOURCES_S	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
+# source/dsp/ is Teak DSP code, C and assembly, built by a different toolchain
+# entirely (see the NEA_TEAK block below). It must never reach
+# arm-none-eabi-gcc, which is what the blanket finds would otherwise do.
+SOURCES_S_ALL	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
+SOURCES_S_TEAK	:= $(filter source/dsp/%,$(SOURCES_S_ALL))
+SOURCES_S	:= $(filter-out $(SOURCES_S_TEAK),$(SOURCES_S_ALL))
 SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
 
 # Partition the C sources between the two archives. Everything under
@@ -114,7 +119,70 @@ SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
 SOURCES_C_ALL	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
 SOURCES_C_BOX3D	:= $(filter source/box3d/%,$(SOURCES_C_ALL)) \
 		   $(filter source/NEAPhysics3D.c,$(SOURCES_C_ALL))
-SOURCES_C	:= $(filter-out $(SOURCES_C_BOX3D),$(SOURCES_C_ALL))
+SOURCES_C_TEAK	:= $(filter source/dsp/%,$(SOURCES_C_ALL))
+SOURCES_C	:= $(filter-out $(SOURCES_C_BOX3D) $(SOURCES_C_TEAK),$(SOURCES_C_ALL))
+
+# Teak DSP (DSi only, opt-in with NEA_TEAK=1)
+# ------------------------------------------
+#
+# The DSP program is built here, at library build time, and the resulting TLF
+# blob is embedded in libNEA.a. A game keeps the stock rom_arm9 Makefile and
+# just calls NEA_DspInit(); it needs neither the rom_arm9teak template nor a
+# teak/ directory of its own.
+#
+# llvm-teak is not part of a default BlocksDS install, so its absence must not
+# break the build: NEADsp.c compiles either way and reports the DSP as
+# unavailable, and every DSP-backed feature runs its ARM9 fallback.
+
+LLVM_TEAK_PATH	?= $(BLOCKSDSEXT)/llvm-teak/bin/
+LIBTEAK		?= $(BLOCKSDSEXT)/libteak
+TEAK_CC		:= $(LLVM_TEAK_PATH)clang
+TEAK_LD		:= $(LLVM_TEAK_PATH)ld.lld
+TEAKTOOL	:= $(LIBTEAK)/bin/teaktool
+BIN2C		:= $(BLOCKSDS)/tools/bin2c/bin2c
+
+ifeq ($(NEA_TEAK),1)
+    ifeq ($(wildcard $(TEAK_CC))$(wildcard $(TEAKTOOL)),)
+        $(warning NEA_TEAK=1 but llvm-teak/libteak are not installed in $(BLOCKSDSEXT))
+        $(warning Building without DSP support; NEA_DspInit() will return false)
+        NEA_TEAK_ENABLED := 0
+    else
+        NEA_TEAK_ENABLED := 1
+    endif
+else
+    NEA_TEAK_ENABLED := 0
+endif
+
+ifeq ($(NEA_TEAK_ENABLED),1)
+
+DEFINES		+= -DNEA_TEAK
+
+TEAK_BUILDDIR	:= $(BUILDDIR)/teak
+TEAK_ELF	:= $(TEAK_BUILDDIR)/nea_dsp.elf
+TEAK_TLF	:= $(TEAK_BUILDDIR)/nea_dsp_tlf.bin
+TEAK_MAP	:= $(TEAK_BUILDDIR)/nea_dsp.map
+TEAK_BLOB_C	:= $(TEAK_BUILDDIR)/nea_dsp_tlf_bin.c
+TEAK_BLOB_H	:= $(TEAK_BUILDDIR)/nea_dsp_tlf_bin.h
+TEAK_BLOB_O	:= $(TEAK_BUILDDIR)/nea_dsp_tlf_bin.c.o
+
+INCLUDEDIRS	+= $(TEAK_BUILDDIR)
+
+TEAK_OBJS	:= $(addsuffix .o,$(addprefix $(TEAK_BUILDDIR)/,$(SOURCES_C_TEAK) $(SOURCES_S_TEAK)))
+
+# -integrated-as is not optional. Without it clang hands its own output to a
+# GNU assembler that rejects instructions the Teak backend emits.
+TEAK_ARCH	:= --target=teak -march=teak
+TEAK_DEFINES	:= -D__NDS__ -D__BLOCKSDS__ -DTEAK
+TEAK_INCLUDES	:= -I$(LIBTEAK)/include -Isource/dsp -Iinclude
+TEAK_CFLAGS	:= -std=gnu17 -Wall $(TEAK_ARCH) -O2 -integrated-as \
+		   -nostdlib -ffreestanding -fno-builtin \
+		   $(TEAK_DEFINES) $(TEAK_INCLUDES)
+TEAK_ASFLAGS	:= $(TEAK_ARCH) -integrated-as -x assembler-with-cpp \
+		   $(TEAK_DEFINES) $(TEAK_INCLUDES)
+TEAK_LDFLAGS	:= -L$(LIBTEAK)/lib -Map $(TEAK_MAP) -nostdlib \
+		   -T $(LIBTEAK)/teak.ld --start-group -lteak --end-group
+
+endif # NEA_TEAK_ENABLED (variables)
 
 # Compiler and linker flags
 # -------------------------
@@ -157,6 +225,10 @@ OBJS_SOURCES	:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_S))) \
 		   $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_CPP)))
 
 OBJS		:= $(OBJS_ASSETS) $(OBJS_SOURCES)
+
+ifeq ($(NEA_TEAK_ENABLED),1)
+OBJS		+= $(TEAK_BLOB_O)
+endif
 
 OBJS_BOX3D	:= $(addsuffix .o,$(addprefix $(BUILDDIR)/,$(SOURCES_C_BOX3D)))
 
@@ -253,9 +325,12 @@ itcm-report: $(ARCHIVE_BOX3D)
 	fi
 	@$(RM) $(BUILDDIR)/.itcm-sizes
 
+# Recreated rather than updated: `ar rcs` never drops a member, so an object
+# that left OBJS (the DSP blob, when NEA_TEAK is turned off) would linger.
 $(ARCHIVE): $(OBJS)
 	@echo "  AR      $@"
 	@$(MKDIR) -p $(@D)
+	$(V)$(RM) $@
 	$(V)$(AR) rcs $@ $(OBJS)
 
 $(ARCHIVE_BOX3D): $(OBJS_BOX3D)
@@ -502,6 +577,53 @@ $(BUILDDIR)/%.png.o $(BUILDDIR)/%.h : %.png %.grit
 # -----------------------------------------------
 
 $(SOURCES_S) $(SOURCES_C) $(SOURCES_CPP): $(HEADERS_ASSETS)
+
+ifeq ($(NEA_TEAK_ENABLED),1)
+
+$(TEAK_BUILDDIR)/%.c.o : %.c
+	@echo "  CC.TEAK $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(TEAK_CC) $(TEAK_CFLAGS) -MMD -MP -c -o $@ $<
+
+$(TEAK_BUILDDIR)/%.s.o : %.s
+	@echo "  AS.TEAK $<"
+	@$(MKDIR) -p $(@D)
+	$(V)$(TEAK_CC) $(TEAK_ASFLAGS) -MMD -MP -c -o $@ $<
+
+$(TEAK_ELF): $(TEAK_OBJS)
+	@echo "  LD.TEAK $@"
+	@$(MKDIR) -p $(@D)
+	$(V)$(TEAK_LD) -o $@ $(TEAK_OBJS) $(TEAK_LDFLAGS)
+
+$(TEAK_TLF): $(TEAK_ELF)
+	@echo "  TEAKTOOL $@"
+	$(V)$(TEAKTOOL) -i $< -o $@ > /dev/null
+
+$(TEAK_BLOB_C) $(TEAK_BLOB_H) &: $(TEAK_TLF)
+	@echo "  BIN2C   $<"
+	$(V)$(BIN2C) $< $(@D)
+
+$(TEAK_BLOB_O): $(TEAK_BLOB_C)
+	@echo "  CC      $<"
+	$(V)$(CC) $(CFLAGS) -c -o $@ $<
+
+# NEADsp.c includes the generated header, so the blob has to exist first.
+$(BUILDDIR)/source/NEADsp.c.o: $(TEAK_BLOB_H)
+
+DEPS		+= $(TEAK_OBJS:.o=.d)
+
+endif # NEA_TEAK_ENABLED (rules)
+
+# NEADsp.c compiles to a stub or to the real runtime depending on -DNEA_TEAK,
+# which is not a file, so flipping NEA_TEAK would otherwise leave the previous
+# object in the archive. Same stamp technique as the Box3D configuration.
+TEAK_CONFIG_STAMP := $(BUILDDIR)/.teak-config
+
+$(shell mkdir -p $(BUILDDIR); \
+	[ "$$(cat $(TEAK_CONFIG_STAMP) 2>/dev/null)" = "$(NEA_TEAK_ENABLED)" ] \
+	  || printf '%s' "$(NEA_TEAK_ENABLED)" > $(TEAK_CONFIG_STAMP))
+
+$(BUILDDIR)/source/NEADsp.c.o: $(TEAK_CONFIG_STAMP)
 
 # Include dependency files if they exist
 # --------------------------------------

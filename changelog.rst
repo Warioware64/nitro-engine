@@ -4,6 +4,163 @@ Changelog
 Unreleased
 ----------
 
+**New: a water reflection and full-screen effects made by the DSi's DSP
+(``NEADspFX.h``).** Both capture the 3D image with the display capture, reserve
+VRAM banks (set them up before ``NEA_TextureSystemReset()``, which leaves those
+banks out) and run from ``NEA_WaitForVBL(NEA_UPDATE_DSPFX)``. Without a DSP the
+ARM9 does the same work.
+
+- **Reflection (``NEA_DspReflect*``), a screen-space mirror.** Every frame the
+  top 128 lines of the 3D image go into one bank (its two halves in turn). After
+  the scene, ``NEA_DspReflectProcess()`` has the DSP mirror the lines above a
+  water line, scale them to 128 pixels wide, ripple them and optionally tint
+  them into a RAM-backed texture, uploaded at the next VBlank.
+  ``examples/dsp/dsp_reflection`` draws it under the water line.
+- **Full-screen effects (``NEA_DspScreenFX*``).** The whole 3D image is captured
+  into one of two banks, blurred, bloomed and graded in place, then shown as a
+  bitmap background in front of the live 3D layer: an image every two frames
+  (30 fps) when the effects fit in one, fewer otherwise
+  (``NEA_DspScreenFXGetRate()``). ``examples/dsp/dsp_screen_fx``.
+- **Displacement reads rows upwards and scales width.** A negative source stride
+  mirrors the image, and ``NEA_DspDisplaceBuildScaled()`` maps a wider source
+  to the output width; that is the reflection.
+- ``NEA_DspJobIsDone()`` tells whether collecting a DSP job would wait.
+
+**New: bloom on the DSi's DSP (``NEA_DspBloom*``, in ``NEADspFX.h``).** Bright
+areas glow into their surroundings: each 2x2 block's brightness above a
+threshold is kept, blurred with [1 4 6 4 1] / 16 across and down at half size,
+and added back with each channel saturating at white. Images up to 256x192
+with an even size, in place or not; without a DSP the ARM9 gives the same
+pixels. ``examples/dsp/dsp_bloom`` compares the two.
+
+- **One job, one pass over the image.** Source rows stream in once; the DSP
+  keeps rings of source rows, half-size rows and bloom rows, and writes each
+  output row once. Chaining separate downsample, blur and add jobs would move
+  the image over the bus several times, which is what dominates small jobs.
+- **Floors and ceilings without unpacking.** The bright-pass subtracts with a
+  guard bit above each field and the add saturates the same way
+  (``m - (m >> 5)`` widens each guard into a field mask), on the R|B and G
+  planes blur already uses.
+
+**New: blur on the DSi's DSP (``NEA_DspBlur*``, in ``NEADspFX.h``).** A
+separable [1 2 1] / 4 filter across and down, edges clamped, on 16-bit images up
+to 256x192, in place or not; blurring twice gives the [1 4 6 4 1] / 16
+Gaussian. Without a DSP the ARM9 gives the same pixels. ``examples/dsp/dsp_blur``
+compares the two.
+
+- **Channels are never unpacked.** A pixel is split into R|B (``p & 0x7C1F``)
+  and G (``p & 0x03E0``); a weighted sum of up to 4 keeps R within the 5 free
+  bits above it, so each plane is filtered with plain additions and shifts.
+  46 Teak instructions per pixel for both passes.
+- The DSP's data memory is nearly full, so blur borrows the colour grading
+  job's 16K-word table as its work area; the next grading job rebuilds it.
+
+**New: displacement on the DSi's DSP (``NEA_DspDisplace*``, in
+``NEADspFX.h``).** Heat haze, underwater wobble and ripples: each pixel reads
+the source at an offset made of a per-column and a per-row term (crossed sine
+waves with ``NEA_DspDisplaceAddWave()``, ``NEA_DspDisplaceHeatHaze()`` and
+``NEA_DspDisplaceRipple()``), clamped to the image, up to 32 pixels sideways
+and 6 vertically, on images up to 256x192. Without a DSP the ARM9 gives the
+same pixels. ``examples/dsp/dsp_displace`` compares the two.
+
+- **10 Teak instructions per pixel, no multiplication.** Source rows stream
+  into a ring of 16 rows on the DSP, each padded with copies of its edge
+  pixels so that clamping sideways costs nothing, while the one DMA channel
+  alternates between reading rows and writing results.
+- The tables are rebuilt every frame on the ARM9 (under a millisecond), and
+  ``NEA_DspDisplaceBuild()`` waits only until a DSP job using them has its own
+  copy.
+- A failed DSP job is redone on the ARM9 and restarts the DSP, so the result is
+  always right.
+
+**New: colour grading on the DSi's DSP (``NEADspFX.h``).** A grade is a 3x3
+colour matrix with offsets followed by a tone curve per channel, composed with
+``NEA_DspGradeSaturate()``, ``NEA_DspGradeSepia()``,
+``NEA_DspGradeHueRotate()``, ``NEA_DspGradeTint()``, ``NEA_DspGradeInvert()``
+and ``NEA_DspGradeContrast()``, then applied to a 16-bit image in main RAM or
+VRAM with ``NEA_DspGradeApply()`` or ``NEA_DspGradeBegin()`` / ``End()``.
+Without a DSP the same grade runs on the ARM9 and gives the same pixels, bit for
+bit. ``examples/dsp/dsp_grade`` compares the two.
+
+- **No multiplication per pixel, on either processor.** The ARM9 folds the
+  matrix into two tables of packed contributions (indexed by R|G and by B), and
+  the DSP expands the curves into a 16K-entry table indexed by the packed sum.
+  The Teak kernel is hand-written assembly, 24 instructions per pixel.
+- **The DSP reads and writes VRAM directly**, including in place, which is the
+  case of a captured frame.
+- ``NEA_DspGradeBuild()`` refuses a grade whose matrix could leave the range
+  the packed tables hold, rather than producing wrapped colours.
+- **Transfers overlap the grading.** The DSP grades 128-pixel blocks of a ring
+  while its one DMA channel alternates between reading the next pixels and
+  writing graded ones. On a DSi a 256x192 frame went from 18.7 ms (kernel then
+  transfers) to 12.3 ms, against 26.5 ms for the ARM9 doing it alone.
+- **Display lists and DSP transfers take turns.** On a DSi, any DMA feeding
+  the GFX FIFO (legacy or NDMA, FIFO- or IRQ-fed) while the DSP moves data with
+  its own DMA wedges the DSP's bus access (AHBM) for good. Measured with
+  ``examples/dsp/dsp_3d_qualify``, 150 jobs during a scene each: legacy DMA
+  failed 150 times, NDMA 78, DMA fed by the FIFO IRQ 58, NDMA fed by the IRQ
+  16; the CPU path never, but it took 22.3 ms to send the scene against 7 ms
+  by DMA. So while a DSP job runs, ``NEA_DisplayListDrawDefault()`` holds a
+  gate on the APBP semaphores for each display list it sends by DMA: the DSP
+  finishes the transfer in flight, starts no new one and keeps computing until
+  the display list is sent. IRQ-fed paths can't be fenced and go by CPU.
+  ``NEA_DisplayListSetDspGuard()`` turns this off for testing.
+- **The DSP restarts itself after a stalled transfer** (``NEA_DspReset()``),
+  since a wedged AHBM otherwise fails every job after it.
+- **No two-pass integration ships.** Grading each half of the two-pass FIFO
+  and DMA modes on the DSP was built twice and tested on a DSi. Even with the
+  job started after the scene, 22% of jobs still stalled, and gating the
+  VBlank handler's DMA work as well didn't cure it: two-pass DMA mode runs
+  several ARM9 DMAs at once (the per-pass copy, the HBlank display DMA, the
+  VBlank handler's fills) and one of them still collides. It was removed
+  rather than shipped unreliable.
+- **A failed DSP grading job still gives the right image.** ``NEA_DspGradeEnd()``
+  grades it on the ARM9 instead, unless it was in place (the DSP may have
+  graded part of it already). ``NEA_DspGradeGetLastStatus()`` reports where a
+  stalled transfer stuck, ``NEA_DspGradeGetFailureCount()`` how often.
+- **A DSP transfer is finished only once AHBM has drained.** Disconnecting the
+  AHBM channel as soon as the DMA channel reported done could cut off writes
+  still on their way to ARM9 memory while the ARM9's own DMA held the bus.
+- ``NEA_DspGradeBeginRect()`` grades a rectangle inside a larger image.
+- ``NEA_DspGradeBegin()`` now writes back the whole data cache (4 KB, a few
+  microseconds) instead of walking 192 KB of buffers line by line, which cost
+  the ARM9 544 us per frame.
+
+**New: a runtime for the DSi's Teak DSP (``NEADsp.h``), opt-in with
+``NEA_TEAK=1``.** Building libNEA.a with ``NEA_TEAK=1`` compiles NEA's DSP
+program with llvm-teak and embeds it in the archive, so a game calls
+``NEA_DspInit()`` with its stock Makefile. Without the toolchain the build warns
+and ``NEA_DspInit()`` returns false. This is the foundation for DSP-backed
+effects; it runs no effect yet.
+
+- **Jobs are described in ARM9 memory, not uploaded.** ``NEA_DspJobBegin()``
+  sends one command carrying the address of a 64-byte ``NEA_DspDesc``, and the
+  DSP fetches it with one DMA transfer. Pushing parameters through the command
+  registers costs a round trip per two words.
+- **The protocol tolerates what the hardware actually does.** Every command and
+  reply carries a 4-bit sequence number, because on a DSi the DSP can see a
+  command twice and the ARM9 can read a stale reply (measured by libteak's
+  dsp-bench). Every wait is bounded, so a wedged DSP cannot hang the ROM.
+- **The transport is probed, not assumed.** Init round-trips data through the
+  DSP's DMA and falls back to the FIFO if that fails, as it does under melonDS.
+  Over the FIFO the DSP answers but is not used for work unless
+  ``NEA_DspAllowFifoTransport()`` says so.
+- **A descriptor on the stack is caught.** Locals live in DTCM, which the DSP's
+  DMA cannot see, so ``NEA_DspJobBegin()`` asserts on one.
+- **Transfers use INCR8 bursts, 5x libteak's speed.** Measured on a DSi with
+  ``examples/dsp/dsp_bench_transport``: 22 MB/s each way to main RAM against
+  4.4 MB/s with libteak's INCR bursts, and 26.6 / 40.2 MB/s from / to VRAM. A
+  whole 256x192 16-bit frame round-trips through main RAM in 8.6 ms. The DMA
+  "speed" field is a trap: speeds 1-3 are no faster and corrupt the data, so
+  NEA always uses 0.
+- **The DSP's DMA costs the ARM9 nothing measurable**: its own main RAM reads
+  took the same time while the DSP moved a 96 KB frame.
+- **The DMA transfer is hand-written Teak assembly.** The same register
+  sequence written in C compiled to code that moved nothing on hardware.
+- ``Makefile.blocksds`` now recreates ``libNEA.a`` on every build. ``ar rcs``
+  never drops a member, so turning ``NEA_TEAK`` off used to leave the DSP blob
+  in the archive.
+
 **New: the DSi's extended audio output.** A DSi drives its speakers over an I2S
 link to a TSC2117 codec that a DS does not have, and ``NEASound.h`` now reaches
 it. ``NEA_SoundEnableDSiOutput()`` switches that link between the DS's 32.73 kHz

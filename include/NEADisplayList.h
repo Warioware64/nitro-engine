@@ -164,6 +164,17 @@ void __NEA_GfxFifoIrqEnd(void);
 /// @param list Pointer to the display list
 void NEA_DisplayListDrawDefault(const void *list);
 
+/// Keeps display lists and DSP transfers apart (default: on).
+///
+/// On a DSi, feeding the GFX FIFO by DMA while the DSP moves data with its own
+/// DMA wedges the DSP's bus access, and every later DSP transfer fails until
+/// NEA_DspReset(). With the guard on, while NEA_DspJobIsPending(),
+/// NEA_DisplayListDrawDefault() pauses the DSP's transfers for each display
+/// list sent by DMA (NEA_DL_DMA_GFX_FIFO, NEA_DL_NDMA_GFX_FIFO), and sends
+/// the others by CPU. It costs nothing when no DSP job is running. Turn it off
+/// only to test other paths.
+void NEA_DisplayListSetDspGuard(bool enable);
+
 
 /// Modify a display list in place using a user-provided function
 ///

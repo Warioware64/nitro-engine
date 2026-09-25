@@ -496,7 +496,11 @@ typedef enum {
     /// (calls NEA_CellAnimUpdateAll()).
     ///
     /// Does nothing unless the project calls into NEACell.h.
-    NEA_UPDATE_CELL = BIT(13)
+    NEA_UPDATE_CELL = BIT(13),
+    /// Advances the DSP render target and full-screen effects (calls
+    /// NEA_DspFXUpdate(): NEA_DspReflect*, NEA_DspScreenFX*). Does nothing
+    /// unless the project uses them.
+    NEA_UPDATE_DSPFX = BIT(14)
 } NEA_UpdateFlags;
 
 /// Waits for the vertical blank and updates the selected systems.

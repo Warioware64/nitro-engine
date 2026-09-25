@@ -56,6 +56,8 @@ extern "C" {
 #include "NEACell.h"
 #include "NEAParticle.h"
 #include "NEAPostFX.h"
+#include "NEADsp.h"
+#include "NEADspFX.h"
 #include "NEANPAC.h"
 #include "NEAPattern.h"
 

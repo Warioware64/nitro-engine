@@ -386,9 +386,45 @@ void NEA_DisplayListSetDefaultFunction(NEA_DisplayListDrawFunction type)
     }
 }
 
+// On a DSi, a DMA feeding the GFX FIFO (legacy or NDMA, FIFO or IRQ fed)
+// while the DSP moves data with its own DMA wedges the DSP's bus access (AHBM)
+// for good: every later DSP transfer fails until the DSP is restarted.
+// Measured with examples/dsp/dsp_3d_qualify, 150 jobs each: DMA FIFO failed
+// 150, NDMA FIFO 78, DMA IRQ 58, NDMA IRQ 16; by CPU, 0.
+//
+// The CPU path is safe but costs 3x the ARM9 time (22.3 ms against 7 ms for
+// that scene). So while a DSP job is in flight, the default path stops the
+// DSP's DMA for the duration of each display list (the DSP keeps computing)
+// and sends it with the synchronous DMA paths. The IRQ-fed paths return before
+// they finish, so they can't be fenced that way and go by CPU instead.
+static bool ne_display_list_dsp_guard = true;
+
+void NEA_DisplayListSetDspGuard(bool enable)
+{
+    ne_display_list_dsp_guard = enable;
+}
+
 void NEA_DisplayListDrawDefault(const void *list)
 {
-    ne_display_list_draw(list);
+    if (!ne_display_list_dsp_guard || !NEA_DspJobIsPending())
+    {
+        ne_display_list_draw(list);
+        return;
+    }
+
+    bool fenceable = ne_display_list_draw == NEA_DisplayListDrawDMA_GFX_FIFO
+                     || ne_display_list_draw == NEA_DisplayListDrawNDMA_GFX_FIFO;
+
+    int token = fenceable ? __NEA_DspGateAcquire() : -1;
+    if (token >= 0)
+    {
+        ne_display_list_draw(list);
+        __NEA_DspGateRelease(token);
+    }
+    else
+    {
+        NEA_DisplayListDrawCPU(list);
+    }
 }
 
 
