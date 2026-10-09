@@ -1446,6 +1446,16 @@ void NEA_MaterialUse(const NEA_Material *tex)
     GFX_TEX_FORMAT = NEA_Texture[tex->texindex].param;
 }
 
+uint32_t NEA_MaterialGetTexParam(const NEA_Material *tex)
+{
+    NEA_AssertPointer(tex, "NULL pointer");
+
+    if (tex->texindex == NEA_NO_TEXTURE)
+        return 0;
+
+    return NEA_Texture[tex->texindex].param;
+}
+
 int NEA_TextureSystemReset(int max_textures, int max_palettes,
                           NEA_VRAMBankFlags bank_flags)
 {

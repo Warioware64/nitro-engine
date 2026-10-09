@@ -525,6 +525,19 @@ void NEA_TextureDefragMem(void);
 /// End texture system and free all memory used by it.
 void NEA_TextureSystemEnd(void);
 
+/// Returns the value of the TEXIMAGE_PARAM command that selects the texture of
+/// a material.
+///
+/// This is the value NEA_MaterialUse() writes to the GPU. It is meant for
+/// applications that build their own display lists and need to switch
+/// textures inside them, where the registers can't be written directly. Pair
+/// it with NEA_PaletteGetBase() for paletted textures. The value changes if
+/// the texture is moved in VRAM (for example, by NEA_TextureDefragMem()).
+///
+/// @param tex Material.
+/// @return The parameter, or 0 if the material has no texture in VRAM.
+uint32_t NEA_MaterialGetTexParam(const NEA_Material *tex);
+
 /// Returns the width of a texture.
 ///
 /// This is the size given when the texture was loaded.

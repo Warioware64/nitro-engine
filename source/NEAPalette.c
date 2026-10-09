@@ -406,6 +406,17 @@ void NEA_PaletteUse(const NEA_Palette *pal)
                       - ne_pal_lcd_base) >> shift;
 }
 
+uint32_t NEA_PaletteGetBase(const NEA_Palette *pal)
+{
+    NEA_AssertPointer(pal, "NULL pointer");
+
+    if (pal->index == NEA_NO_PALETTE)
+        return 0;
+
+    unsigned int shift = 4 - (NEA_PalInfo[pal->index].format == NEA_PAL4);
+    return ((uintptr_t)NEA_PalInfo[pal->index].pointer - ne_pal_lcd_base) >> shift;
+}
+
 int NEA_PaletteSystemReset(int max_palettes)
 {
     if (ne_palette_system_inited)

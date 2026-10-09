@@ -127,6 +127,16 @@ void NEA_PaletteDelete(NEA_Palette *pal);
 /// @param pal Pointer to the palette object.
 void NEA_PaletteUse(const NEA_Palette *pal);
 
+/// Returns the value of the PLTT_BASE command that selects a palette.
+///
+/// This is the value NEA_PaletteUse() writes to the GPU. It is meant for
+/// applications that build their own display lists and need to switch
+/// palettes inside them. See NEA_MaterialGetTexParam().
+///
+/// @param pal Pointer to the palette object.
+/// @return The parameter, or 0 if the palette has no data in VRAM.
+uint32_t NEA_PaletteGetBase(const NEA_Palette *pal);
+
 /// Resets the palette system and sets the new max number of palettes.
 ///
 /// @param max_palettes Max number of palettes. If lower than 1, it will
