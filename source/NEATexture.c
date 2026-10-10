@@ -32,6 +32,64 @@ static int NEA_MAX_TEXTURES;
 static u32 ne_default_diffuse_ambient;
 static u32 ne_default_specular_emission;
 
+// The primary banks an upload writes to, switched to LCD mode for the length
+// of the copy -- and only those. A bank the copy does not touch keeps doing
+// whatever it was doing: showing a bitmap background or a captured frame, or
+// holding the textures of what is being drawn. (Switching all four, as this
+// used to, takes such a bank off the screen for as many scanlines as the copy
+// lasts: a band across the picture for every texture loaded.)
+//
+// In LCD mode the banks are 128 KB each from 0x06800000, which is where the
+// allocator's addresses already point.
+typedef struct {
+    u8 mask;     // Bit n: bank n (A to D) was switched
+    u8 saved[4]; // What its control register held
+} ne_tex_unlock_t;
+
+static inline u8 ne_tex_bank_mask(const void *addr, uint32_t size)
+{
+    uintptr_t first = (uintptr_t)addr;
+
+    if ((size == 0) || (first < 0x06800000) || (first >= 0x06880000))
+        return 0;
+
+    uintptr_t last = first + size - 1;
+    if (last >= 0x06880000)
+        last = 0x06880000 - 1;
+
+    u8 mask = 0;
+    for (uintptr_t bank = (first - 0x06800000) >> 17;
+         bank <= ((last - 0x06800000) >> 17); bank++)
+        mask |= 1 << bank;
+
+    return mask;
+}
+
+static void ne_tex_unlock(ne_tex_unlock_t *state, u8 mask)
+{
+    vu8 *const control[4] = { &VRAM_A_CR, &VRAM_B_CR, &VRAM_C_CR, &VRAM_D_CR };
+
+    state->mask = mask;
+    for (int i = 0; i < 4; i++)
+    {
+        if ((mask & (1 << i)) == 0)
+            continue;
+        state->saved[i] = *control[i];
+        *control[i] = VRAM_ENABLE; // (LCD mode is 0 in every primary bank)
+    }
+}
+
+static void ne_tex_lock(const ne_tex_unlock_t *state)
+{
+    vu8 *const control[4] = { &VRAM_A_CR, &VRAM_B_CR, &VRAM_C_CR, &VRAM_D_CR };
+
+    for (int i = 0; i < 4; i++)
+    {
+        if (state->mask & (1 << i))
+            *control[i] = state->saved[i];
+    }
+}
+
 // Defined below, before NEA_MaterialTexLoad()
 static void ne_copy_tex_to_vram(void *addr, NEA_TextureFormat fmt,
                                 uint32_t size, const void *texture);
@@ -1220,35 +1278,36 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
     NEA_Texture[slot].address = slot02;
     NEA_Texture[slot].uses = 1; // Initially only this material uses the texture
 
-    // Unlock texture memory for writing
-    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
-    u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
-                                        VRAM_D_LCD);
+    // Unlock the banks the two parts go to for writing, and no others
+    ne_tex_unlock_t unlock;
+    ne_tex_unlock(&unlock, ne_tex_bank_mask(slot02, size02) |
+                           ne_tex_bank_mask(slot1, size1));
 
     swiCopy(texture02, slot02, (size02 >> 2) | COPY_MODE_WORD);
     swiCopy(texture1, slot1, (size1 >> 2) | COPY_MODE_WORD);
+
+    ne_tex_lock(&unlock);
 
     int hardware_size_y = ne_is_valid_tex_size(sizeY);
     ne_set_material_tex_param(tex, sizeX, hardware_size_y, slot02,
                               NEA_TEX4X4, flags);
 
-    vramRestorePrimaryBanks(vramTemp);
-
     return 1;
 }
 
 // Copies raw texture data from RAM into an already-allocated VRAM address. It
-// remaps the primary VRAM banks to LCD mode for the duration of the copy, so it
-// must be called when that is safe (e.g. during the vertical blank). Handles the
+// remaps the primary VRAM banks the data goes to (and only those) to LCD mode
+// for the duration of the copy: what is drawn with textures in those banks is
+// drawn without them for as long, so a copy into a bank that is in use on the
+// screen is best done during the vertical blank. Handles the
 // NEA_RGB5 special case, where each alpha bit is forced to 1 so the data becomes
 // NEA_A1RGB5 in VRAM.
 static void ne_copy_tex_to_vram(void *addr, NEA_TextureFormat fmt,
                                 uint32_t size, const void *texture)
 {
-    // Unlock texture memory for writing
-    // TODO: Only unlock the banks that Nitro Engine Advanced uses.
-    u32 vramTemp = vramSetPrimaryBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
-                                       VRAM_D_LCD);
+    // Unlock the banks the texture goes to for writing, and no others
+    ne_tex_unlock_t unlock;
+    ne_tex_unlock(&unlock, ne_tex_bank_mask(addr, size));
 
     if (fmt == NEA_RGB5)
     {
@@ -1263,7 +1322,7 @@ static void ne_copy_tex_to_vram(void *addr, NEA_TextureFormat fmt,
         swiCopy((u32 *)texture, addr, (size >> 2) | COPY_MODE_WORD);
     }
 
-    vramRestorePrimaryBanks(vramTemp);
+    ne_tex_lock(&unlock);
 }
 
 int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
