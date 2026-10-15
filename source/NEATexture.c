@@ -2005,8 +2005,17 @@ static void *ne_find_dead_index(uint32_t size)
     return NULL;
 }
 
+static bool ne_place_in_dead_index = true;
+
+void NEA_TextureSetDeadIndexPlacement(bool on)
+{
+    ne_place_in_dead_index = on;
+}
+
 static void *ne_alloc_plain(size_t size)
 {
+    if (!ne_place_in_dead_index)
+        return NEA_AllocFromEnd(NEA_TexAllocList, size);
     // Dead index memory first: there it costs 4x4 textures nothing.
     void *dead = ne_find_dead_index((uint32_t)size);
     if (dead != NULL && NEA_AllocAddress(NEA_TexAllocList, dead, size) == 0)

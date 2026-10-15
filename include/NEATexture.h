@@ -553,6 +553,12 @@ int NEA_TextureFree4x4(void);
 /// texture needs width * height / 4 of them).
 int NEA_TextureLargest4x4(void);
 
+/// Where a texture that is not 4x4 goes: by default, first into index memory
+/// of bank B whose texels are taken (memory no 4x4 texture can use), and only
+/// then from the end of the texture memory, as NEA always did. False: always
+/// as NEA always did. (Takes effect for textures loaded from then on.)
+void NEA_TextureSetDeadIndexPlacement(bool on);
+
 /// Defragmentation, a little at a time, while the game runs.
 ///
 /// NEA_TextureDefragChoose() picks a texture to move, if moving one would make
