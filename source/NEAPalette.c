@@ -463,6 +463,29 @@ cleanup:
     return -1;
 }
 
+void NEA_PaletteGetStats(NEA_PaletteStats *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!ne_palette_system_inited)
+        return;
+    for (NEAChunk *c = NEA_PalAllocList; c != NULL; c = c->next)
+    {
+        if (c->state != NEA_STATE_FREE)
+            continue;
+        const int size = (int)((uintptr_t)c->end - (uintptr_t)c->start);
+        out->free += size;
+        out->freeChunks++;
+        if (size > out->largest)
+            out->largest = size;
+    }
+    out->slotsMax = NEA_MAX_PALETTES;
+    for (int i = 0; i < NEA_MAX_PALETTES; i++)
+    {
+        if (NEA_UserPalette[i] != NULL)
+            out->slotsUsed++;
+    }
+}
+
 int NEA_PaletteFreeMem(void)
 {
     if (!ne_palette_system_inited)

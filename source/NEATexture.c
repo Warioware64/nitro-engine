@@ -1673,6 +1673,106 @@ int NEA_TextureFreeMem(void)
     return info.free;
 }
 
+void NEA_TextureGetStats(NEA_TextureStats *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!ne_texture_system_inited)
+        return;
+
+    const uintptr_t ranges[4][2] = {
+        { (uintptr_t)VRAM_A, (uintptr_t)VRAM_B },
+        { (uintptr_t)VRAM_B, (uintptr_t)VRAM_B + 64 * 1024 },
+        { (uintptr_t)VRAM_B + 64 * 1024, (uintptr_t)VRAM_C },
+        { (uintptr_t)VRAM_C, (uintptr_t)VRAM_D },
+    };
+    for (NEAChunk *c = NEA_TexAllocList; c != NULL; c = c->next)
+    {
+        if (c->state != NEA_STATE_FREE)
+            continue;
+        const uintptr_t start = (uintptr_t)c->start, end = (uintptr_t)c->end;
+        const int size = (int)(end - start);
+        out->free += size;
+        out->freeChunks++;
+        if (size > out->largest)
+            out->largest = size;
+        for (int r = 0; r < 4; r++)
+        {
+            const uintptr_t a = start > ranges[r][0] ? start : ranges[r][0];
+            const uintptr_t b = end < ranges[r][1] ? end : ranges[r][1];
+            if (b > a && (int)(b - a) > out->largestIn[r])
+                out->largestIn[r] = (int)(b - a);
+        }
+    }
+
+    out->slotsMax = NEA_MAX_TEXTURES;
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
+    {
+        if (NEA_Texture[i].address == NULL)
+            continue;
+        out->slotsUsed++;
+        bool named = false;
+        for (int m = 0; m < NEA_MAX_TEXTURES && !named; m++)
+        {
+            if (NEA_UserMaterials[m] != NULL && NEA_UserMaterials[m]->texindex == i)
+                named = true;
+        }
+        if (!named)
+            out->leaked++;
+    }
+    for (int m = 0; m < NEA_MAX_TEXTURES; m++)
+    {
+        const NEA_Material *mat = NEA_UserMaterials[m];
+        if (mat != NULL)
+            out->materials++;
+        if (mat != NULL && mat->texindex != NEA_NO_TEXTURE &&
+            (mat->texindex < 0 || mat->texindex >= NEA_MAX_TEXTURES ||
+             NEA_Texture[mat->texindex].address == NULL))
+            out->dangling++;
+    }
+}
+
+int NEA_TextureFree4x4(void)
+{
+    if (!ne_texture_system_inited)
+        return 0;
+
+    // For each free piece of A or C, the parts of it whose index memory (in
+    // the matching half of B, at half the address offset) is free as well.
+    int total = 0;
+    for (NEAChunk *t = NEA_TexAllocList; t != NULL; t = t->next)
+    {
+        if (t->state != NEA_STATE_FREE)
+            continue;
+        const uintptr_t start = (uintptr_t)t->start, end = (uintptr_t)t->end;
+        for (int bank = 0; bank < 2; bank++)
+        {
+            const uintptr_t lo = bank == 0 ? (uintptr_t)VRAM_A : (uintptr_t)VRAM_C;
+            const uintptr_t hi = bank == 0 ? (uintptr_t)VRAM_B : (uintptr_t)VRAM_D;
+            const uintptr_t index = (uintptr_t)VRAM_B + (bank == 0 ? 0 : 64 * 1024);
+            const uintptr_t a = start > lo ? start : lo;
+            const uintptr_t b = end < hi ? end : hi;
+            if (b <= a)
+                continue;
+            for (NEAChunk *i = NEA_TexAllocList; i != NULL; i = i->next)
+            {
+                if (i->state != NEA_STATE_FREE)
+                    continue;
+                // That index piece, as the texel range it serves.
+                const uintptr_t is = (uintptr_t)i->start, ie = (uintptr_t)i->end;
+                if (ie <= index || is >= index + 64 * 1024)
+                    continue;
+                const uintptr_t s0 = (is > index ? is : index) - index;
+                const uintptr_t s1 = (ie < index + 64 * 1024 ? ie : index + 64 * 1024) - index;
+                const uintptr_t c = lo + s0 * 2 > a ? lo + s0 * 2 : a;
+                const uintptr_t d = lo + s1 * 2 < b ? lo + s1 * 2 : b;
+                if (d > c)
+                    total += (int)(d - c);
+            }
+        }
+    }
+    return total;
+}
+
 int NEA_TextureFreeMemPercent(void)
 {
     if (!ne_texture_system_inited)

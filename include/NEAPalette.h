@@ -153,6 +153,19 @@ int NEA_PaletteSystemReset(int max_palettes);
 /// @return Returns the available memory in bytes.
 int NEA_PaletteFreeMem(void);
 
+/// What the palette memory is like: free bytes, in how many pieces, the
+/// largest, and how many of the palette slots are in use, of how many.
+typedef struct {
+    int free;
+    int freeChunks;
+    int largest;
+    int slotsUsed;
+    int slotsMax;
+} NEA_PaletteStats;
+
+/// Fills `out` with the state of the palette memory.
+void NEA_PaletteGetStats(NEA_PaletteStats *out);
+
 /// Returns the percentage of available free memory for palettes.
 ///
 /// @return Returns the percentage of available memory (0-100).

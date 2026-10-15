@@ -517,6 +517,37 @@ int NEA_TextureFreeMem(void);
 /// @return Returns the percentage of available memory (0-100).
 int NEA_TextureFreeMemPercent(void);
 
+/// What the texture memory is like, for whoever has to find out why a
+/// texture would not go in.
+typedef struct {
+    int free;          ///< Free bytes in all
+    int freeChunks;    ///< How many pieces that free memory is in
+    int largest;       ///< The largest free piece
+    /// The largest free piece inside each of: bank A, the first half of bank
+    /// B, its second half, and bank C. (A 4x4 texture needs a piece in A
+    /// with its match in B's first half, or one in C with its match in B's
+    /// second half.)
+    int largestIn[4];
+    int slotsUsed;     ///< Texture slots in use
+    int slotsMax;
+    int materials;     ///< Materials there are (of slotsMax at most)
+    /// Slots in use that no material names (leaked), and materials that name
+    /// a slot that is empty (dangling: what they draw is whatever comes next
+    /// in that slot). Both are 0 when all is well.
+    int leaked;
+    int dangling;
+} NEA_TextureStats;
+
+/// Fills `out` with the state of the texture memory.
+void NEA_TextureGetStats(NEA_TextureStats *out);
+
+/// How many bytes of 4x4 (compressed) texture data could still go in: free
+/// memory in bank A or C whose matching index memory in bank B is free too.
+/// (NEA_TextureFreeMem counts both halves alone, and so more than a 4x4
+/// texture can ever use.) Returns the texel bytes; a texture needs half as
+/// many again in bank B, which this has already made sure of.
+int NEA_TextureFree4x4(void);
+
 /// Defragment memory used for textures.
 ///
 /// WARNING: This function is currently not working.
