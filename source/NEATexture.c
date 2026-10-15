@@ -1098,8 +1098,9 @@ static int ne_alloc_compressed_tex(size_t size, void **slot02, void **slot1)
         // Get the address in bank 2 assigned to the current bank 1 address
         addr2 = slot1_to_slot2(addr1);
 
-        // Check if this address is free and has enough space
-        addr2 = NEA_AllocFindInRange(NEA_TexAllocList, addr2, VRAM_B, size02);
+        // Check if this address is free and has enough space (slot 2 is
+        // bank C: the range ends where bank C does)
+        addr2 = NEA_AllocFindInRange(NEA_TexAllocList, addr2, VRAM_D, size02);
         if (addr2 == NULL)
             break;
 
@@ -1252,6 +1253,7 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
     int ret = ne_alloc_compressed_tex(size02, &slot02, &slot1);
     if (ret != 0)
     {
+        tex->texindex = NEA_NO_TEXTURE; // (the slot was never taken)
         NEA_DebugPrint("Can't find space for compressed texture");
         return 0;
     }
@@ -1259,6 +1261,7 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
     ret = NEA_AllocAddress(NEA_TexAllocList, slot02, size02);
     if (ret != 0)
     {
+        tex->texindex = NEA_NO_TEXTURE; // (the slot was never taken)
         NEA_DebugPrint("Can't allocate slot 0/2");
         return 0;
     }
@@ -1267,6 +1270,7 @@ int NEA_MaterialTex4x4Load(NEA_Material *tex, int sizeX, int sizeY,
     if (ret != 0)
     {
         NEA_Free(NEA_TexAllocList, slot02);
+        tex->texindex = NEA_NO_TEXTURE; // (the slot was never taken)
         NEA_DebugPrint("Can't allocate slot 1");
         return 0;
     }
