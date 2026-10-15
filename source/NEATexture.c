@@ -203,6 +203,11 @@ static inline void ne_set_material_tex_param(NEA_Material *tex,
             (mode << 26) | param;
 }
 
+// The defragmenter (below): a texture deleted while it is being moved stops
+// the move; and where a texture that is not 4x4 is put.
+static void ne_defrag_forget_slot(int slot);
+static void *ne_alloc_plain(size_t size);
+
 static void ne_texture_delete(int texture_index)
 {
     int slot = texture_index;
@@ -213,6 +218,8 @@ static void ne_texture_delete(int texture_index)
     // If the number of users is zero, delete it.
     if (NEA_Texture[slot].uses == 0)
     {
+        ne_defrag_forget_slot(slot);
+
         uint32_t fmt = (NEA_Texture[slot].param >> 26) & 7;
 
         if (fmt == NEA_TEX4X4)
@@ -1414,7 +1421,7 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
     uint32_t size = (sizeX * sizeY << 1) >> size_shift[fmt];
 
     // This pointer must be aligned to 8 bytes at least
-    void *addr = NEA_AllocFromEnd(NEA_TexAllocList, size);
+    void *addr = ne_alloc_plain(size);
     if (!addr)
     {
         tex->texindex = NEA_NO_TEXTURE;
@@ -1519,6 +1526,8 @@ uint32_t NEA_MaterialGetTexParam(const NEA_Material *tex)
     return NEA_Texture[tex->texindex].param;
 }
 
+static void ne_defrag_reset(void);
+
 int NEA_TextureSystemReset(int max_textures, int max_palettes,
                           NEA_VRAMBankFlags bank_flags)
 {
@@ -1619,6 +1628,7 @@ int NEA_TextureSystemReset(int max_textures, int max_palettes,
 
     GFX_TEX_FORMAT = 0;
 
+    ne_defrag_reset();
     ne_texture_system_inited = true;
     return 0;
 
@@ -1784,45 +1794,450 @@ int NEA_TextureFreeMemPercent(void)
     return info.free_percent;
 }
 
-void NEA_TextureDefragMem(void)
+//--------------------------------------------------------------------------
+// Defragmentation
+//
+// A 4x4 texture is in two pieces: its texels in bank A (or C), and its index
+// data in the first (or second) half of bank B, at half the texels' offset.
+// What a 4x4 texture can use is therefore memory free in BOTH places, and the
+// pieces that matter are the "pair holes": ranges of A or C that are free and
+// whose index range in B is free too.
+//
+// Two things eat into those. A texture that is not 4x4, put in A or C, takes
+// texels whose index memory then serves nothing ("dead" index memory); and
+// textures coming and going leave holes too small to use. So:
+//
+// - A texture that is not 4x4 goes, if it can, into dead index memory, where
+//   it costs no 4x4 room at all (ne_alloc_plain).
+// - NEA_TextureDefragStep() moves one texture at a time, a slice of it in each
+//   vertical blank, to where it makes the largest pair hole larger: a texture
+//   that is not 4x4 out of A or C into dead index memory; else a small 4x4
+//   texture between two holes to a hole elsewhere, so that the two join.
+//
+// A texture moves by being copied to a range that does not overlap it (the
+// picture on the screen is drawn from the old one until it is replaced: it
+// can't be written over) and then, in one go, given its new address. Its old
+// range stays allocated for two more steps -- two more frames -- and is then
+// freed.
+
+typedef struct {
+    uintptr_t start, end;
+} ne_range_t;
+
+#define NE_DEFRAG_RANGES 320
+#define NE_DEFRAG_GHOSTS 16
+
+static struct {
+    bool moving;
+    int slot;
+    bool is4x4;
+    char *src02, *src1;     // where it is (src1: 4x4 only)
+    char *dst02, *dst1;     // where it is going
+    uint32_t size02, size1; // bytes of each piece
+    uint32_t done;          // bytes copied so far (of size02 + size1)
+    struct {
+        void *addr;
+        int age;
+    } ghost[NE_DEFRAG_GHOSTS];
+    int ghosts;
+    unsigned moves;         // textures moved (NEA_TextureMoves())
+    unsigned bytes;         // bytes moved
+    unsigned steps;         // steps that did some work
+} ne_defrag;
+
+static void ne_defrag_reset(void)
 {
-    NEA_Assert(0, "This function doesn't work");
-    return;
-    /*
-    // REALLY OLD CODE -- DOESN'T WORK
+    memset(&ne_defrag, 0, sizeof(ne_defrag));
+}
 
-    if (!ne_texture_system_inited)
-        return;
-
-    uint32_t vramTemp = vramSetMainBanks(VRAM_A_LCD, VRAM_B_LCD, VRAM_C_LCD,
-                                       VRAM_D_LCD);
-
-    bool ok = false;
-    while (!ok)
+// The bytes of the allocation that starts at `addr` (0 if none does).
+static uint32_t ne_chunk_size(const void *addr)
+{
+    for (NEAChunk *c = NEA_TexAllocList; c != NULL; c = c->next)
     {
-        ok = true;
-        int i;
-        for (i = 0; i < NEA_MAX_TEXTURES; i++)
+        if (c->start == addr && c->state == NEA_STATE_USED)
+            return (uint32_t)((uintptr_t)c->end - (uintptr_t)c->start);
+    }
+    return 0;
+}
+
+// The free ranges inside [lo, hi), in order, with `freed` taken as free and
+// `taken` as used (what the memory WOULD be like after a move; either may be
+// NULL). Returns how many.
+static int ne_free_ranges(uintptr_t lo, uintptr_t hi, const ne_range_t *freed, int nfreed,
+                          const ne_range_t *taken, int ntaken, ne_range_t *out, int max)
+{
+    int n = 0;
+    for (NEAChunk *c = NEA_TexAllocList; c != NULL; c = c->next)
+    {
+        uintptr_t a = (uintptr_t)c->start, b = (uintptr_t)c->end;
+        bool free = c->state == NEA_STATE_FREE;
+        for (int i = 0; !free && i < nfreed; i++)
+            free = freed[i].start <= a && b <= freed[i].end;
+        if (!free)
+            continue;
+        if (a < lo)
+            a = lo;
+        if (b > hi)
+            b = hi;
+        if (b <= a)
+            continue;
+        // (Joined to the one before, if they touch.)
+        if (n > 0 && out[n - 1].end == a)
+            out[n - 1].end = b;
+        else if (n < max)
+            out[n++] = (ne_range_t){ a, b };
+    }
+    // What a move would take, cut out.
+    for (int t = 0; t < ntaken; t++)
+    {
+        for (int i = 0; i < n; i++)
         {
-            int size = NEA_GetSize(NEA_TexAllocList, (void*)NEA_Texture[i].address);
-            NEA_Free(NEA_TexAllocList,(void*)NEA_Texture[i].address);
-            void *pointer = NEA_Alloc(NEA_TexAllocList, size);
-            // Aligned to 8 bytes
-
-            NEA_AssertPointer(pointer, "Couldn't reallocate texture");
-
-            if (pointer != NEA_Texture[i].address)
+            const uintptr_t a = out[i].start, b = out[i].end;
+            const uintptr_t ta = taken[t].start, tb = taken[t].end;
+            if (tb <= a || ta >= b)
+                continue;
+            if (ta > a && tb < b && n < max)
             {
-                dmaCopy((void *)NEA_Texture[i].address, pointer, size);
-                NEA_Texture[i].address = pointer;
-                NEA_Texture[i].param &= 0xFFFF0000;
-                NEA_Texture[i].param |= ((uint32_t)pointer >> 3) & 0xFFFF;
-                ok = false;
+                // Split in two.
+                memmove(&out[i + 2], &out[i + 1], (size_t)(n - i - 1) * sizeof(ne_range_t));
+                out[i + 1] = (ne_range_t){ tb, b };
+                out[i].end = ta;
+                n++;
+                i++;
+            }
+            else if (ta <= a && tb >= b)
+            {
+                out[i].end = out[i].start; // (all of it: left empty)
+            }
+            else if (ta <= a)
+            {
+                out[i].start = tb;
+            }
+            else
+            {
+                out[i].end = ta;
             }
         }
     }
-    vramRestoreMainBanks(vramTemp);
-    */
+    return n;
+}
+
+// The largest pair hole (and, in `total`, all of them), with a move's
+// `freed` and `taken` ranges applied. In texel bytes.
+static int ne_pair_holes(const ne_range_t *freed, int nfreed, const ne_range_t *taken, int ntaken, int *total)
+{
+    static ne_range_t texels[NE_DEFRAG_RANGES], index[NE_DEFRAG_RANGES];
+    int largest = 0, sum = 0;
+    for (int bank = 0; bank < 2; bank++)
+    {
+        const uintptr_t lo = bank == 0 ? (uintptr_t)VRAM_A : (uintptr_t)VRAM_C;
+        const uintptr_t hi = lo + 128 * 1024;
+        const uintptr_t ilo = (uintptr_t)VRAM_B + (bank == 0 ? 0 : 64 * 1024);
+        const int nt = ne_free_ranges(lo, hi, freed, nfreed, taken, ntaken, texels, NE_DEFRAG_RANGES);
+        const int ni = ne_free_ranges(ilo, ilo + 64 * 1024, freed, nfreed, taken, ntaken, index, NE_DEFRAG_RANGES);
+        // Both lists are in order: walk them together, the index ranges
+        // seen as the texels they serve.
+        int i = 0, j = 0;
+        while (i < nt && j < ni)
+        {
+            const uintptr_t ia = lo + (index[j].start - ilo) * 2;
+            const uintptr_t ib = lo + (index[j].end - ilo) * 2;
+            const uintptr_t a = texels[i].start > ia ? texels[i].start : ia;
+            const uintptr_t b = texels[i].end < ib ? texels[i].end : ib;
+            if (b > a)
+            {
+                const int len = (int)(b - a);
+                sum += len;
+                if (len > largest)
+                    largest = len;
+            }
+            if (texels[i].end < ib)
+                i++;
+            else
+                j++;
+        }
+    }
+    if (total != NULL)
+        *total = sum;
+    return largest;
+}
+
+int NEA_TextureLargest4x4(void)
+{
+    if (!ne_texture_system_inited)
+        return 0;
+    return ne_pair_holes(NULL, 0, NULL, 0, NULL);
+}
+
+// Dead index memory: a free range of bank B, `size` bytes long, all of whose
+// texels in A or C are taken. NULL if there is none. (The free ranges of B,
+// cut to where the texels they serve are not free.)
+static void *ne_find_dead_index(uint32_t size)
+{
+    static ne_range_t index[NE_DEFRAG_RANGES], texels[NE_DEFRAG_RANGES];
+    size = (size + NEA_ALLOC_MIN_SIZE - 1) & ~(NEA_ALLOC_MIN_SIZE - 1);
+    for (int half = 0; half < 2; half++)
+    {
+        const uintptr_t ilo = (uintptr_t)VRAM_B + (uintptr_t)half * 64 * 1024;
+        const uintptr_t lo = half == 0 ? (uintptr_t)VRAM_A : (uintptr_t)VRAM_C;
+        const int ni = ne_free_ranges(ilo, ilo + 64 * 1024, NULL, 0, NULL, 0, index, NE_DEFRAG_RANGES);
+        const int nt = ne_free_ranges(lo, lo + 128 * 1024, NULL, 0, NULL, 0, texels, NE_DEFRAG_RANGES);
+        for (int i = 0; i < ni; i++)
+        {
+            // This free index range, a piece at a time between the free texel
+            // ranges (seen as index addresses): those pieces are dead.
+            uintptr_t at = (index[i].start + 7) & ~(uintptr_t)7;
+            for (int t = 0; t <= nt && at < index[i].end; t++)
+            {
+                // The free texels from here on, as index addresses.
+                const uintptr_t fa = t < nt ? ilo + (texels[t].start - lo) / 2 : index[i].end;
+                const uintptr_t fb = t < nt ? ilo + (texels[t].end - lo + 1) / 2 : index[i].end;
+                if (fb <= at)
+                    continue;
+                const uintptr_t deadEnd = fa < index[i].end ? fa : index[i].end;
+                if (deadEnd > at && deadEnd - at >= size)
+                    return (void *)at;
+                at = (fb + 7) & ~(uintptr_t)7;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void *ne_alloc_plain(size_t size)
+{
+    // Dead index memory first: there it costs 4x4 textures nothing.
+    void *dead = ne_find_dead_index((uint32_t)size);
+    if (dead != NULL && NEA_AllocAddress(NEA_TexAllocList, dead, size) == 0)
+        return dead;
+    return NEA_AllocFromEnd(NEA_TexAllocList, size);
+}
+
+static void ne_defrag_forget_slot(int slot)
+{
+    if (!ne_defrag.moving || ne_defrag.slot != slot)
+        return;
+    // The texture goes: so does where it was going.
+    NEA_Free(NEA_TexAllocList, ne_defrag.dst02);
+    if (ne_defrag.is4x4)
+        NEA_Free(NEA_TexAllocList, ne_defrag.dst1);
+    ne_defrag.moving = false;
+}
+
+static bool ne_in_safe_time(int lastLine)
+{
+    const int line = REG_VCOUNT;
+    return line >= 192 && line < lastLine;
+}
+
+// Choose a move, and take its destination. False if no move helps.
+static bool ne_defrag_choose(void)
+{
+    int totalNow = 0;
+    const int largestNow = ne_pair_holes(NULL, 0, NULL, 0, &totalNow);
+    int bestSlot = -1, bestLargest = largestNow, bestTotal = totalNow;
+    void *bestDst02 = NULL, *bestDst1 = NULL;
+
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
+    {
+        char *addr = NEA_Texture[i].address;
+        if (addr == NULL || NEA_Texture[i].uses <= 0)
+            continue;
+        const bool is4x4 = ((NEA_Texture[i].param >> 26) & 7) == NEA_TEX4X4;
+        const uintptr_t at = (uintptr_t)addr;
+        const bool inTexelBank = (at >= (uintptr_t)VRAM_A && at < (uintptr_t)VRAM_B) ||
+                                 (at >= (uintptr_t)VRAM_C && at < (uintptr_t)VRAM_D);
+        const uint32_t size02 = ne_chunk_size(addr);
+        if (size02 == 0)
+            continue;
+        ne_range_t freed[2], taken[2];
+        int nfreed = 0, ntaken = 0;
+        void *dst02 = NULL, *dst1 = NULL;
+        if (!is4x4)
+        {
+            // (a) Out of A or C, into dead index memory.
+            if (!inTexelBank)
+                continue;
+            dst02 = ne_find_dead_index(size02);
+            if (dst02 == NULL)
+                continue;
+            freed[nfreed++] = (ne_range_t){ at, at + size02 };
+            taken[ntaken++] = (ne_range_t){ (uintptr_t)dst02, (uintptr_t)dst02 + size02 };
+        }
+        else
+        {
+            // (b) A 4x4 texture to another pair hole. (Only one that is
+            // small, and with a hole beside it: else it gains nothing.)
+            if (size02 > 8 * 1024)
+                continue;
+            void *slot1 = at < (uintptr_t)VRAM_B ? slot0_to_slot1(addr) : slot2_to_slot1(addr);
+            const uint32_t size1 = ne_chunk_size(slot1);
+            if (size1 == 0)
+                continue;
+            if (ne_alloc_compressed_tex(size02, &dst02, &dst1) != 0)
+                continue;
+            freed[nfreed++] = (ne_range_t){ at, at + size02 };
+            freed[nfreed++] = (ne_range_t){ (uintptr_t)slot1, (uintptr_t)slot1 + size1 };
+            taken[ntaken++] = (ne_range_t){ (uintptr_t)dst02, (uintptr_t)dst02 + size02 };
+            taken[ntaken++] = (ne_range_t){ (uintptr_t)dst1, (uintptr_t)dst1 + size1 };
+        }
+        int total = 0;
+        const int largest = ne_pair_holes(freed, nfreed, taken, ntaken, &total);
+        // Better: a larger largest hole; or (moving a texture that is not
+        // 4x4 into dead memory) as large a one, and more room in all.
+        const bool better = largest > bestLargest ||
+                            (!is4x4 && largest == bestLargest && total > bestTotal + 512);
+        if (better)
+        {
+            bestSlot = i;
+            bestLargest = largest;
+            bestTotal = total;
+            bestDst02 = dst02;
+            bestDst1 = dst1;
+        }
+    }
+    if (bestSlot < 0)
+        return false;
+
+    // Take the destination.
+    char *src02 = NEA_Texture[bestSlot].address;
+    const bool is4x4 = ((NEA_Texture[bestSlot].param >> 26) & 7) == NEA_TEX4X4;
+    const uint32_t size02 = ne_chunk_size(src02);
+    if (NEA_AllocAddress(NEA_TexAllocList, bestDst02, size02) != 0)
+        return false;
+    char *src1 = NULL;
+    uint32_t size1 = 0;
+    if (is4x4)
+    {
+        src1 = (uintptr_t)src02 < (uintptr_t)VRAM_B ? slot0_to_slot1(src02) : slot2_to_slot1(src02);
+        size1 = ne_chunk_size(src1);
+        if (NEA_AllocAddress(NEA_TexAllocList, bestDst1, size1) != 0)
+        {
+            NEA_Free(NEA_TexAllocList, bestDst02);
+            return false;
+        }
+    }
+    ne_defrag.moving = true;
+    ne_defrag.slot = bestSlot;
+    ne_defrag.is4x4 = is4x4;
+    ne_defrag.src02 = src02;
+    ne_defrag.src1 = src1;
+    ne_defrag.dst02 = bestDst02;
+    ne_defrag.dst1 = bestDst1;
+    ne_defrag.size02 = size02;
+    ne_defrag.size1 = size1;
+    ne_defrag.done = 0;
+    return true;
+}
+
+// Copy as much of the move as there is time for. True when it is all there.
+static bool ne_defrag_copy(int lastLine, bool timed)
+{
+    const uint32_t total = ne_defrag.size02 + ne_defrag.size1;
+    while (ne_defrag.done < total)
+    {
+        if (timed && !ne_in_safe_time(lastLine))
+            return false;
+        // The next slice: of the texels, then of the index.
+        const bool texels = ne_defrag.done < ne_defrag.size02;
+        const uint32_t at = texels ? ne_defrag.done : ne_defrag.done - ne_defrag.size02;
+        const uint32_t size = texels ? ne_defrag.size02 : ne_defrag.size1;
+        uint32_t slice = size - at;
+        if (slice > 512)
+            slice = 512;
+        const char *from = (texels ? ne_defrag.src02 : ne_defrag.src1) + at;
+        char *to = (texels ? ne_defrag.dst02 : ne_defrag.dst1) + at;
+        ne_tex_unlock_t state;
+        ne_tex_unlock(&state, ne_tex_bank_mask(from, slice) | ne_tex_bank_mask(to, slice));
+        // (VRAM takes 16 or 32-bit writes; sizes and addresses here are
+        // multiples of 8.)
+        const vu32 *s = (const vu32 *)from;
+        vu32 *d = (vu32 *)to;
+        for (uint32_t n = 0; n < slice / 4; n++)
+            d[n] = s[n];
+        ne_tex_lock(&state);
+        ne_defrag.done += slice;
+    }
+    return true;
+}
+
+bool NEA_TextureDefragChoose(void)
+{
+    if (!ne_texture_system_inited || ne_defrag.moving || __NEA_VramSessionOpen() ||
+        ne_defrag.ghosts + 2 > NE_DEFRAG_GHOSTS)
+        return ne_defrag.moving;
+    return ne_defrag_choose();
+}
+
+int NEA_TextureDefragStep(int lastLine)
+{
+    if (!ne_texture_system_inited || __NEA_VramSessionOpen())
+        return 0;
+    const bool timed = lastLine > 0;
+
+    // What was moved two steps ago: nothing on the screen draws it now.
+    int kept = 0;
+    for (int g = 0; g < ne_defrag.ghosts; g++)
+    {
+        if (++ne_defrag.ghost[g].age > 2)
+            NEA_Free(NEA_TexAllocList, ne_defrag.ghost[g].addr);
+        else
+            ne_defrag.ghost[kept++] = ne_defrag.ghost[g];
+    }
+    ne_defrag.ghosts = kept;
+
+    if (!ne_defrag.moving)
+        return 0;
+    ne_defrag.steps++;
+    if (!ne_defrag_copy(lastLine, timed))
+        return 1;
+
+    // All of it is there: the texture is where it was copied to, from the
+    // next thing drawn on.
+    const int slot = ne_defrag.slot;
+    NEA_Texture[slot].address = ne_defrag.dst02;
+    NEA_Texture[slot].param = (NEA_Texture[slot].param & 0xFFFF0000) |
+                              (((uint32_t)(uintptr_t)ne_defrag.dst02 >> 3) & 0xFFFF);
+    ne_defrag.ghost[ne_defrag.ghosts].addr = ne_defrag.src02;
+    ne_defrag.ghost[ne_defrag.ghosts++].age = 0;
+    if (ne_defrag.is4x4)
+    {
+        ne_defrag.ghost[ne_defrag.ghosts].addr = ne_defrag.src1;
+        ne_defrag.ghost[ne_defrag.ghosts++].age = 0;
+    }
+    ne_defrag.moves++;
+    ne_defrag.bytes += ne_defrag.size02 + ne_defrag.size1;
+    ne_defrag.moving = false;
+    return 1;
+}
+
+unsigned NEA_TextureMoves(void)
+{
+    return ne_defrag.moves;
+}
+
+void NEA_TextureDefragStats(int *moves, int *bytes, int *steps)
+{
+    if (moves != NULL)
+        *moves = (int)ne_defrag.moves;
+    if (bytes != NULL)
+        *bytes = (int)ne_defrag.bytes;
+    if (steps != NULL)
+        *steps = (int)ne_defrag.steps;
+}
+
+void NEA_TextureDefragMem(void)
+{
+    // As many moves as help, with no regard for the time: only where nothing
+    // drawn with textures is on the screen. (Each step ages the ghosts, so a
+    // few more at the end free them all.)
+    for (int guard = 0; guard < 4096; guard++)
+    {
+        NEA_TextureDefragChoose();
+        if (!NEA_TextureDefragStep(0) && ne_defrag.ghosts == 0)
+            break;
+    }
 }
 
 void NEA_TextureSystemEnd(void)
@@ -1849,6 +2264,7 @@ void NEA_TextureSystemEnd(void)
 
     NEA_PaletteSystemEnd();
 
+    ne_defrag_reset();
     ne_texture_system_inited = false;
 }
 

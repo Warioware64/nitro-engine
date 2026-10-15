@@ -548,9 +548,38 @@ void NEA_TextureGetStats(NEA_TextureStats *out);
 /// many again in bank B, which this has already made sure of.
 int NEA_TextureFree4x4(void);
 
-/// Defragment memory used for textures.
+/// The largest single place a 4x4 texture could go: free texels in bank A or
+/// C, contiguous, whose index memory in bank B is free too. In texel bytes (a
+/// texture needs width * height / 4 of them).
+int NEA_TextureLargest4x4(void);
+
+/// Defragmentation, a little at a time, while the game runs.
 ///
-/// WARNING: This function is currently not working.
+/// NEA_TextureDefragChoose() picks a texture to move, if moving one would make
+/// the largest place for a 4x4 texture larger (a texture that is not 4x4 out of
+/// bank A or C into index memory nothing else can use; else a small 4x4 texture
+/// from between two holes to another hole), and takes the place it goes to. It
+/// does not touch video memory, so it can be called any time; it takes a few
+/// milliseconds. Returns whether a move is under way.
+///
+/// NEA_TextureDefragStep() must be called once every frame, in the vertical
+/// blank: it copies as much of the move as there is time for (until REG_VCOUNT
+/// reaches `lastLine`; 0: no limit), and when the copy is complete gives the
+/// texture its new place -- every material using it follows. What it moved
+/// from stays allocated for two more frames (the picture on the screen was
+/// drawn from it) and is then freed. Returns whether it did anything.
+///
+/// Whoever keeps a texture's TEXIMAGE_PARAM (NEA_MaterialGetTexParam) must
+/// fetch it again when NEA_TextureMoves() has changed.
+bool NEA_TextureDefragChoose(void);
+int NEA_TextureDefragStep(int lastLine);
+unsigned NEA_TextureMoves(void);
+/// Textures moved, bytes copied, and steps that did work, so far.
+void NEA_TextureDefragStats(int *moves, int *bytes, int *steps);
+
+/// Defragment memory used for textures: as many moves as help, at once. Only
+/// while nothing textured is on the screen (the banks are given to the CPU at
+/// any time).
 void NEA_TextureDefragMem(void);
 
 /// End texture system and free all memory used by it.
