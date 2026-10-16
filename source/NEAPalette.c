@@ -13,6 +13,8 @@ typedef struct {
     u16 *pointer;
     int format;
     u16 numcolors;
+    // The memory is the caller's (NEA_PaletteBindFixed()): not freed with it.
+    bool fixed;
 } ne_palinfo_t;
 
 static ne_palinfo_t *NEA_PalInfo = NULL;
@@ -144,8 +146,10 @@ static void ne_palette_vram_free(NEA_Palette *pal)
 {
     if (pal->index != NEA_NO_PALETTE)
     {
-        NEA_Free(NEA_PalAllocList, (void *)NEA_PalInfo[pal->index].pointer);
+        if (!NEA_PalInfo[pal->index].fixed)
+            NEA_Free(NEA_PalAllocList, (void *)NEA_PalInfo[pal->index].pointer);
         NEA_PalInfo[pal->index].pointer = NULL;
+        NEA_PalInfo[pal->index].fixed = false;
         pal->index = NEA_NO_PALETTE;
     }
 }
@@ -616,4 +620,70 @@ void NEA_PaletteModificationEnd(void)
     __NEA_VramSessionExit();
 
     palette_adress = NULL;
+}
+
+//--------------------------------------------------------------------------
+// Fixed regions: memory the caller places palettes in itself.
+
+int NEA_PaletteRegionReserve(int maxBytes, NEA_PaletteRegion *out)
+{
+    NEA_AssertPointer(out, "NULL pointer");
+    memset(out, 0, sizeof(*out));
+    if (!ne_palette_system_inited || maxBytes <= 0)
+        return 0;
+
+    uintptr_t at = 0;
+    int largest = 0;
+    for (NEAChunk *c = NEA_PalAllocList; c != NULL; c = c->next)
+    {
+        if (c->state != NEA_STATE_FREE)
+            continue;
+        const uintptr_t a = ((uintptr_t)c->start + 15) & ~(uintptr_t)15;
+        const int len = (int)((uintptr_t)c->end - a);
+        if (len > largest)
+        {
+            largest = len;
+            at = a;
+        }
+    }
+    int bytes = largest < maxBytes ? largest : maxBytes;
+    bytes &= ~15;
+    if (bytes <= 0 || NEA_AllocAddress(NEA_PalAllocList, (void *)at, bytes) != 0)
+        return 0;
+    out->base = (void *)at;
+    out->bytes = bytes;
+    return bytes;
+}
+
+void NEA_PaletteRegionRelease(NEA_PaletteRegion *region)
+{
+    NEA_AssertPointer(region, "NULL pointer");
+    if (ne_palette_system_inited && region->bytes > 0)
+        NEA_Free(NEA_PalAllocList, region->base);
+    memset(region, 0, sizeof(*region));
+}
+
+int NEA_PaletteBindFixed(NEA_Palette *pal, void *address, u16 numcolor,
+                         NEA_TextureFormat format)
+{
+    NEA_AssertPointer(pal, "NULL pointer");
+    if (!ne_palette_system_inited || address == NULL)
+        return 0;
+
+    ne_palette_vram_free(pal);
+
+    for (int i = 0; i < NEA_MAX_PALETTES; i++)
+    {
+        if (NEA_PalInfo[i].pointer != NULL)
+            continue;
+        NEA_PalInfo[i].pointer = address;
+        NEA_PalInfo[i].format = format;
+        NEA_PalInfo[i].numcolors = numcolor;
+        NEA_PalInfo[i].fixed = true;
+        pal->index = i;
+        return 1;
+    }
+
+    NEA_DebugPrint("No free slots");
+    return 0;
 }

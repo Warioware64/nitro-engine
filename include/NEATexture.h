@@ -588,6 +588,46 @@ void NEA_TextureDefragStats(int *moves, int *bytes, int *steps);
 /// any time).
 void NEA_TextureDefragMem(void);
 
+/// Fixed regions: memory the caller places textures in itself.
+///
+/// NEA_TextureRegionReserve4x4() takes the largest place a 4x4 texture could
+/// go -- texels in bank A or C, and the index memory in bank B that goes with
+/// them -- up to `maxTexelBytes`, out of NEA's hands. The caller then puts
+/// textures anywhere in it (a texture's index goes at
+/// NEA_Texture4x4IndexAddress() of its texels), writes them with
+/// NEA_VramWrite() when it knows the GPU is not drawing from that memory, and
+/// gives a material its texture with NEA_MaterialTexBindFixed(). Nothing NEA
+/// does afterwards moves, frees or writes that memory.
+typedef struct {
+    void *texels;   ///< Where the texels start (LCD address, bank A or C)
+    void *index;    ///< Where their index memory starts (bank B)
+    int texelBytes; ///< Texel bytes (the index is half as many)
+} NEA_TextureRegion;
+
+/// Returns the texel bytes taken (0: none; `out` is then empty).
+int NEA_TextureRegionReserve4x4(int maxTexelBytes, NEA_TextureRegion *out);
+/// Gives a region back (every texture bound in it must be gone).
+void NEA_TextureRegionRelease(NEA_TextureRegion *region);
+/// Where the index of a 4x4 texture whose texels are at `texels` goes.
+void *NEA_Texture4x4IndexAddress(const void *texels);
+
+/// Gives a material a texture whose data the caller has put at `texels`
+/// (LCD address; for a 4x4 texture, its index at
+/// NEA_Texture4x4IndexAddress()). Nothing is copied or allocated, and the
+/// memory is not freed with the material. A height that is not a power of two
+/// is allowed as in NEA_MaterialTex4x4Load(). Returns 1 on success.
+int NEA_MaterialTexBindFixed(NEA_Material *tex, NEA_TextureFormat fmt,
+                             int sizeX, int sizeY, NEA_TextureFlags flags,
+                             void *texels);
+
+/// Copies `bytes` (a multiple of 4) to video memory at `dst`, an LCD address in
+/// banks A to G: only the banks written are given to the CPU, for the length
+/// of the copy, and are then put back as they were. What the GPU draws from
+/// those banks meanwhile is drawn without them, so the caller times it (in the
+/// vertical blank, before the 3D engine starts on the next picture). It
+/// allocates nothing, and may be called from an interrupt.
+void NEA_VramWrite(void *dst, const void *src, size_t bytes);
+
 /// End texture system and free all memory used by it.
 void NEA_TextureSystemEnd(void);
 

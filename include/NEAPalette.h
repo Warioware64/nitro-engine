@@ -210,6 +210,25 @@ void NEA_PaletteRGB256SetColor(u8 colorindex, u16 color);
 /// Use this during VBL.
 void NEA_PaletteModificationEnd(void);
 
+/// Fixed regions: palette memory the caller places palettes in itself (see
+/// NEA_TextureRegionReserve4x4()). The largest free piece of palette memory, up
+/// to `maxBytes`, is taken out of NEA's hands; palettes are written there with
+/// NEA_VramWrite() and given to a palette object with NEA_PaletteBindFixed().
+typedef struct {
+    void *base; ///< Where it starts (LCD address)
+    int bytes;
+} NEA_PaletteRegion;
+
+/// Returns the bytes taken (0: none).
+int NEA_PaletteRegionReserve(int maxBytes, NEA_PaletteRegion *out);
+/// Gives a region back (every palette bound in it must be gone).
+void NEA_PaletteRegionRelease(NEA_PaletteRegion *region);
+/// Gives a palette object the colours the caller has put at `address` (16-byte
+/// aligned; 8 for NEA_PAL4). Nothing is copied, and the memory is not freed
+/// with the palette. Returns 1 on success.
+int NEA_PaletteBindFixed(NEA_Palette *pal, void *address, u16 numcolor,
+                         NEA_TextureFormat format);
+
 /// @}
 
 #endif // NEA_PALETTE_H__

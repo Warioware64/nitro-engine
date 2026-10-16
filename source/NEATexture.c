@@ -17,6 +17,9 @@ typedef struct {
     char *address;
     int uses; // Number of materials that use this texture
     int sizex, sizey;
+    // The memory is the caller's (NEA_MaterialTexBindFixed()): it is not
+    // freed with the texture, and the texture is never moved.
+    bool fixed;
 } ne_textureinfo_t;
 
 static ne_textureinfo_t *NEA_Texture = NULL;
@@ -222,7 +225,11 @@ static void ne_texture_delete(int texture_index)
 
         uint32_t fmt = (NEA_Texture[slot].param >> 26) & 7;
 
-        if (fmt == NEA_TEX4X4)
+        if (NEA_Texture[slot].fixed)
+        {
+            // (The caller's memory: it stays the caller's.)
+        }
+        else if (fmt == NEA_TEX4X4)
         {
             // Check if the texture is allocated in VRAM_A or VRAM_C, and
             // calculate the corresponding address in VRAM_B.
@@ -239,6 +246,7 @@ static void ne_texture_delete(int texture_index)
 
         NEA_Texture[slot].address = NULL;
         NEA_Texture[slot].param = 0;
+        NEA_Texture[slot].fixed = false;
     }
 }
 
@@ -1925,7 +1933,8 @@ static int ne_free_ranges(uintptr_t lo, uintptr_t hi, const ne_range_t *freed, i
 
 // The largest pair hole (and, in `total`, all of them), with a move's
 // `freed` and `taken` ranges applied. In texel bytes.
-static int ne_pair_holes(const ne_range_t *freed, int nfreed, const ne_range_t *taken, int ntaken, int *total)
+static int ne_pair_holes(const ne_range_t *freed, int nfreed, const ne_range_t *taken, int ntaken, int *total,
+                         uintptr_t *largestAt)
 {
     static ne_range_t texels[NE_DEFRAG_RANGES], index[NE_DEFRAG_RANGES];
     int largest = 0, sum = 0;
@@ -1950,7 +1959,11 @@ static int ne_pair_holes(const ne_range_t *freed, int nfreed, const ne_range_t *
                 const int len = (int)(b - a);
                 sum += len;
                 if (len > largest)
+                {
                     largest = len;
+                    if (largestAt != NULL)
+                        *largestAt = a;
+                }
             }
             if (texels[i].end < ib)
                 i++;
@@ -1967,7 +1980,7 @@ int NEA_TextureLargest4x4(void)
 {
     if (!ne_texture_system_inited)
         return 0;
-    return ne_pair_holes(NULL, 0, NULL, 0, NULL);
+    return ne_pair_holes(NULL, 0, NULL, 0, NULL, NULL);
 }
 
 // Dead index memory: a free range of bank B, `size` bytes long, all of whose
@@ -2044,14 +2057,14 @@ static bool ne_in_safe_time(int lastLine)
 static bool ne_defrag_choose(void)
 {
     int totalNow = 0;
-    const int largestNow = ne_pair_holes(NULL, 0, NULL, 0, &totalNow);
+    const int largestNow = ne_pair_holes(NULL, 0, NULL, 0, &totalNow, NULL);
     int bestSlot = -1, bestLargest = largestNow, bestTotal = totalNow;
     void *bestDst02 = NULL, *bestDst1 = NULL;
 
     for (int i = 0; i < NEA_MAX_TEXTURES; i++)
     {
         char *addr = NEA_Texture[i].address;
-        if (addr == NULL || NEA_Texture[i].uses <= 0)
+        if (addr == NULL || NEA_Texture[i].uses <= 0 || NEA_Texture[i].fixed)
             continue;
         const bool is4x4 = ((NEA_Texture[i].param >> 26) & 7) == NEA_TEX4X4;
         const uintptr_t at = (uintptr_t)addr;
@@ -2092,7 +2105,7 @@ static bool ne_defrag_choose(void)
             taken[ntaken++] = (ne_range_t){ (uintptr_t)dst1, (uintptr_t)dst1 + size1 };
         }
         int total = 0;
-        const int largest = ne_pair_holes(freed, nfreed, taken, ntaken, &total);
+        const int largest = ne_pair_holes(freed, nfreed, taken, ntaken, &total, NULL);
         // Better: a larger largest hole; or (moving a texture that is not
         // 4x4 into dead memory) as large a one, and more room in all.
         const bool better = largest > bestLargest ||
@@ -2527,4 +2540,153 @@ void NEA_TextureMatrixEnvMap(const NEA_Material *tex)
     int half_t = inttof32(NEA_TextureGetSizeY(tex) / 2);
 
     NEA_TextureMatrixEnvMapI(half_s, -half_t);
+}
+
+//--------------------------------------------------------------------------
+// Fixed regions: memory the caller places textures in itself.
+
+int NEA_TextureRegionReserve4x4(int maxTexelBytes, NEA_TextureRegion *out)
+{
+    NEA_AssertPointer(out, "NULL pointer");
+    memset(out, 0, sizeof(*out));
+    if (!ne_texture_system_inited || maxTexelBytes <= 0)
+        return 0;
+
+    uintptr_t at = 0;
+    const int largest = ne_pair_holes(NULL, 0, NULL, 0, NULL, &at);
+    // (Texels on a 32-byte boundary, so that the index is on a 16-byte one:
+    // the allocator's.)
+    const uintptr_t start = (at + 31) & ~(uintptr_t)31;
+    int bytes = largest - (int)(start - at);
+    if (bytes > maxTexelBytes)
+        bytes = maxTexelBytes;
+    bytes &= ~31;
+    if (bytes <= 0)
+        return 0;
+
+    void *texels = (void *)start;
+    void *index = NEA_Texture4x4IndexAddress(texels);
+    if (NEA_AllocAddress(NEA_TexAllocList, texels, bytes) != 0)
+        return 0;
+    if (NEA_AllocAddress(NEA_TexAllocList, index, bytes / 2) != 0)
+    {
+        NEA_Free(NEA_TexAllocList, texels);
+        return 0;
+    }
+    out->texels = texels;
+    out->index = index;
+    out->texelBytes = bytes;
+    return bytes;
+}
+
+void NEA_TextureRegionRelease(NEA_TextureRegion *region)
+{
+    NEA_AssertPointer(region, "NULL pointer");
+    if (ne_texture_system_inited && region->texelBytes > 0)
+    {
+        NEA_Free(NEA_TexAllocList, region->texels);
+        NEA_Free(NEA_TexAllocList, region->index);
+    }
+    memset(region, 0, sizeof(*region));
+}
+
+void *NEA_Texture4x4IndexAddress(const void *texels)
+{
+    void *t = (void *)texels;
+    return (t < (void *)VRAM_B) ? slot0_to_slot1(t) : slot2_to_slot1(t);
+}
+
+int NEA_MaterialTexBindFixed(NEA_Material *tex, NEA_TextureFormat fmt,
+                             int sizeX, int sizeY, NEA_TextureFlags flags,
+                             void *texels)
+{
+    NEA_AssertPointer(tex, "NULL material pointer");
+    if (!ne_texture_system_inited || texels == NULL)
+        return 0;
+    if (ne_is_valid_tex_size(sizeX) != sizeX || ne_is_valid_tex_size(sizeY) == 0)
+        return 0;
+
+    if (tex->texindex != NEA_NO_TEXTURE)
+        ne_texture_delete(tex->texindex);
+    tex->texindex = NEA_NO_TEXTURE;
+
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
+    {
+        if (NEA_Texture[i].address == NULL)
+        {
+            tex->texindex = i;
+            break;
+        }
+    }
+    if (tex->texindex == NEA_NO_TEXTURE)
+    {
+        NEA_DebugPrint("No free slots");
+        return 0;
+    }
+
+    int slot = tex->texindex;
+    NEA_Texture[slot].sizex = sizeX;
+    NEA_Texture[slot].sizey = sizeY;
+    NEA_Texture[slot].address = texels;
+    NEA_Texture[slot].uses = 1;
+    NEA_Texture[slot].fixed = true;
+    ne_set_material_tex_param(tex, sizeX, ne_is_valid_tex_size(sizeY), texels,
+                              fmt, flags);
+    return 1;
+}
+
+// The banks a write may go to, in LCD mode: A to D, then E, F and G.
+static const struct {
+    uintptr_t start, end;
+    vu8 *control;
+} ne_vram_banks[7] = {
+    { 0x06800000, 0x06820000, &VRAM_A_CR },
+    { 0x06820000, 0x06840000, &VRAM_B_CR },
+    { 0x06840000, 0x06860000, &VRAM_C_CR },
+    { 0x06860000, 0x06880000, &VRAM_D_CR },
+    { 0x06880000, 0x06890000, &VRAM_E_CR },
+    { 0x06890000, 0x06894000, &VRAM_F_CR },
+    { 0x06894000, 0x06898000, &VRAM_G_CR },
+};
+
+// Words, eight at a time where it can (ldmia/stmia).
+ARM_CODE static void ne_copy_words(u32 *dst, const u32 *src, u32 words)
+{
+    while (words >= 8)
+    {
+        __asm__ volatile("ldmia %0!, {r3-r10}\n\t"
+                         "stmia %1!, {r3-r10}"
+                         : "+r"(src), "+r"(dst)
+                         :
+                         : "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "memory");
+        words -= 8;
+    }
+    while (words--)
+        *dst++ = *src++;
+}
+
+ARM_CODE void NEA_VramWrite(void *dst, const void *src, size_t bytes)
+{
+    const uintptr_t first = (uintptr_t)dst, last = first + bytes;
+    u8 saved[7];
+    u8 mask = 0;
+
+    if (bytes == 0)
+        return;
+    for (int i = 0; i < 7; i++)
+    {
+        if (last <= ne_vram_banks[i].start || first >= ne_vram_banks[i].end)
+            continue;
+        mask |= 1 << i;
+        saved[i] = *ne_vram_banks[i].control;
+        *ne_vram_banks[i].control = VRAM_ENABLE; // (LCD mode is 0 in every bank)
+    }
+
+    ne_copy_words((u32 *)dst, (const u32 *)src, (u32)(bytes >> 2));
+
+    for (int i = 0; i < 7; i++)
+    {
+        if (mask & (1 << i))
+            *ne_vram_banks[i].control = saved[i];
+    }
 }
