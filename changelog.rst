@@ -4,6 +4,13 @@ Changelog
 Unreleased
 ----------
 
+**New: mount an NPAC archive with its index in the caller's memory
+(``NEA_NpacMountInto()``, ``NEA_NpacIndexBytes()``).** The file, name and
+compression tables are read into memory the caller gives instead of being
+allocated at every mount and freed at every unmount, so a game that mounts
+one archive per level no longer breaks its heap into pieces doing so.
+``NEA_NpacIndexBytes()`` tells how much an archive needs.
+
 **Changed: open NPAC files take a static handle.** Up to 16 files open at
 once use handles in a static array (about 0.6 KB) instead of a ``calloc()``
 each; past that, they come from the heap as before.

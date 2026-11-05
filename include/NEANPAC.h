@@ -120,7 +120,41 @@ typedef struct {
 ///     0 on success. On error, -1, with errno set.
 int NEA_NpacMount(const char *drive, const char *path);
 
-/// Unmounts an archive mounted by NEA_NpacMount() and frees its index.
+/// Mounts an NPAC archive with its index in memory the caller gives.
+///
+/// Like NEA_NpacMount(), but the index (the file and name tables, and the
+/// compression table) is read into "index" instead of being allocated, and
+/// unmounting does not free it. Mounting archives one after another into the
+/// same memory touches the heap for none of them. The memory must stay
+/// untouched for as long as the archive is mounted.
+///
+/// @param drive
+///     Drive name to mount under, as for NEA_NpacMount().
+/// @param path
+///     Path of the archive file.
+/// @param index
+///     Memory for the index, word-aligned.
+/// @param size
+///     Its size in bytes. NEA_NpacIndexBytes() tells how much an archive
+///     needs.
+/// @return
+///     0 on success. On error, -1, with errno set: ENOSPC when the index does
+///     not fit, in which case nothing is mounted.
+int NEA_NpacMountInto(const char *drive, const char *path, void *index,
+                      size_t size);
+
+/// Tells how much memory NEA_NpacMountInto() needs for an archive's index.
+///
+/// Only the archive's chunk headers are read.
+///
+/// @param path
+///     Path of the archive file.
+/// @return
+///     The size in bytes. On error, -1, with errno set.
+int NEA_NpacIndexBytes(const char *path);
+
+/// Unmounts an archive mounted by NEA_NpacMount() and frees its index (but
+/// not memory given to NEA_NpacMountInto(), which stays the caller's).
 ///
 /// Files and directories still open on that archive are not closed by this.
 /// Reading through one afterwards fails with EBADF rather than returning

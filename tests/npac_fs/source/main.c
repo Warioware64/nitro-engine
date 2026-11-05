@@ -201,6 +201,44 @@ static void CheckMemberRead(const TestVector *v)
     free(buffer);
 }
 
+// The index in memory the test gives: what NEA_NpacIndexBytes() says is
+// enough, a word less is refused with nothing mounted, and the same memory
+// serves a second mount after an unmount.
+static uint32_t index_memory[16 * 1024 / 4];
+
+static void CheckMountInto(void)
+{
+    int need = NEA_NpacIndexBytes("nitro:/test.npac");
+    check(need > 0 && (size_t)need <= sizeof(index_memory), "index bytes", "test.npac");
+    if (need <= 0 || (size_t)need > sizeof(index_memory))
+        return;
+
+    check((NEA_NpacMountInto("buf", "nitro:/test.npac", index_memory, need - 4) == -1) &&
+          (errno == ENOSPC), "index too small", "buf");
+    check(!NEA_NpacIsMounted("buf"), "not mounted when small", "buf");
+
+    for (int round = 0; round < 2; round++)
+    {
+        check(NEA_NpacMountInto("buf", "nitro:/test.npac", index_memory, need) == 0,
+              "mount into", "buf");
+        for (unsigned int i = 0; i < NUM_VECTORS; i++)
+        {
+            const TestVector *v = &vectors[i];
+            if (v->method == NEA_NPAC_HUFF4 || v->method == NEA_NPAC_HUFF8)
+                continue;
+            char path[160];
+            snprintf(path, sizeof(path), "buf:/%s", v->path);
+            uint8_t *buffer = malloc(v->size + 1);
+            check(buffer != NULL && NEA_NpacReadInto(path, buffer, v->size + 1) == (int)v->size,
+                  "mounted into read", v->path);
+            uint32_t crc = crc32_update(0xFFFFFFFFU, buffer, v->size) ^ 0xFFFFFFFFU;
+            check(crc == v->crc, "mounted into crc", v->path);
+            free(buffer);
+        }
+        check(NEA_NpacUnmount("buf") == 0, "unmount into", "buf");
+    }
+}
+
 // More files open at once than the static handles: those past them come
 // from the heap, and every one reads its own member.
 static void CheckManyOpen(void)
@@ -523,6 +561,7 @@ int main(int argc, char *argv[])
     CheckStaleHandles();
     CheckStaleMember();
     CheckManyOpen();
+    CheckMountInto();
 
     // Unmounting has to actually take the drive away...
     chdir("nitro:/");

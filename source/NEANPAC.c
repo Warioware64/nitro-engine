@@ -67,6 +67,12 @@ typedef struct {
     uint16_t num_dirs;
     uint16_t current_dir;   // Working directory of this mount
 
+    // When the caller gave the memory for the index (NEA_NpacMountInto()),
+    // the tables are cut from it in turn and never freed here.
+    uint8_t *index_buf;
+    size_t index_size;
+    size_t index_used;
+
     // Bumped every time this slot is mounted or unmounted. Open files and
     // directories capture it so that a handle left over from a previous life
     // of the slot fails instead of reading the archive that replaced it.
@@ -213,16 +219,37 @@ static int ne_npac_read_at(ne_npac_mount_t *m, uint32_t offset, void *dst,
 static uint8_t *ne_npac_read_chunk(ne_npac_mount_t *m, uint32_t offset,
                                    uint32_t len)
 {
-    uint8_t *buf = malloc(len ? len : 1);
-    if (buf == NULL)
+    uint8_t *buf;
+
+    if (m->index_buf != NULL)
     {
-        NEA_DebugPrint("Not enough memory");
-        return NULL;
+        // Cut from the caller's memory, each table word-aligned.
+        size_t room = (len + 3) & ~(size_t)3;
+        if (room > m->index_size - m->index_used)
+        {
+            NEA_DebugPrint("NPAC index doesn't fit in the memory given");
+            errno = ENOSPC;
+            return NULL;
+        }
+        buf = m->index_buf + m->index_used;
+        m->index_used += room;
+    }
+    else
+    {
+        buf = malloc(len ? len : 1);
+        if (buf == NULL)
+        {
+            NEA_DebugPrint("Not enough memory");
+            errno = ENOMEM;
+            return NULL;
+        }
     }
 
     if (ne_npac_read_at(m, offset, buf, len) != 0)
     {
-        free(buf);
+        if (m->index_buf == NULL)
+            free(buf);
+        errno = EIO;
         return NULL;
     }
 
@@ -401,9 +428,12 @@ static void ne_npac_release(ne_npac_mount_t *m)
     if (m->fd >= 0)
         close(m->fd);
 
-    free(m->fat);
-    free(m->fnt);
-    free(m->cmp);
+    if (m->index_buf == NULL)
+    {
+        free(m->fat);
+        free(m->fnt);
+        free(m->cmp);
+    }
 
     uint32_t generation = m->generation + 1;
 
@@ -1340,7 +1370,8 @@ static const char *ne_npac_reserved[] = {
     "nitro", "fat", "sd", "nand", "nand2"
 };
 
-int NEA_NpacMount(const char *drive, const char *path)
+static int ne_npac_mount(const char *drive, const char *path, void *index,
+                         size_t index_size)
 {
     NEA_AssertPointer(drive, "NULL drive name");
     NEA_AssertPointer(path, "NULL path");
@@ -1396,6 +1427,8 @@ int NEA_NpacMount(const char *drive, const char *path)
     uint32_t generation = m->generation;
     memset(m, 0, sizeof(*m));
     m->generation = generation;
+    m->index_buf = index;
+    m->index_size = index_size;
 
     m->fd = open(path, O_RDONLY, 0);
     if (m->fd < 0)
@@ -1440,6 +1473,109 @@ int NEA_NpacMount(const char *drive, const char *path)
         ne_npac_current = m;
 
     return 0;
+}
+
+int NEA_NpacMount(const char *drive, const char *path)
+{
+    return ne_npac_mount(drive, path, NULL, 0);
+}
+
+int NEA_NpacMountInto(const char *drive, const char *path, void *index,
+                      size_t size)
+{
+    NEA_AssertPointer(index, "NULL index memory");
+
+    if ((index == NULL) || (((uintptr_t)index & 3) != 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return ne_npac_mount(drive, path, index, size);
+}
+
+int NEA_NpacIndexBytes(const char *path)
+{
+    NEA_AssertPointer(path, "NULL path");
+
+    if (path == NULL)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // A mount slot of its own, only to walk the chunk headers through the
+    // same reads a mount does.
+    ne_npac_mount_t m;
+    memset(&m, 0, sizeof(m));
+    m.fd = open(path, O_RDONLY, 0);
+    if (m.fd < 0)
+        return -1;
+
+    int result = -1;
+    uint8_t header[16];
+
+    if ((ne_npac_read_at(&m, 0, header, sizeof(header)) != 0) ||
+        ((memcmp(header, "NPAC", 4) != 0) && (memcmp(header, "NARC", 4) != 0)))
+    {
+        errno = EINVAL;
+        goto out;
+    }
+
+    uint32_t pos = ne_rd16(header + 12);
+    uint16_t num_chunks = ne_rd16(header + 14);
+    uint32_t files = 0, fnt = 0;
+    bool has_cmp = false;
+
+    for (uint16_t i = 0; i < num_chunks; i++)
+    {
+        uint8_t chunk[8];
+        if (ne_npac_read_at(&m, pos, chunk, sizeof(chunk)) != 0)
+        {
+            errno = EIO;
+            goto out;
+        }
+
+        uint32_t size = ne_rd32(chunk + 4);
+        if (size < sizeof(chunk))
+        {
+            errno = EINVAL;
+            goto out;
+        }
+
+        if (memcmp(chunk, "BTAF", 4) == 0)
+        {
+            uint8_t count[2];
+            if (ne_npac_read_at(&m, pos + 8, count, sizeof(count)) != 0)
+            {
+                errno = EIO;
+                goto out;
+            }
+            files = ne_rd16(count);
+        }
+        else if (memcmp(chunk, "BTNF", 4) == 0)
+        {
+            fnt = size - 8;
+        }
+        else if (memcmp(chunk, "CMPT", 4) == 0)
+        {
+            has_cmp = true;
+        }
+        else if (memcmp(chunk, "GMIF", 4) == 0)
+        {
+            break;
+        }
+
+        pos += (size + 3) & ~3u;
+    }
+
+    // As ne_npac_read_chunk() cuts them: each table rounded up to a word.
+    result = (int)(((files * 8 + 3) & ~3u) + ((fnt + 3) & ~3u) +
+                   (has_cmp ? ((files * 4 + 3) & ~3u) : 0));
+
+out:
+    close(m.fd);
+    return result;
 }
 
 int NEA_NpacUnmount(const char *drive)
