@@ -40,19 +40,22 @@
 /// NEA_ModelLoadStaticMeshFAT(Model, "levels:/robot.bin");
 /// ```
 ///
-/// Members compressed by the packer are decompressed transparently when they
-/// are opened, so nothing above this layer needs to know. stat() and
+/// Members compressed by the packer are decompressed transparently by their
+/// first read, so nothing above this layer needs to know. stat() and
 /// fseek(SEEK_END) report the decompressed size, which is what callers size
-/// their buffers from.
+/// their buffers from; they come from the in-RAM index, so opening a file only
+/// to ask its size costs no I/O.
 ///
 /// Two things are worth knowing before leaning on compression:
 ///
-/// - The whole member is inflated into main RAM inside open(), and it stays
-///   there until close(). A stored member costs nothing and is read straight
-///   out of the archive.
+/// - The whole member is inflated into main RAM by the first read(), and it
+///   stays there until close(). A stored member costs nothing and is read
+///   straight out of the archive. Running out of memory for that copy makes
+///   the read fail with ENOMEM; open() itself no longer reads anything.
 /// - That inflate is one uninterrupted block of work. NEA_FATLoadDataAsync()
 ///   yields between chunks while *reading*, so a large compressed asset loaded
-///   asynchronously will still stall the frame it opens on. Store the big ones.
+///   asynchronously will still stall the frame of its first read. Store the
+///   big ones.
 ///
 /// One emulator caveat, because it costs a day to find: Huffman members decode
 /// correctly on hardware and under an emulator using a real BIOS dump, but

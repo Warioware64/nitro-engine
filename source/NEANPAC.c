@@ -79,8 +79,10 @@ typedef struct {
     uint32_t offset;        // Where the stored bytes start in the archive file
     uint32_t size;          // Decompressed size, which is the size callers see
     uint32_t position;
-    uint8_t *ram;           // Decompressed copy, or NULL when stored
+    uint32_t stored;        // Bytes held in the archive
+    uint8_t *ram;           // Decompressed copy, made by the first read
     uint16_t file_index;
+    uint8_t method;         // NEA_NPAC_STORED, or how to inflate it
 } ne_npac_file_t;
 
 // Cursor over one directory's subtable.
@@ -745,65 +747,26 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
     f->offset = m->img_offset + start;
     f->size = size;
 
-    if (method != NEA_NPAC_STORED)
+    switch (method)
     {
-        DecompressType type;
-
-        switch (method)
-        {
-            case NEA_NPAC_LZ77:
-                type = LZ77;
-                break;
-            case NEA_NPAC_HUFF4:
-            case NEA_NPAC_HUFF8:
-                type = HUFF;
-                break;
-            case NEA_NPAC_RLE:
-                type = RLE;
-                break;
-            default:
-                NEA_DebugPrint("Unknown NPAC compression 0x%02X", method);
-                free(f);
-                errno = EINVAL;
-                return -1;
-        }
-
-        // The BIOS decompressors want the whole stream in one piece, so the
-        // member is inflated here and served out of RAM from then on.
-        uint32_t stored = end - start;
-
-        uint8_t *src = malloc(stored ? stored : 1);
-        if (src == NULL)
-        {
-            NEA_DebugPrint("Not enough memory");
+        case NEA_NPAC_STORED:
+        case NEA_NPAC_LZ77:
+        case NEA_NPAC_HUFF4:
+        case NEA_NPAC_HUFF8:
+        case NEA_NPAC_RLE:
+            break;
+        default:
+            NEA_DebugPrint("Unknown NPAC compression 0x%02X", method);
             free(f);
-            errno = ENOMEM;
+            errno = EINVAL;
             return -1;
-        }
-
-        if (ne_npac_read_at(m, f->offset, src, stored) != 0)
-        {
-            free(src);
-            free(f);
-            errno = EIO;
-            return -1;
-        }
-
-        uint8_t *dst = malloc(size ? size : 1);
-        if (dst == NULL)
-        {
-            NEA_DebugPrint("Not enough memory");
-            free(src);
-            free(f);
-            errno = ENOMEM;
-            return -1;
-        }
-
-        decompress(src, dst, type);
-        free(src);
-
-        f->ram = dst;
     }
+
+    // A packed member is inflated by its first read, not here: what opens a
+    // file only to ask its size (fseek to the end, ftell, fclose) costs no
+    // I/O at all.
+    f->method = method;
+    f->stored = end - start;
 
     // libnds tags the top four bits and the bottom two with the device index,
     // and crashes on a descriptor that has already used them.
@@ -811,7 +774,6 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
     if ((fd & 0xF0000003) != 0)
     {
         NEA_DebugPrint("Misaligned NPAC file descriptor");
-        free(f->ram);
         free(f);
         errno = ENOMEM;
         return -1;
@@ -827,6 +789,57 @@ static int ne_npac_close(int fd)
     free(f->ram);
     free(f);
 
+    return 0;
+}
+
+// Inflates a packed member into RAM, where its reads are served from until
+// close(). The BIOS decompressors want the whole stream in one piece.
+static int ne_npac_inflate(ne_npac_file_t *f)
+{
+    DecompressType type;
+
+    switch (f->method)
+    {
+        case NEA_NPAC_LZ77:
+            type = LZ77;
+            break;
+        case NEA_NPAC_HUFF4:
+        case NEA_NPAC_HUFF8:
+            type = HUFF;
+            break;
+        default:
+            type = RLE;
+            break;
+    }
+
+    uint8_t *src = malloc(f->stored ? f->stored : 1);
+    if (src == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if (ne_npac_read_at(f->mnt, f->offset, src, f->stored) != 0)
+    {
+        free(src);
+        errno = EIO;
+        return -1;
+    }
+
+    uint8_t *dst = malloc(f->size ? f->size : 1);
+    if (dst == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        free(src);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    decompress(src, dst, type);
+    free(src);
+
+    f->ram = dst;
     return 0;
 }
 
@@ -846,6 +859,10 @@ static ssize_t ne_npac_read_cb(int fd, void *ptr, size_t len)
     size_t available = f->size - f->position;
     if (len > available)
         len = available;
+
+    if ((f->method != NEA_NPAC_STORED) && (f->ram == NULL) &&
+        (ne_npac_inflate(f) != 0))
+        return -1;
 
     if (f->ram != NULL)
     {

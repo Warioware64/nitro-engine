@@ -4,6 +4,12 @@ Changelog
 Unreleased
 ----------
 
+**Changed: a packed NPAC member is inflated by its first read, not by
+open().** Opening a member only to ask its size (``fseek`` to the end,
+``ftell``, ``fclose``) used to inflate it into RAM and throw the copy away;
+it now costs no I/O. An out-of-memory error for the copy is reported by
+``read()`` instead of ``open()``.
+
 **New: a water reflection and full-screen effects made by the DSi's DSP
 (``NEADspFX.h``).** Both capture the 3D image with the display capture, reserve
 VRAM banks (set them up before ``NEA_TextureSystemReset()``, which leaves those
