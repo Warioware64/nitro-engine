@@ -4,6 +4,14 @@ Changelog
 Unreleased
 ----------
 
+**New: read an NPAC member with no file handle and no heap
+(``NEA_NpacMemberFind()``, ``NEA_NpacMemberRead()``, ``NEA_NpacReadInto()``).**
+A member is found once in the in-RAM index and then read straight into the
+caller's buffer: a stored one in any range, a packed one (LZ77 or RLE) whole,
+decompressed as its bytes come in 512 at a time. Nothing is opened, nothing is
+allocated, and no single card read is longer than that window. A member found
+before an unmount fails with ``EBADF`` afterwards.
+
 **Changed: a packed NPAC member is inflated by its first read, not by
 open().** Opening a member only to ask its size (``fseek`` to the end,
 ``ftell``, ``fclose``) used to inflate it into RAM and throw the copy away;

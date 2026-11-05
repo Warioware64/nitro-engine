@@ -21,7 +21,9 @@ static const TestVector vectors[] = {
     { "zero.bin", 0, 0x00000000U, 0x00 },
     { "a/b/c/deep.bin", 300, 0xD1B2522FU, 0x00 },
     { "huff/skew.bin", 4096, 0x851B485EU, 0x28 },
+    { "lz/far.bin", 12000, 0xF17CE576U, 0x10 },
     { "lz/text.txt", 4096, 0xFBC2504CU, 0x10 },
+    { "rle/mixed.bin", 6000, 0x9CF1D80EU, 0x30 },
     { "rle/runs.bin", 4096, 0xA6927B81U, 0x30 },
 };
 

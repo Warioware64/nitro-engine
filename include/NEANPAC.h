@@ -154,6 +154,75 @@ bool NEA_NpacIsMounted(const char *drive);
 ///     0 on success. On error, -1, with errno set.
 int NEA_NpacGetFileInfo(const char *path, NEA_NpacFileInfo *info);
 
+/// Where a member lies in its archive: found once, read as often as wanted.
+///
+/// Filled in by NEA_NpacMemberFind() and read by NEA_NpacMemberRead(), which
+/// need no file handle and no heap. It stays good until its archive is
+/// unmounted; a read after that fails with EBADF, even once another archive
+/// has taken the mount slot.
+typedef struct {
+    uint32_t generation;    ///< Which mounting of the archive it belongs to
+    uint32_t offset;        ///< Where its bytes start in the archive file
+    uint32_t size;          ///< Size once decompressed
+    uint32_t stored_size;   ///< Size of the bytes actually held in the archive
+    uint16_t file_id;       ///< Index of the file inside the archive
+    uint8_t mount;          ///< Mount slot of its archive
+    uint8_t method;         ///< One of NEA_NpacMethod
+} NEA_NpacMember;
+
+/// Finds a member, for NEA_NpacMemberRead(), without opening it.
+///
+/// This answers from the in-RAM index, so it costs no I/O and no memory.
+///
+/// @param path
+///     Path of a file inside a mounted archive, for example
+///     "levels:/robot.bin".
+/// @param member
+///     Filled in on success.
+/// @return
+///     0 on success. On error, -1, with errno set (ENODEV when the path is
+///     not on a mounted archive).
+int NEA_NpacMemberFind(const char *path, NEA_NpacMember *member);
+
+/// Reads a member found by NEA_NpacMemberFind() straight into a buffer.
+///
+/// Nothing is allocated and no file is opened. A stored member can be read in
+/// any range, so a large one can be read in pieces. A packed one can only be
+/// read whole (from 0, at least member->size bytes); it is decompressed
+/// straight into the buffer while its bytes are read from the archive 512 at a
+/// time. LZ77 and RLE members can be read this way, Huffman ones cannot.
+///
+/// @param member
+///     The member.
+/// @param from
+///     First byte to read, in the member as it is once decompressed.
+/// @param dst
+///     Where the bytes go.
+/// @param len
+///     How many bytes to read. A stored member needs from + len to be within
+///     its size; a packed one needs from == 0 and len >= its size, and
+///     member->size bytes are written.
+/// @return
+///     0 on success. On error, -1, with errno set: EBADF once the archive is
+///     gone, EINVAL for a range it cannot serve, ENOTSUP for a Huffman member,
+///     EIO when the archive cannot be read or its packed bytes are broken.
+int NEA_NpacMemberRead(const NEA_NpacMember *member, uint32_t from, void *dst,
+                       uint32_t len);
+
+/// Reads a whole member into a buffer, with no handle and no heap.
+///
+/// NEA_NpacMemberFind() then NEA_NpacMemberRead() of the whole member.
+///
+/// @param path
+///     Path of a file inside a mounted archive.
+/// @param dst
+///     Where the bytes go.
+/// @param capacity
+///     Size of the buffer. A member bigger than this is not read (ENOSPC).
+/// @return
+///     The member's size on success. On error, -1, with errno set.
+int NEA_NpacReadInto(const char *path, void *dst, uint32_t capacity);
+
 /// Unmounts every archive and unregisters the filesystem.
 ///
 /// Called automatically by NEA_End(). There is no need to call it by hand

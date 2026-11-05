@@ -17,7 +17,7 @@
 // compression method and size the index reports, the bytes that come back
 // through fopen(), reads at an odd chunk size, seeks, stat(), the directory
 // listings, the errors the missing cases should raise, chdir() with relative
-// paths, and unmount followed by remount.
+// paths, unmount followed by remount, and the handle-free member reads.
 //
 // One expected false alarm: the archive contains a Huffman member on purpose,
 // and melonDS decodes Huffman wrongly under its default HLE BIOS. If the only
@@ -120,6 +120,105 @@ static void CheckContents(const TestVector *v)
 
     free(buffer);
     fclose(f);
+}
+
+// Reads a member through NEA_NpacMemberRead(), with no handle and no heap in
+// the engine: whole, and for a stored one also in pieces from an offset.
+static void CheckMemberRead(const TestVector *v)
+{
+    char path[160];
+    full_path(path, sizeof(path), v->path);
+
+    NEA_NpacMember member;
+    if (NEA_NpacMemberFind(path, &member) != 0)
+    {
+        check(false, "member find", v->path);
+        return;
+    }
+
+    check(member.size == v->size, "member size", v->path);
+    check(member.method == v->method, "member method", v->path);
+
+    uint8_t *buffer = malloc(v->size + 1);
+    if (buffer == NULL)
+    {
+        check(false, "malloc", v->path);
+        return;
+    }
+
+    bool huffman = (v->method == NEA_NPAC_HUFF4) || (v->method == NEA_NPAC_HUFF8);
+    int ret = NEA_NpacMemberRead(&member, 0, buffer, v->size);
+    if (huffman)
+    {
+        check((ret == -1) && (errno == ENOTSUP), "member huffman", v->path);
+        free(buffer);
+        return;
+    }
+
+    check(ret == 0, "member read", v->path);
+    uint32_t crc = crc32_update(0xFFFFFFFFU, buffer, v->size) ^ 0xFFFFFFFFU;
+    check(crc == v->crc, "member crc", v->path);
+
+    // Whole, through the one-call form; and refused into too small a buffer.
+    memset(buffer, 0, v->size + 1);
+    check(NEA_NpacReadInto(path, buffer, v->size + 1) == (int)v->size,
+          "read into", v->path);
+    crc = crc32_update(0xFFFFFFFFU, buffer, v->size) ^ 0xFFFFFFFFU;
+    check(crc == v->crc, "read into crc", v->path);
+    if (v->size != 0)
+    {
+        check((NEA_NpacReadInto(path, buffer, v->size - 1) == -1) &&
+              (errno == ENOSPC), "read into small", v->path);
+    }
+
+    if (v->method == NEA_NPAC_STORED)
+    {
+        // In odd pieces from an odd start, as a caller cutting a read up does.
+        uint32_t crc2 = 0xFFFFFFFFU;
+        uint8_t piece[37];
+        uint32_t at = 0;
+        while (at < v->size)
+        {
+            uint32_t n = (v->size - at < sizeof(piece)) ? v->size - at : sizeof(piece);
+            if (NEA_NpacMemberRead(&member, at, piece, n) != 0)
+            {
+                check(false, "member piece", v->path);
+                break;
+            }
+            crc2 = crc32_update(crc2, piece, n);
+            at += n;
+        }
+        check((crc2 ^ 0xFFFFFFFFU) == v->crc, "member pieces crc", v->path);
+        check(NEA_NpacMemberRead(&member, v->size, piece, 1) == -1,
+              "member past end", v->path);
+    }
+    else
+    {
+        check((NEA_NpacMemberRead(&member, 1, buffer, v->size - 1) == -1) &&
+              (errno == EINVAL), "member packed part", v->path);
+    }
+
+    free(buffer);
+}
+
+// A member found before an unmount is refused after it, even once the slot
+// holds an archive again.
+static void CheckStaleMember(void)
+{
+    NEA_NpacMember member;
+    check(NEA_NpacMemberFind("test:/stored.bin", &member) == 0,
+          "stale member setup", "stored.bin");
+    check((NEA_NpacMemberFind("nosuch:/a.bin", &member) == -1) &&
+          (errno == ENODEV), "member bad drive", "nosuch");
+    check(NEA_NpacMemberFind("test:/lz", &member) == -1, "member dir", "lz");
+
+    NEA_NpacMemberFind("test:/stored.bin", &member);
+    check(NEA_NpacUnmount("test") == 0, "member unmount", "test");
+    check(NEA_NpacMount("test", "nitro:/test.npac") == 0, "member remount", "test");
+
+    uint8_t byte;
+    check((NEA_NpacMemberRead(&member, 0, &byte, 1) == -1) && (errno == EBADF),
+          "stale member", "stored.bin");
 }
 
 // Reads the same member again in small, deliberately unaligned pieces. The
@@ -358,6 +457,7 @@ int main(int argc, char *argv[])
         CheckIndex(&vectors[i]);
         CheckContents(&vectors[i]);
         CheckChunkedRead(&vectors[i]);
+        CheckMemberRead(&vectors[i]);
     }
 
     for (unsigned int i = 0; i < NUM_LISTINGS; i++)
@@ -366,6 +466,7 @@ int main(int argc, char *argv[])
     CheckErrors();
     CheckWorkingDirectory();
     CheckStaleHandles();
+    CheckStaleMember();
 
     // Unmounting has to actually take the drive away...
     chdir("nitro:/");

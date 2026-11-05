@@ -1486,6 +1486,273 @@ int NEA_NpacGetFileInfo(const char *path, NEA_NpacFileInfo *info)
     return 0;
 }
 
+//-----------------------------------------------------------------------------
+// Reading a member straight into the caller's buffer
+//-----------------------------------------------------------------------------
+
+// The packed bytes of a member come in through this window, a piece at a
+// time, so a decode needs no heap and no read is longer than the window.
+#define NPAC_WINDOW_BYTES   512
+
+typedef struct {
+    ne_npac_mount_t *mnt;
+    uint32_t next;          // Where the next piece starts in the archive file
+    uint32_t left;          // Packed bytes not read into the window yet
+    uint32_t at;
+    uint32_t fill;
+    bool failed;
+} ne_npac_source_t;
+
+static uint8_t ne_npac_window[NPAC_WINDOW_BYTES] __attribute__((aligned(4)));
+static volatile bool ne_npac_window_busy = false;
+
+static uint8_t ne_npac_source_byte(ne_npac_source_t *src)
+{
+    if (src->at == src->fill)
+    {
+        uint32_t piece = (src->left < NPAC_WINDOW_BYTES) ? src->left
+                                                         : NPAC_WINDOW_BYTES;
+        if ((piece == 0) ||
+            (ne_npac_read_at(src->mnt, src->next, ne_npac_window, piece) != 0))
+        {
+            src->failed = true;
+            return 0;
+        }
+        src->next += piece;
+        src->left -= piece;
+        src->at = 0;
+        src->fill = piece;
+    }
+
+    return ne_npac_window[src->at++];
+}
+
+// LZ77 (the BIOS's LZ10): a flag byte for every eight blocks, high bit first;
+// a set bit is a copy of 3..18 bytes from 1..4096 bytes back, a clear one a
+// byte as it is.
+static bool ne_npac_unlz77(ne_npac_source_t *src, uint8_t *out, uint32_t size)
+{
+    uint32_t done = 0;
+
+    while (done < size)
+    {
+        uint8_t flags = ne_npac_source_byte(src);
+
+        for (int bit = 0; (bit < 8) && (done < size); bit++, flags <<= 1)
+        {
+            if ((flags & 0x80) == 0)
+            {
+                out[done++] = ne_npac_source_byte(src);
+                continue;
+            }
+
+            uint8_t hi = ne_npac_source_byte(src);
+            uint8_t lo = ne_npac_source_byte(src);
+            uint32_t back = ((uint32_t)(hi & 0x0F) << 8 | lo) + 1;
+            uint32_t len = (uint32_t)(hi >> 4) + 3;
+
+            if ((back > done) || src->failed)
+                return false;
+            if (len > size - done)
+                len = size - done;
+
+            const uint8_t *from = out + done - back;
+            for (uint32_t i = 0; i < len; i++)
+                out[done + i] = from[i];
+            done += len;
+        }
+
+        if (src->failed)
+            return false;
+    }
+
+    return !src->failed;
+}
+
+// RLE: a flag byte, then either 1..128 bytes as they are (high bit clear) or
+// one byte said 3..130 times (high bit set).
+static bool ne_npac_unrle(ne_npac_source_t *src, uint8_t *out, uint32_t size)
+{
+    uint32_t done = 0;
+
+    while (done < size)
+    {
+        uint8_t flag = ne_npac_source_byte(src);
+        uint32_t len = (flag & 0x80) ? (uint32_t)(flag & 0x7F) + 3
+                                     : (uint32_t)(flag & 0x7F) + 1;
+        if (len > size - done)
+            len = size - done;
+
+        if (flag & 0x80)
+        {
+            uint8_t value = ne_npac_source_byte(src);
+            memset(out + done, value, len);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < len; i++)
+                out[done + i] = ne_npac_source_byte(src);
+        }
+        done += len;
+
+        if (src->failed)
+            return false;
+    }
+
+    return true;
+}
+
+int NEA_NpacMemberFind(const char *path, NEA_NpacMember *member)
+{
+    NEA_AssertPointer(path, "NULL path");
+    NEA_AssertPointer(member, "NULL member");
+
+    if ((path == NULL) || (member == NULL))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    const char *rest;
+    ne_npac_mount_t *m = ne_npac_split(path, &rest);
+    if (m == NULL)
+        return -1;
+
+    int id = ne_npac_resolve(m, rest);
+    if (id < 0)
+        return -1;
+
+    if (id >= NPAC_DIR_ROOT)
+    {
+        errno = EISDIR;
+        return -1;
+    }
+
+    uint32_t start, end;
+    ne_npac_file_extent(m, (uint16_t)id, &start, &end);
+
+    if ((start > end) || (end > m->img_size))
+    {
+        NEA_DebugPrint("NPAC file %d is outside the image", id);
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint8_t method;
+    uint32_t size;
+    ne_npac_file_meta(m, (uint16_t)id, &method, &size);
+
+    member->generation = m->generation;
+    member->offset = m->img_offset + start;
+    member->size = size;
+    member->stored_size = end - start;
+    member->file_id = (uint16_t)id;
+    member->mount = (uint8_t)(m - ne_npac_mounts);
+    member->method = method;
+
+    return 0;
+}
+
+int NEA_NpacMemberRead(const NEA_NpacMember *member, uint32_t from, void *dst,
+                       uint32_t len)
+{
+    NEA_AssertPointer(member, "NULL member");
+
+    if ((member == NULL) || (member->mount >= NEA_NPAC_MAX_MOUNTS) ||
+        ((dst == NULL) && (len != 0)))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    ne_npac_mount_t *m = &ne_npac_mounts[member->mount];
+    if (!ne_npac_handle_valid(m, member->generation))
+    {
+        errno = EBADF;
+        return -1;
+    }
+
+    if (member->method == NEA_NPAC_STORED)
+    {
+        if ((from > member->size) || (len > member->size - from))
+        {
+            errno = EINVAL;
+            return -1;
+        }
+        if (ne_npac_read_at(m, member->offset + from, dst, len) != 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        return 0;
+    }
+
+    // A packed member can only be had whole: each byte depends on the ones
+    // before it.
+    if ((from != 0) || (len < member->size))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((member->method != NEA_NPAC_LZ77) && (member->method != NEA_NPAC_RLE))
+    {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (member->size == 0)
+        return 0;
+
+    while (ne_npac_window_busy)
+        cothread_yield();
+    ne_npac_window_busy = true;
+
+    // The stream starts with the BIOS's four byte header: the method, then
+    // the size, which the index already has.
+    ne_npac_source_t src = {
+        .mnt = m,
+        .next = member->offset,
+        .left = member->stored_size,
+    };
+    for (int i = 0; i < 4; i++)
+        ne_npac_source_byte(&src);
+
+    bool ok = !src.failed &&
+              ((member->method == NEA_NPAC_LZ77)
+                   ? ne_npac_unlz77(&src, dst, member->size)
+                   : ne_npac_unrle(&src, dst, member->size));
+
+    ne_npac_window_busy = false;
+
+    if (!ok)
+    {
+        errno = EIO;
+        return -1;
+    }
+
+    return 0;
+}
+
+int NEA_NpacReadInto(const char *path, void *dst, uint32_t capacity)
+{
+    NEA_NpacMember member;
+
+    if (NEA_NpacMemberFind(path, &member) != 0)
+        return -1;
+
+    if (member.size > capacity)
+    {
+        errno = ENOSPC;
+        return -1;
+    }
+
+    if (NEA_NpacMemberRead(&member, 0, dst, member.size) != 0)
+        return -1;
+
+    return (int)member.size;
+}
+
 void NEA_NpacSystemEnd(void)
 {
     for (int i = 0; i < NEA_NPAC_MAX_MOUNTS; i++)

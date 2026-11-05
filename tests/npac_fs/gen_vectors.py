@@ -61,6 +61,32 @@ def runs(size):
     return bytes(out[:size])
 
 
+def mixed_runs(size):
+    """RLE with both kinds of block: runs, and stretches as they are."""
+    rng = random.Random(0xB10C)
+    out = bytearray()
+    while len(out) < size:
+        if rng.random() < 0.5:
+            out += bytes([rng.randrange(256)]) * rng.randrange(3, 200)
+        else:
+            out += rng.randbytes(rng.randrange(1, 200))
+    return bytes(out[:size])
+
+
+def far_matches(size):
+    """LZ77 at every distance up to its 4096 byte window, and literals."""
+    rng = random.Random(0xFA2)
+    out = bytearray(rng.randbytes(64))
+    while len(out) < size:
+        if rng.random() < 0.3:
+            out += rng.randbytes(rng.randrange(1, 9))
+        else:
+            back = rng.randrange(1, min(len(out), 4096) + 1)
+            for _ in range(rng.randrange(3, 40)):
+                out.append(out[-back])
+    return bytes(out[:size])
+
+
 def incompressible(size):
     return random.Random(0xC0FFEE).randbytes(size)
 
@@ -75,6 +101,8 @@ MEMBERS = [
     ("lz/text.txt",        repetitive(4096),     "lzss"),
     ("huff/skew.bin",      skewed(4096),         "huffman"),
     ("rle/runs.bin",       runs(4096),           "rle"),
+    ("rle/mixed.bin",      mixed_runs(6000),     "rle"),
+    ("lz/far.bin",         far_matches(12000),   "lzss"),
     ("a/b/c/deep.bin",     repetitive(300),      "none"),
 ]
 
