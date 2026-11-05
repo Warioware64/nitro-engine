@@ -201,6 +201,61 @@ static void CheckMemberRead(const TestVector *v)
     free(buffer);
 }
 
+// More files open at once than the static handles: those past them come
+// from the heap, and every one reads its own member.
+static void CheckManyOpen(void)
+{
+    enum { kOpen = 24 };
+    int fds[kOpen];
+    const TestVector *v[kOpen];
+
+    for (int i = 0; i < kOpen; i++)
+    {
+        char path[160];
+        v[i] = &vectors[i % NUM_VECTORS];
+        full_path(path, sizeof(path), v[i]->path);
+        fds[i] = open(path, O_RDONLY);
+        check(fds[i] >= 0, "many open", v[i]->path);
+    }
+
+    for (int i = kOpen - 1; i >= 0; i--)
+    {
+        if (fds[i] < 0)
+            continue;
+        uint8_t *buffer = malloc(v[i]->size + 1);
+        size_t got = 0;
+        while (buffer != NULL && got < v[i]->size)
+        {
+            ssize_t n = read(fds[i], buffer + got, v[i]->size - got);
+            if (n <= 0)
+                break;
+            got += (size_t)n;
+        }
+        uint32_t crc = crc32_update(0xFFFFFFFFU, buffer, got) ^ 0xFFFFFFFFU;
+        bool huffman = (v[i]->method == NEA_NPAC_HUFF4) || (v[i]->method == NEA_NPAC_HUFF8);
+        check(got == v[i]->size && (huffman || crc == v[i]->crc), "many read", v[i]->path);
+        free(buffer);
+    }
+
+    // Closed in another order than opened, then all open again.
+    for (int i = 0; i < kOpen; i += 2)
+        if (fds[i] >= 0)
+            close(fds[i]);
+    for (int i = 1; i < kOpen; i += 2)
+        if (fds[i] >= 0)
+            close(fds[i]);
+    for (int i = 0; i < kOpen; i++)
+    {
+        char path[160];
+        full_path(path, sizeof(path), v[i]->path);
+        fds[i] = open(path, O_RDONLY);
+        check(fds[i] >= 0, "reopen", v[i]->path);
+    }
+    for (int i = 0; i < kOpen; i++)
+        if (fds[i] >= 0)
+            close(fds[i]);
+}
+
 // A member found before an unmount is refused after it, even once the slot
 // holds an archive again.
 static void CheckStaleMember(void)
@@ -467,6 +522,7 @@ int main(int argc, char *argv[])
     CheckWorkingDirectory();
     CheckStaleHandles();
     CheckStaleMember();
+    CheckManyOpen();
 
     // Unmounting has to actually take the drive away...
     chdir("nitro:/");

@@ -64,6 +64,9 @@
 /// there. This is why the packer's "auto" mode does not choose Huffman unless
 /// it is asked to, with --allow-huffman.
 ///
+/// Opening a member does not touch the heap: up to 16 files open at once use
+/// handles kept in a static array, and only those past that are allocated.
+///
 /// The container is NARC's, with a different magic and one extra chunk holding
 /// the per-file compression table, so a plain NARC can be mounted too (all of
 /// its members are then treated as stored).

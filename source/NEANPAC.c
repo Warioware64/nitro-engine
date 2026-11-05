@@ -103,6 +103,38 @@ typedef struct {
 } ne_npac_dir_t;
 
 static ne_npac_mount_t ne_npac_mounts[NEA_NPAC_MAX_MOUNTS];
+
+// Open files come from here, so that opening one does not touch the heap.
+// Past this many open at once, they are calloc()ed as they always were. The
+// descriptor is the handle's address, which libnds needs word-aligned and in
+// main RAM (see ne_npac_open()); a static array is both.
+#define NPAC_FILES_STATIC   16
+
+static ne_npac_file_t ne_npac_files[NPAC_FILES_STATIC] __attribute__((aligned(4)));
+static uint32_t ne_npac_files_used = 0;     // One bit per entry above
+
+static ne_npac_file_t *ne_npac_file_new(void)
+{
+    for (int i = 0; i < NPAC_FILES_STATIC; i++)
+    {
+        if ((ne_npac_files_used & (1U << i)) == 0)
+        {
+            ne_npac_files_used |= 1U << i;
+            memset(&ne_npac_files[i], 0, sizeof(ne_npac_files[i]));
+            return &ne_npac_files[i];
+        }
+    }
+
+    return calloc(1, sizeof(ne_npac_file_t));
+}
+
+static void ne_npac_file_delete(ne_npac_file_t *f)
+{
+    if ((f >= ne_npac_files) && (f < ne_npac_files + NPAC_FILES_STATIC))
+        ne_npac_files_used &= ~(1U << (f - ne_npac_files));
+    else
+        free(f);
+}
 static ne_npac_mount_t *ne_npac_current = NULL;
 static int ne_npac_device_index = -1;
 
@@ -733,7 +765,7 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
     uint32_t size;
     ne_npac_file_meta(m, (uint16_t)id, &method, &size);
 
-    ne_npac_file_t *f = calloc(1, sizeof(ne_npac_file_t));
+    ne_npac_file_t *f = ne_npac_file_new();
     if (f == NULL)
     {
         NEA_DebugPrint("Not enough memory");
@@ -757,7 +789,7 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
             break;
         default:
             NEA_DebugPrint("Unknown NPAC compression 0x%02X", method);
-            free(f);
+            ne_npac_file_delete(f);
             errno = EINVAL;
             return -1;
     }
@@ -774,7 +806,7 @@ static int ne_npac_open(const char *path, int flags, mode_t mode)
     if ((fd & 0xF0000003) != 0)
     {
         NEA_DebugPrint("Misaligned NPAC file descriptor");
-        free(f);
+        ne_npac_file_delete(f);
         errno = ENOMEM;
         return -1;
     }
@@ -787,7 +819,7 @@ static int ne_npac_close(int fd)
     ne_npac_file_t *f = (ne_npac_file_t *)fd;
 
     free(f->ram);
-    free(f);
+    ne_npac_file_delete(f);
 
     return 0;
 }

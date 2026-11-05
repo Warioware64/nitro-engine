@@ -4,6 +4,10 @@ Changelog
 Unreleased
 ----------
 
+**Changed: open NPAC files take a static handle.** Up to 16 files open at
+once use handles in a static array (about 0.6 KB) instead of a ``calloc()``
+each; past that, they come from the heap as before.
+
 **New: the allocator's chunk nodes can come from a reserve
 (``NEA_AllocReserveChunks()``, ``NEA_AllocGetPoolStats()``).** Every split of
 a VRAM chunk took a ``malloc()`` and every merge a ``free()``, so loading and
