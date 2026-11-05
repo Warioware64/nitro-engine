@@ -4,6 +4,12 @@ Changelog
 Unreleased
 ----------
 
+**New: read one member of an NPAC archive without mounting it
+(``NEA_NpacPeek()``).** The member's name is looked up by reading the
+archive's name table a little at a time through a small static window, so a
+look at one small file (a level's header, say) costs a few short reads and
+no memory, instead of a mount that reads and allocates the whole index.
+
 **New: mount an NPAC archive with its index in the caller's memory
 (``NEA_NpacMountInto()``, ``NEA_NpacIndexBytes()``).** The file, name and
 compression tables are read into memory the caller gives instead of being

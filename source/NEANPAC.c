@@ -63,6 +63,7 @@ typedef struct {
     uint8_t *fnt;           // Name table, offsets inside it are relative to it
     uint8_t *cmp;           // num_files * 4 bytes, NULL for a NARC
     uint32_t fnt_size;
+    uint32_t fnt_file;      // With no fnt (a peek): where it is in the file
     uint16_t num_files;
     uint16_t num_dirs;
     uint16_t current_dir;   // Working directory of this mount
@@ -455,6 +456,47 @@ static bool ne_npac_handle_valid(const ne_npac_mount_t *mnt, uint32_t generation
 // Walking the name table
 //-----------------------------------------------------------------------------
 
+// The name table's bytes from "pos" on, "len" of them (at most 130: an
+// entry's type, a 127 byte name and a directory ID). A mounted archive has the
+// table in RAM. NEA_NpacPeek() has not: its bytes come through this window,
+// filled from the file, so a lookup costs no memory. The pointer is good until
+// the next call.
+static uint8_t ne_npac_fnt_window[256] __attribute__((aligned(4)));
+static const ne_npac_mount_t *ne_npac_fnt_owner = NULL;
+static uint32_t ne_npac_fnt_from;
+static uint32_t ne_npac_fnt_fill;
+
+static const uint8_t *ne_npac_fnt_at(const ne_npac_mount_t *m, uint32_t pos,
+                                     uint32_t len)
+{
+    if (m->fnt != NULL)
+        return m->fnt + pos;
+
+    if ((ne_npac_fnt_owner == m) && (pos >= ne_npac_fnt_from) &&
+        (pos + len <= ne_npac_fnt_from + ne_npac_fnt_fill))
+        return ne_npac_fnt_window + (pos - ne_npac_fnt_from);
+
+    if (pos > m->fnt_size)
+        return NULL;
+    uint32_t n = m->fnt_size - pos;
+    if (n > sizeof(ne_npac_fnt_window))
+        n = sizeof(ne_npac_fnt_window);
+    if (n < len)
+        return NULL;
+
+    if (ne_npac_read_at((ne_npac_mount_t *)m, m->fnt_file + pos,
+                        ne_npac_fnt_window, n) != 0)
+    {
+        ne_npac_fnt_owner = NULL;
+        return NULL;
+    }
+
+    ne_npac_fnt_owner = m;
+    ne_npac_fnt_from = pos;
+    ne_npac_fnt_fill = n;
+    return ne_npac_fnt_window;
+}
+
 static const uint8_t *ne_npac_dir_entry(const ne_npac_mount_t *m, uint16_t dir_id)
 {
     uint32_t index = dir_id & 0x0FFF;
@@ -462,7 +504,7 @@ static const uint8_t *ne_npac_dir_entry(const ne_npac_mount_t *m, uint16_t dir_i
     if (index >= m->num_dirs)
         return NULL;
 
-    return m->fnt + index * 8;
+    return ne_npac_fnt_at(m, index * 8, 8);
 }
 
 static void ne_npac_iter_init(ne_npac_iter_t *it, const ne_npac_mount_t *m,
@@ -494,7 +536,11 @@ static int ne_npac_iter_next(ne_npac_iter_t *it, const char **name,
     if (it->pos >= m->fnt_size)
         return 0;
 
-    uint8_t type = m->fnt[it->pos];
+    const uint8_t *at = ne_npac_fnt_at(m, it->pos, 1);
+    if (at == NULL)
+        return 0;
+
+    uint8_t type = at[0];
 
     // 00h ends the subtable. 80h is reserved and has no length, so treat it as
     // the end too rather than walking off into the next directory.
@@ -508,12 +554,16 @@ static int ne_npac_iter_next(ne_npac_iter_t *it, const char **name,
     if (it->pos + total > m->fnt_size)
         return 0;
 
-    *name = (const char *)(m->fnt + it->pos + 1);
+    at = ne_npac_fnt_at(m, it->pos, total);
+    if (at == NULL)
+        return 0;
+
+    *name = (const char *)(at + 1);
     *name_len = len;
 
     if (is_dir)
     {
-        *id = ne_rd16(m->fnt + it->pos + 1 + len);
+        *id = ne_rd16(at + 1 + len);
         it->pos += total;
         return 2;
     }
@@ -1494,6 +1544,109 @@ int NEA_NpacMountInto(const char *drive, const char *path, void *index,
     return ne_npac_mount(drive, path, index, size);
 }
 
+static int ne_npac_read_member(ne_npac_mount_t *m, uint32_t offset,
+                               uint32_t size, uint32_t stored, uint8_t method,
+                               uint32_t from, void *dst, uint32_t len);
+
+// Where an archive's chunks are, from their headers alone.
+typedef struct {
+    uint32_t fat;           // File table entries (after the count)
+    uint32_t files;
+    uint32_t fnt, fnt_size;
+    uint32_t cmp;           // Compression table entries, 0 if none
+    uint32_t img, img_size;
+} ne_npac_chunks_t;
+
+static int ne_npac_scan(ne_npac_mount_t *m, ne_npac_chunks_t *c)
+{
+    uint8_t header[16];
+
+    memset(c, 0, sizeof(*c));
+
+    if (ne_npac_read_at(m, 0, header, sizeof(header)) != 0)
+    {
+        errno = EIO;
+        return -1;
+    }
+    if (((memcmp(header, "NPAC", 4) != 0) && (memcmp(header, "NARC", 4) != 0)) ||
+        (ne_rd16(header + 4) != 0xFFFE))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint32_t pos = ne_rd16(header + 12);
+    uint16_t num_chunks = ne_rd16(header + 14);
+    bool img_is_last = false;
+
+    for (uint16_t i = 0; i < num_chunks; i++)
+    {
+        uint8_t chunk[8];
+        if (ne_npac_read_at(m, pos, chunk, sizeof(chunk)) != 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+
+        uint32_t size = ne_rd32(chunk + 4);
+        if (size < sizeof(chunk))
+        {
+            errno = EINVAL;
+            return -1;
+        }
+
+        uint32_t payload = pos + sizeof(chunk);
+
+        if (memcmp(chunk, "BTAF", 4) == 0)
+        {
+            uint8_t count[4];
+            if (ne_npac_read_at(m, payload, count, sizeof(count)) != 0)
+            {
+                errno = EIO;
+                return -1;
+            }
+            c->files = ne_rd16(count);
+            c->fat = payload + 4;
+        }
+        else if (memcmp(chunk, "BTNF", 4) == 0)
+        {
+            c->fnt = payload;
+            c->fnt_size = size - sizeof(chunk);
+        }
+        else if (memcmp(chunk, "CMPT", 4) == 0)
+        {
+            c->cmp = payload + 4;
+        }
+        else if (memcmp(chunk, "GMIF", 4) == 0)
+        {
+            c->img = payload;
+            c->img_size = size - sizeof(chunk);
+            img_is_last = (i + 1) == num_chunks;
+        }
+
+        pos += (size + 3) & ~3u;
+    }
+
+    if ((c->fat == 0) || (c->fnt == 0) || (c->img == 0))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // As ne_npac_load_index(): the file's length is the image's honest end.
+    if (img_is_last)
+    {
+        ne_npac_io_lock(m);
+        off_t end = lseek(m->fd, 0, SEEK_END);
+        ne_npac_io_unlock(m);
+
+        if ((end > 0) && ((uint32_t)end > c->img))
+            c->img_size = (uint32_t)end - c->img;
+    }
+
+    return 0;
+}
+
 int NEA_NpacIndexBytes(const char *path)
 {
     NEA_AssertPointer(path, "NULL path");
@@ -1504,77 +1657,126 @@ int NEA_NpacIndexBytes(const char *path)
         return -1;
     }
 
-    // A mount slot of its own, only to walk the chunk headers through the
-    // same reads a mount does.
     ne_npac_mount_t m;
     memset(&m, 0, sizeof(m));
     m.fd = open(path, O_RDONLY, 0);
     if (m.fd < 0)
         return -1;
 
+    ne_npac_chunks_t c;
     int result = -1;
-    uint8_t header[16];
 
-    if ((ne_npac_read_at(&m, 0, header, sizeof(header)) != 0) ||
-        ((memcmp(header, "NPAC", 4) != 0) && (memcmp(header, "NARC", 4) != 0)))
+    // As ne_npac_read_chunk() cuts them: each table rounded up to a word.
+    if (ne_npac_scan(&m, &c) == 0)
+        result = (int)(((c.files * 8 + 3) & ~3u) + ((c.fnt_size + 3) & ~3u) +
+                       ((c.cmp != 0) ? ((c.files * 4 + 3) & ~3u) : 0));
+
+    int saved = errno;
+    close(m.fd);
+    errno = saved;
+    return result;
+}
+
+int NEA_NpacPeek(const char *archive, const char *member, uint32_t from,
+                 void *dst, uint32_t len)
+{
+    NEA_AssertPointer(archive, "NULL archive");
+    NEA_AssertPointer(member, "NULL member");
+
+    if ((archive == NULL) || (member == NULL) || ((dst == NULL) && (len != 0)))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // A mount of its own on the stack, never registered: its name table is
+    // read through the window as the path is looked up, nothing else is kept.
+    ne_npac_mount_t m;
+    memset(&m, 0, sizeof(m));
+    m.fd = open(archive, O_RDONLY, 0);
+    if (m.fd < 0)
+        return -1;
+
+    int result = -1;
+    ne_npac_chunks_t c;
+    uint8_t word[8];
+
+    if (ne_npac_scan(&m, &c) != 0)
+        goto out;
+
+    m.fnt_file = c.fnt;
+    m.fnt_size = c.fnt_size;
+    m.num_files = (uint16_t)c.files;
+    m.img_offset = c.img;
+    m.img_size = c.img_size;
+    m.current_dir = NPAC_DIR_ROOT;
+
+    const uint8_t *root = ne_npac_fnt_at(&m, 0, 8);
+    if (root == NULL)
+    {
+        errno = EIO;
+        goto out;
+    }
+    m.num_dirs = ne_rd16(root + 6);
+    if ((m.num_dirs == 0) || ((uint32_t)m.num_dirs * 8 > m.fnt_size))
     {
         errno = EINVAL;
         goto out;
     }
 
-    uint32_t pos = ne_rd16(header + 12);
-    uint16_t num_chunks = ne_rd16(header + 14);
-    uint32_t files = 0, fnt = 0;
-    bool has_cmp = false;
-
-    for (uint16_t i = 0; i < num_chunks; i++)
+    int id = ne_npac_resolve(&m, member);
+    if (id < 0)
+        goto out;
+    if (id >= NPAC_DIR_ROOT)
     {
-        uint8_t chunk[8];
-        if (ne_npac_read_at(&m, pos, chunk, sizeof(chunk)) != 0)
+        errno = EISDIR;
+        goto out;
+    }
+    if ((uint32_t)id >= c.files)
+    {
+        errno = EINVAL;
+        goto out;
+    }
+
+    if (ne_npac_read_at(&m, c.fat + (uint32_t)id * 8, word, 8) != 0)
+    {
+        errno = EIO;
+        goto out;
+    }
+    uint32_t start = ne_rd32(word);
+    uint32_t end = ne_rd32(word + 4);
+    if ((start > end) || (end > c.img_size))
+    {
+        errno = EINVAL;
+        goto out;
+    }
+
+    uint8_t method = NEA_NPAC_STORED;
+    uint32_t size = end - start;
+    if (c.cmp != 0)
+    {
+        if (ne_npac_read_at(&m, c.cmp + (uint32_t)id * 4, word, 4) != 0)
         {
             errno = EIO;
             goto out;
         }
-
-        uint32_t size = ne_rd32(chunk + 4);
-        if (size < sizeof(chunk))
-        {
-            errno = EINVAL;
-            goto out;
-        }
-
-        if (memcmp(chunk, "BTAF", 4) == 0)
-        {
-            uint8_t count[2];
-            if (ne_npac_read_at(&m, pos + 8, count, sizeof(count)) != 0)
-            {
-                errno = EIO;
-                goto out;
-            }
-            files = ne_rd16(count);
-        }
-        else if (memcmp(chunk, "BTNF", 4) == 0)
-        {
-            fnt = size - 8;
-        }
-        else if (memcmp(chunk, "CMPT", 4) == 0)
-        {
-            has_cmp = true;
-        }
-        else if (memcmp(chunk, "GMIF", 4) == 0)
-        {
-            break;
-        }
-
-        pos += (size + 3) & ~3u;
+        uint32_t cmp = ne_rd32(word);
+        method = cmp & 0xFF;
+        if (method != NEA_NPAC_STORED)
+            size = cmp >> 8;
     }
 
-    // As ne_npac_read_chunk() cuts them: each table rounded up to a word.
-    result = (int)(((files * 8 + 3) & ~3u) + ((fnt + 3) & ~3u) +
-                   (has_cmp ? ((files * 4 + 3) & ~3u) : 0));
+    result = ne_npac_read_member(&m, c.img + start, size, end - start, method,
+                                 from, dst, len);
 
 out:
-    close(m.fd);
+    {
+        // The window may hold this stack mount's bytes: forget them.
+        ne_npac_fnt_owner = NULL;
+        int saved = errno;
+        close(m.fd);
+        errno = saved;
+    }
     return result;
 }
 
@@ -1821,6 +2023,73 @@ int NEA_NpacMemberFind(const char *path, NEA_NpacMember *member)
     return 0;
 }
 
+// Reads a member at "offset" in the archive file: a stored one in any range, a
+// packed one whole, decompressed as it comes through the window.
+static int ne_npac_read_member(ne_npac_mount_t *m, uint32_t offset,
+                               uint32_t size, uint32_t stored, uint8_t method,
+                               uint32_t from, void *dst, uint32_t len)
+{
+    if (method == NEA_NPAC_STORED)
+    {
+        if ((from > size) || (len > size - from))
+        {
+            errno = EINVAL;
+            return -1;
+        }
+        if (ne_npac_read_at(m, offset + from, dst, len) != 0)
+        {
+            errno = EIO;
+            return -1;
+        }
+        return 0;
+    }
+
+    // A packed member can only be had whole: each byte depends on the ones
+    // before it.
+    if ((from != 0) || (len < size))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((method != NEA_NPAC_LZ77) && (method != NEA_NPAC_RLE))
+    {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (size == 0)
+        return 0;
+
+    while (ne_npac_window_busy)
+        cothread_yield();
+    ne_npac_window_busy = true;
+
+    // The stream starts with the BIOS's four byte header: the method, then
+    // the size, which the index already has.
+    ne_npac_source_t src = {
+        .mnt = m,
+        .next = offset,
+        .left = stored,
+    };
+    for (int i = 0; i < 4; i++)
+        ne_npac_source_byte(&src);
+
+    bool ok = !src.failed &&
+              ((method == NEA_NPAC_LZ77) ? ne_npac_unlz77(&src, dst, size)
+                                         : ne_npac_unrle(&src, dst, size));
+
+    ne_npac_window_busy = false;
+
+    if (!ok)
+    {
+        errno = EIO;
+        return -1;
+    }
+
+    return 0;
+}
+
 int NEA_NpacMemberRead(const NEA_NpacMember *member, uint32_t from, void *dst,
                        uint32_t len)
 {
@@ -1840,66 +2109,9 @@ int NEA_NpacMemberRead(const NEA_NpacMember *member, uint32_t from, void *dst,
         return -1;
     }
 
-    if (member->method == NEA_NPAC_STORED)
-    {
-        if ((from > member->size) || (len > member->size - from))
-        {
-            errno = EINVAL;
-            return -1;
-        }
-        if (ne_npac_read_at(m, member->offset + from, dst, len) != 0)
-        {
-            errno = EIO;
-            return -1;
-        }
-        return 0;
-    }
-
-    // A packed member can only be had whole: each byte depends on the ones
-    // before it.
-    if ((from != 0) || (len < member->size))
-    {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if ((member->method != NEA_NPAC_LZ77) && (member->method != NEA_NPAC_RLE))
-    {
-        errno = ENOTSUP;
-        return -1;
-    }
-
-    if (member->size == 0)
-        return 0;
-
-    while (ne_npac_window_busy)
-        cothread_yield();
-    ne_npac_window_busy = true;
-
-    // The stream starts with the BIOS's four byte header: the method, then
-    // the size, which the index already has.
-    ne_npac_source_t src = {
-        .mnt = m,
-        .next = member->offset,
-        .left = member->stored_size,
-    };
-    for (int i = 0; i < 4; i++)
-        ne_npac_source_byte(&src);
-
-    bool ok = !src.failed &&
-              ((member->method == NEA_NPAC_LZ77)
-                   ? ne_npac_unlz77(&src, dst, member->size)
-                   : ne_npac_unrle(&src, dst, member->size));
-
-    ne_npac_window_busy = false;
-
-    if (!ok)
-    {
-        errno = EIO;
-        return -1;
-    }
-
-    return 0;
+    return ne_npac_read_member(m, member->offset, member->size,
+                               member->stored_size, member->method, from, dst,
+                               len);
 }
 
 int NEA_NpacReadInto(const char *path, void *dst, uint32_t capacity)

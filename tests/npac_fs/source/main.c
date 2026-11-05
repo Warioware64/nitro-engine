@@ -239,6 +239,60 @@ static void CheckMountInto(void)
     }
 }
 
+// Each member read from the archive without mounting it: whole, a stored one
+// also from an offset, and the cases that must fail.
+static void CheckPeek(void)
+{
+    for (unsigned int i = 0; i < NUM_VECTORS; i++)
+    {
+        const TestVector *v = &vectors[i];
+        uint8_t *buffer = malloc(v->size + 1);
+        if (buffer == NULL)
+        {
+            check(false, "malloc", v->path);
+            continue;
+        }
+
+        int ret = NEA_NpacPeek("nitro:/test.npac", v->path, 0, buffer, v->size);
+        if ((v->method == NEA_NPAC_HUFF4) || (v->method == NEA_NPAC_HUFF8))
+        {
+            check((ret == -1) && (errno == ENOTSUP), "peek huffman", v->path);
+            free(buffer);
+            continue;
+        }
+
+        check(ret == 0, "peek", v->path);
+        uint32_t crc = crc32_update(0xFFFFFFFFU, buffer, v->size) ^ 0xFFFFFFFFU;
+        check(crc == v->crc, "peek crc", v->path);
+
+        if ((v->method == NEA_NPAC_STORED) && (v->size > 10))
+        {
+            // The same bytes from an offset, against the whole read.
+            uint8_t part[7];
+            check(NEA_NpacPeek("nitro:/test.npac", v->path, 3, part, sizeof(part)) == 0 &&
+                  memcmp(part, buffer + 3, sizeof(part)) == 0, "peek part", v->path);
+            check(NEA_NpacPeek("nitro:/test.npac", v->path, v->size, part, 1) == -1,
+                  "peek past end", v->path);
+        }
+        free(buffer);
+    }
+
+    uint8_t byte;
+    check((NEA_NpacPeek("nitro:/test.npac", "nope.bin", 0, &byte, 1) == -1) &&
+          (errno == ENOENT), "peek missing", "nope.bin");
+    check((NEA_NpacPeek("nitro:/test.npac", "a/b/nope.bin", 0, &byte, 1) == -1) &&
+          (errno == ENOENT), "peek missing deep", "a/b/nope.bin");
+    check((NEA_NpacPeek("nitro:/test.npac", "lz", 0, &byte, 1) == -1) &&
+          (errno == EISDIR), "peek dir", "lz");
+    check((NEA_NpacPeek("nitro:/test.npac", "stored.bin/x", 0, &byte, 1) == -1) &&
+          (errno == ENOTDIR), "peek through file", "stored.bin/x");
+    check(NEA_NpacPeek("nitro:/missing.npac", "stored.bin", 0, &byte, 1) == -1,
+          "peek no archive", "missing.npac");
+
+    // A mounted archive is unaffected by peeks between its reads.
+    CheckContents(&vectors[0]);
+}
+
 // More files open at once than the static handles: those past them come
 // from the heap, and every one reads its own member.
 static void CheckManyOpen(void)
@@ -562,6 +616,7 @@ int main(int argc, char *argv[])
     CheckStaleMember();
     CheckManyOpen();
     CheckMountInto();
+    CheckPeek();
 
     // Unmounting has to actually take the drive away...
     chdir("nitro:/");

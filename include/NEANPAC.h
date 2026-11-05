@@ -153,6 +153,32 @@ int NEA_NpacMountInto(const char *drive, const char *path, void *index,
 ///     The size in bytes. On error, -1, with errno set.
 int NEA_NpacIndexBytes(const char *path);
 
+/// Reads part of one member of an archive, without mounting the archive.
+///
+/// The archive is opened, the member's name is looked up by reading the name
+/// table a little at a time, its bytes are read, and the archive is closed.
+/// Nothing of the index is kept and nothing is allocated here (libnds' own
+/// open() still allocates its file structure). For a look at one small file
+/// in an archive that is not otherwise needed -- a level's header, say -- it
+/// costs a few short reads instead of a mount.
+///
+/// @param archive
+///     Path of the archive file, for example "fat:/levels/b.npac".
+/// @param member
+///     Path of the member inside it, for example "level.0".
+/// @param from
+///     First byte to read, as for NEA_NpacMemberRead().
+/// @param dst
+///     Where the bytes go.
+/// @param len
+///     How many bytes, as for NEA_NpacMemberRead(): any range of a stored
+///     member, the whole of a packed (LZ77 or RLE) one.
+/// @return
+///     0 on success. On error, -1, with errno set: ENOENT when there is no
+///     such member, EISDIR for a directory, and as NEA_NpacMemberRead().
+int NEA_NpacPeek(const char *archive, const char *member, uint32_t from,
+                 void *dst, uint32_t len);
+
 /// Unmounts an archive mounted by NEA_NpacMount() and frees its index (but
 /// not memory given to NEA_NpacMountInto(), which stays the caller's).
 ///
