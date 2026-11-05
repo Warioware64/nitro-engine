@@ -930,6 +930,74 @@ void test_find_range(void)
 
 // Known random number generator to always generate the same sequence of numbers
 // and make this test reproducible.
+// Chunk nodes from a reserve: taken and given back as the list splits and
+// merges, the peak and the fallbacks counted, and every node back once the
+// list ends. Runs after the other tests, which use no reserve.
+void test_chunk_pool(void)
+{
+    printf("%s\n", __func__);
+
+    NEAAllocPoolStats st;
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.capacity == 0 && st.in_use == 0 && st.fallbacks == 0);
+
+    ASSERT(NEA_AllocReserveChunks(0) != 0);
+    ASSERT(NEA_AllocReserveChunks(8) == 0);
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.capacity == 8 && st.in_use == 0);
+
+    POOL_INITIALIZE();
+
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == 1 && count_num_chunks(alloc) == 1);
+
+    void *a = NEA_Alloc(alloc, 64);
+    void *b = NEA_Alloc(alloc, 64);
+    void *c = NEA_Alloc(alloc, 64);
+    ASSERT(a != NULL && b != NULL && c != NULL);
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == count_num_chunks(alloc) && st.in_use == 4);
+
+    // Freeing the middle one keeps its node; freeing its neighbours merges.
+    ASSERT(NEA_Free(alloc, b) == 0);
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == count_num_chunks(alloc));
+    ASSERT(NEA_Free(alloc, a) == 0);
+    ASSERT(NEA_Free(alloc, c) == 0);
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == 1 && count_num_chunks(alloc) == 1 && st.peak == 4);
+    ASSERT(st.fallbacks == 0);
+
+    // More chunks than the reserve holds: the rest come from the heap.
+    void *p[12];
+    for (int i = 0; i < 12; i++)
+    {
+        p[i] = NEA_Alloc(alloc, 32);
+        ASSERT(p[i] != NULL);
+    }
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == 8 && st.peak == 8 && st.fallbacks == 13 - 8);
+    ASSERT(verify_consistency(alloc, POOL_START, POOL_END) == 0);
+
+    // Given back in an odd order, heap and reserve nodes mixed.
+    for (int i = 0; i < 12; i += 2)
+        ASSERT(NEA_Free(alloc, p[i]) == 0);
+    for (int i = 1; i < 12; i += 2)
+        ASSERT(NEA_Free(alloc, p[i]) == 0);
+    ASSERT(count_num_chunks(alloc) == 1);
+    ASSERT(verify_consistency(alloc, POOL_START, POOL_END) == 0);
+
+    POOL_DEINITIALIZE();
+
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.in_use == 0);
+
+    // A second reserve adds to the first; the stress test then runs on it.
+    ASSERT(NEA_AllocReserveChunks(256) == 0);
+    NEA_AllocGetPoolStats(&st);
+    ASSERT(st.capacity == 264);
+}
+
 int my_rand(void)
 {
     static unsigned long int next = 1;
@@ -1014,6 +1082,14 @@ int main(int argc, char *argv[])
     test_alloc_range();
     test_find_range();
     test_stress();
+    test_chunk_pool();
+    test_stress();
+    {
+        NEAAllocPoolStats st;
+        NEA_AllocGetPoolStats(&st);
+        printf("pool: peak %d, %d from the heap\n", st.peak, st.fallbacks);
+        ASSERT(st.in_use == 0);
+    }
 
     printf("Done!");
 

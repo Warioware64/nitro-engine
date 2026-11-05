@@ -9,6 +9,122 @@
 #include "NEAMain.h"
 #include "NEAAlloc.h"
 
+//-----------------------------------------------------------------------------
+// Where chunk nodes come from
+//-----------------------------------------------------------------------------
+
+// Every split of a chunk needs a node and every merge gives one back, so an
+// allocator in use goes through nodes all the time. By default they are
+// malloc()ed one at a time, as they always were. NEA_AllocReserveChunks() sets
+// aside blocks of them once instead; from then on a node comes off this free
+// list and goes back on it, and the heap is only touched if the reserve runs
+// out.
+
+#define NE_POOL_BLOCKS_MAX  4
+
+typedef struct {
+    NEAChunk *start;
+    int count;
+} ne_pool_block_t;
+
+static ne_pool_block_t ne_pool_blocks[NE_POOL_BLOCKS_MAX];
+static int ne_pool_block_count = 0;
+static NEAChunk *ne_pool_free = NULL;   // Linked through 'next'
+static NEAAllocPoolStats ne_pool_stats;
+
+static bool ne_pool_owns(const NEAChunk *chunk)
+{
+    for (int i = 0; i < ne_pool_block_count; i++)
+    {
+        const ne_pool_block_t *b = &ne_pool_blocks[i];
+        if ((chunk >= b->start) && (chunk < b->start + b->count))
+            return true;
+    }
+
+    return false;
+}
+
+static NEAChunk *ne_chunk_new(void)
+{
+    NEAChunk *chunk = ne_pool_free;
+
+    if (chunk != NULL)
+    {
+        ne_pool_free = chunk->next;
+        ne_pool_stats.in_use++;
+        if (ne_pool_stats.in_use > ne_pool_stats.peak)
+            ne_pool_stats.peak = ne_pool_stats.in_use;
+        return chunk;
+    }
+
+    chunk = malloc(sizeof(NEAChunk));
+    if ((chunk != NULL) && (ne_pool_stats.capacity > 0))
+        ne_pool_stats.fallbacks++;
+
+    return chunk;
+}
+
+static void ne_chunk_delete(NEAChunk *chunk)
+{
+    if (!ne_pool_owns(chunk))
+    {
+        free(chunk);
+        return;
+    }
+
+    chunk->next = ne_pool_free;
+    ne_pool_free = chunk;
+    ne_pool_stats.in_use--;
+}
+
+int NEA_AllocReserveChunks(int count)
+{
+    if (count <= 0)
+    {
+        NEA_DebugPrint("Invalid arguments");
+        return -1;
+    }
+
+    if (ne_pool_block_count == NE_POOL_BLOCKS_MAX)
+    {
+        NEA_DebugPrint("Too many chunk reserves");
+        return -2;
+    }
+
+    NEAChunk *block = malloc(sizeof(NEAChunk) * (size_t)count);
+    if (block == NULL)
+    {
+        NEA_DebugPrint("Not enough memory");
+        return -3;
+    }
+
+    ne_pool_blocks[ne_pool_block_count].start = block;
+    ne_pool_blocks[ne_pool_block_count].count = count;
+    ne_pool_block_count++;
+
+    for (int i = count - 1; i >= 0; i--)
+    {
+        block[i].next = ne_pool_free;
+        ne_pool_free = &block[i];
+    }
+
+    ne_pool_stats.capacity += count;
+
+    return 0;
+}
+
+void NEA_AllocGetPoolStats(NEAAllocPoolStats *stats)
+{
+    NEA_AssertPointer(stats, "NULL pointer");
+
+    if (stats != NULL)
+        *stats = ne_pool_stats;
+}
+
+//-----------------------------------------------------------------------------
+// The allocator
+//-----------------------------------------------------------------------------
+
 int NEA_AllocInit(NEAChunk **first_chunk, void *start, void *end)
 {
     if (first_chunk == NULL)
@@ -23,7 +139,7 @@ int NEA_AllocInit(NEAChunk **first_chunk, void *start, void *end)
         return -2;
     }
 
-    *first_chunk = malloc(sizeof(NEAChunk));
+    *first_chunk = ne_chunk_new();
     if (*first_chunk == NULL)
     {
         NEA_DebugPrint("Not enough memory");
@@ -52,7 +168,7 @@ int NEA_AllocEnd(NEAChunk **first_chunk)
     while (this != NULL)
     {
         NEAChunk *next = this->next;
-        free(this);
+        ne_chunk_delete(this);
         this = next;
     }
 
@@ -80,7 +196,7 @@ static NEAChunk *ne_split_chunk(NEAChunk *this, size_t this_size)
 
     NEAChunk *next = this->next;
 
-    NEAChunk *new = malloc(sizeof(NEAChunk));
+    NEAChunk *new = ne_chunk_new();
     if (new == NULL)
     {
         NEA_DebugPrint("Not enough memory");
@@ -495,7 +611,7 @@ int NEA_Free(NEAChunk *first_chunk, void *pointer)
         previous->end = this->end;
 
         // Delete current chunk
-        free(this);
+        ne_chunk_delete(this);
 
         // Change the active chunk to try to join it with the next one.
         this = previous;
@@ -536,7 +652,7 @@ int NEA_Free(NEAChunk *first_chunk, void *pointer)
         this->end = next->end;
 
         // Delete next chunk
-        free(next);
+        ne_chunk_delete(next);
     }
 
     return 0;

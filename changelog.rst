@@ -4,6 +4,13 @@ Changelog
 Unreleased
 ----------
 
+**New: the allocator's chunk nodes can come from a reserve
+(``NEA_AllocReserveChunks()``, ``NEA_AllocGetPoolStats()``).** Every split of
+a VRAM chunk took a ``malloc()`` and every merge a ``free()``, so loading and
+freeing textures and palettes went through the heap. A reserve set aside once
+at start-up now serves every allocator list; if it runs out, nodes come from
+the heap as before and are counted. Without a reserve nothing changes.
+
 **New: read an NPAC member with no file handle and no heap
 (``NEA_NpacMemberFind()``, ``NEA_NpacMemberRead()``, ``NEA_NpacReadInto()``).**
 A member is found once in the in-RAM index and then read straight into the

@@ -33,6 +33,29 @@ typedef struct {
 
 #define NEA_ALLOC_MIN_SIZE (16)
 
+/// Where the allocator's chunk nodes come from (NEA_AllocGetPoolStats()).
+typedef struct {
+    int capacity;   ///< Nodes reserved by NEA_AllocReserveChunks(), all blocks
+    int in_use;     ///< Reserved nodes in use now
+    int peak;       ///< Most reserved nodes ever in use at once
+    int fallbacks;  ///< Nodes malloc()ed because the reserve was empty
+} NEAAllocPoolStats;
+
+// Every split of a chunk takes a node and every merge gives one back. By
+// default each node is malloc()ed and free()d on its own, so loading and
+// freeing textures and palettes goes through the heap. This sets aside
+// "count" nodes in one block, once (call it at start-up, before the texture
+// and palette systems are reset): from then on nodes come from that block and
+// go back to it, for every allocator list. If it runs out, nodes are
+// malloc()ed as before and counted in "fallbacks". It can be called again to
+// add more, up to 4 times; the blocks are never given back.
+//
+// Returns 0 on success. On error, it returns a negative number.
+int NEA_AllocReserveChunks(int count);
+
+// What NEA_AllocReserveChunks() set aside and how much of it is used.
+void NEA_AllocGetPoolStats(NEAAllocPoolStats *stats);
+
 // They return 0 on success. On error, they return a negative number.
 int NEA_AllocInit(NEAChunk **first_element, void *start, void *end);
 int NEA_AllocEnd(NEAChunk **first_element);
