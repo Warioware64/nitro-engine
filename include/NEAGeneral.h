@@ -341,6 +341,15 @@ void NEA_Viewport(int x1, int y1, int x2, int y2);
 ///  @param fovValue FOV [0, ...] in degrees.
 void NEA_SetFov(int fovValue);
 
+/// Set the aspect ratio of the perspective, apart from the viewport's.
+///
+/// The picture is drawn into the viewport's pixels, but shown at this shape:
+/// a 3DS stretching the top screen to 16:10 wants 1.6 (f32 6554) for a full
+/// 256x192 viewport. NEA_Viewport() keeps it.
+///
+/// @param ratio Width over height (f32), or 0 to follow the viewport again.
+void NEA_SetAspect(int32_t ratio);
+
 /// Set near and far clipping planes.
 ///
 /// @param znear Near plane (f32).

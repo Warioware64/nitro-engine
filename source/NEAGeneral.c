@@ -21,6 +21,8 @@ const char NEA_VersionString[] =
 static bool NEA_UsingConsole;
 bool NEA_TestTouch;
 static int NEA_screenratio;
+// The aspect ratio given by NEA_SetAspect (f32), or 0: the viewport's own.
+static int32_t ne_aspect;
 static uint32_t NEA_viewport;
 static u8 NEA_Screen; // 1 = main screen, 0 = sub screen
 
@@ -241,6 +243,8 @@ void NEA_Viewport(int x1, int y1, int x2, int y2)
 
     int fovy = fov * DEGREES_IN_CIRCLE / 360;
     NEA_screenratio = ne_div_result();
+    if (ne_aspect != 0)
+        NEA_screenratio = ne_aspect;
     gluPerspectivef32(fovy, NEA_screenratio, ne_znear, ne_zfar);
 
     MATRIX_CONTROL = GL_MODELVIEW;
@@ -269,6 +273,21 @@ void NEA_SwapScreens(void)
 void NEA_SetFov(int fovValue)
 {
     fov = fovValue;
+}
+
+void NEA_SetAspect(int32_t ratio)
+{
+    ne_aspect = ratio;
+    if (ratio != 0)
+    {
+        NEA_screenratio = ratio;
+        return;
+    }
+    // Back to the viewport's own shape.
+    int x1 = NEA_viewport & 0xFF, y1 = (NEA_viewport >> 8) & 0xFF;
+    int x2 = (NEA_viewport >> 16) & 0xFF, y2 = (NEA_viewport >> 24) & 0xFF;
+    ne_div_start((x2 - x1 + 1) << 12, (y2 - y1 + 1));
+    NEA_screenratio = ne_div_result();
 }
 
 static void ne_systems_end_all(void)
