@@ -4,6 +4,19 @@ Changelog
 Unreleased
 ----------
 
+**Fixed: an NPAC archive in many pieces on a FAT card is read right.**
+libnds's ``fatInitLookupCache()``, given a table too small for a file, says
+how big one would have to be and leaves the half-made table on the file:
+seeks past the last piece it holds then went astray, and the archive's far
+members read the wrong bytes (past 255 pieces with the 2 KB table every
+mount was given). The answer is now looked at, and a file it failed on is
+closed and opened again: an archive gets a table of the size it needs if
+that fits ``NEA_NPAC_SEEK_TABLE_DS`` (2 KB) or ``NEA_NPAC_SEEK_TABLE_DSI``
+(4 KB), and seeks the slow way otherwise. One in a single piece takes 16
+bytes instead of 2 KB. After a failed read, the archive is opened again with
+no table until it is mounted again. ``NEA_NpacSeekInfo()`` tells how a mount
+seeks; ``tests/npac_frag`` writes archives in many pieces and checks them.
+
 **New: read one member of an NPAC archive without mounting it
 (``NEA_NpacPeek()``).** The member's name is looked up by reading the
 archive's name table a little at a time through a small static window, so a

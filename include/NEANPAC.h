@@ -286,6 +286,61 @@ int NEA_NpacMemberRead(const NEA_NpacMember *member, uint32_t from, void *dst,
 ///     The member's size on success. On error, -1, with errno set.
 int NEA_NpacReadInto(const char *path, void *dst, uint32_t capacity);
 
+/// Defined when NEA_NpacSeekInfo() and NEA_NpacFailReads() exist.
+#define NEA_NPAC_HAS_SEEK_INFO 1
+
+/// The largest fast-seek table a mount may take, in bytes, in DS mode and in
+/// DSi mode (chosen by isDSiMode() as the archive is opened). A table takes
+/// two words a fragment of the file and two more: 2048 bytes holds 255
+/// fragments, 4096 holds 511. An archive in more pieces is read without fast
+/// seek.
+#ifndef NEA_NPAC_SEEK_TABLE_DS
+#define NEA_NPAC_SEEK_TABLE_DS      2048
+#endif
+#ifndef NEA_NPAC_SEEK_TABLE_DSI
+#define NEA_NPAC_SEEK_TABLE_DSI     4096
+#endif
+
+/// How a mounted archive's file seeks, as NEA_NpacSeekInfo() reports it.
+typedef enum {
+    NEA_NPAC_SEEK_FAST = 0,         ///< FatFs's fast seek, with a whole table
+    NEA_NPAC_SEEK_NOT_FAT,          ///< Not on a FAT drive (NitroFS...)
+    NEA_NPAC_SEEK_NO_MEMORY,        ///< The table could not be allocated
+    NEA_NPAC_SEEK_TOO_FRAGMENTED,   ///< More pieces than the table may hold
+    NEA_NPAC_SEEK_REOPENED,         ///< Opened again after a failed read, with no table
+} NEA_NpacSeekState;
+
+/// What NEA_NpacSeekInfo() fills in.
+typedef struct {
+    bool fast;                  ///< Seeks use the table (no walk of the FAT)
+    NEA_NpacSeekState state;    ///< Why not, when not
+    int32_t fragments;          ///< Pieces the file is in on the card; -1 if not known
+    uint32_t table_bytes;       ///< The table's size on the heap, 0 with none
+    uint32_t plain_reopens;     ///< Times opened again with no table since mounted
+} NEA_NpacSeek;
+
+/// Tells how a mounted archive's file seeks.
+///
+/// At mount, the archive is given FatFs's fast seek (a table of where each
+/// piece of the file is) when the table fits NEA_NPAC_SEEK_TABLE_DS or _DSI.
+/// Without one, a seek follows the file's chain through the FAT, which costs
+/// more the further into the file it goes. After a failed read the archive is
+/// opened again without a table (no table is allocated then) until it is
+/// mounted again.
+///
+/// @param drive
+///     Drive name given to NEA_NpacMount().
+/// @param info
+///     Filled in.
+/// @return
+///     0 on success. -1 if nothing is mounted under that name (ENOENT).
+int NEA_NpacSeekInfo(const char *drive, NEA_NpacSeek *info);
+
+/// Testing: the next `count` reads of any mounted archive's file fail as a
+/// card's read would, so that the archive is opened again and the read tried
+/// again. Not for use in a game.
+void NEA_NpacFailReads(int count);
+
 /// Unmounts every archive and unregisters the filesystem.
 ///
 /// Called automatically by NEA_End(). There is no need to call it by hand

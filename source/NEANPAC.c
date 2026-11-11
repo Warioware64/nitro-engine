@@ -77,6 +77,13 @@ typedef struct {
     size_t index_size;
     size_t index_used;
 
+    // How 'fd' seeks (NEA_NpacSeekInfo()).
+    bool fast_seek;
+    uint8_t seek_state;     // NEA_NpacSeekState
+    int32_t fragments;      // -1: not known
+    uint32_t seek_table;    // Bytes of the table on the heap
+    uint32_t plain_reopens;
+
     // Bumped every time this slot is mounted or unmounted. Open files and
     // directories capture it so that a handle left over from a previous life
     // of the slot fails instead of reading the archive that replaced it.
@@ -198,9 +205,23 @@ static void ne_npac_io_unlock(ne_npac_mount_t *m)
 // How many times a read of the archive is tried before it is given up.
 #define NPAC_READ_TRIES     3
 
+// NEA_NpacFailReads(): reads still to fail on purpose.
+static volatile int ne_npac_fail_reads = 0;
+
+void NEA_NpacFailReads(int count)
+{
+    ne_npac_fail_reads = count;
+}
+
 static int ne_npac_read_once(ne_npac_mount_t *m, uint32_t offset, void *dst,
                              size_t len)
 {
+    if (ne_npac_fail_reads > 0)
+    {
+        ne_npac_fail_reads--;
+        return -1;
+    }
+
     if ((m->fd < 0) || (lseek(m->fd, (off_t)offset, SEEK_SET) != (off_t)offset))
         return -1;
 
@@ -229,16 +250,20 @@ static bool ne_npac_reopen(ne_npac_mount_t *m)
     if (m->fd >= 0)
         close(m->fd);
 
+    // With no fast-seek table: making one allocates, and this happens in
+    // the middle of a game. (open() itself allocates its file, as it did
+    // before.) The archive seeks the slow way until it is mounted again.
     m->fd = open(m->path, O_RDONLY, 0);
+    if (m->fast_seek)
+        m->seek_state = NEA_NPAC_SEEK_REOPENED;
+    m->fast_seek = false;
+    m->seek_table = 0;
+    m->plain_reopens++;
     if (m->fd < 0)
     {
         m->fd = -1;
         return false;
     }
-
-    // As at mount: optional, and only a registered mount has one.
-    if (m->used)
-        fatInitLookupCache(m->fd, 2048);
 
     return true;
 }
@@ -475,6 +500,104 @@ static int ne_npac_load_index(ne_npac_mount_t *m)
         return -1;
     }
 
+    return 0;
+}
+
+// Opens a mount's archive file with FatFs's fast seek, if it can have it.
+//
+// libnds's fatInitLookupCache() allocates a table and fills it with the
+// file's pieces. When the file is in more pieces than the table holds, it
+// says how many words it would need and leaves the half-made table on the
+// file: a seek past the last piece in it then goes astray, and the archive
+// reads the wrong bytes. So its answer is always looked at, and a file it
+// failed on is never kept: closing it frees that table (libnds 1.25.0), and
+// the file is opened again, clean.
+//
+// First a table for one piece (16 bytes): most archives on a card are in
+// one. Then, for one in more, once more with a table of the size asked for,
+// if that fits NEA_NPAC_SEEK_TABLE_DS or _DSI. Otherwise no table.
+static ne_npac_mount_t *ne_npac_find(const char *name);
+
+static int ne_npac_open_seekable(ne_npac_mount_t *m, const char *path)
+{
+    m->fast_seek = false;
+    m->seek_state = NEA_NPAC_SEEK_NOT_FAT;
+    m->fragments = -1;
+    m->seek_table = 0;
+    m->plain_reopens = 0;
+
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    int need = fatInitLookupCache(fd, 16);
+    if (need == 0)
+    {
+        m->fast_seek = true;
+        m->seek_state = NEA_NPAC_SEEK_FAST;
+        m->fragments = 1;
+        m->seek_table = 16;
+        return fd;
+    }
+    if (need < 0)
+    {
+        // Not on FAT, or no memory for it (no table is left on the file).
+        if (need == FAT_INIT_LOOKUP_CACHE_OUT_OF_MEMORY)
+            m->seek_state = NEA_NPAC_SEEK_NO_MEMORY;
+        return fd;
+    }
+
+    // In more pieces than one: 'need' words, two a piece and two more.
+    m->fragments = (need - 2) / 2;
+    close(fd);
+    fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+
+    uint32_t most = isDSiMode() ? NEA_NPAC_SEEK_TABLE_DSI
+                                : NEA_NPAC_SEEK_TABLE_DS;
+    if ((uint32_t)need * 4 > most)
+    {
+        m->seek_state = NEA_NPAC_SEEK_TOO_FRAGMENTED;
+        NEA_DebugPrint("%s is in %d pieces: no fast seek", path,
+                       (int)m->fragments);
+        return fd;
+    }
+
+    int again = fatInitLookupCache(fd, (uint32_t)need * 4);
+    if (again == 0)
+    {
+        m->fast_seek = true;
+        m->seek_state = NEA_NPAC_SEEK_FAST;
+        m->seek_table = (uint32_t)need * 4;
+        return fd;
+    }
+
+    // Still not (no memory, or the file changed between the two): never
+    // kept with what was left on it.
+    m->seek_state = (again == FAT_INIT_LOOKUP_CACHE_OUT_OF_MEMORY)
+                  ? NEA_NPAC_SEEK_NO_MEMORY : NEA_NPAC_SEEK_TOO_FRAGMENTED;
+    NEA_DebugPrint("%s: no fast seek (%d)", path, again);
+    close(fd);
+    return open(path, O_RDONLY, 0);
+}
+
+int NEA_NpacSeekInfo(const char *drive, NEA_NpacSeek *info)
+{
+    NEA_AssertPointer(info, "NULL info");
+
+    ne_npac_mount_t *m = ne_npac_find(drive);
+    if ((m == NULL) || (info == NULL))
+    {
+        errno = ENOENT;
+        return -1;
+    }
+
+    info->fast = m->fast_seek;
+    info->state = (NEA_NpacSeekState)m->seek_state;
+    info->fragments = m->fragments;
+    info->table_bytes = m->seek_table;
+    info->plain_reopens = m->plain_reopens;
     return 0;
 }
 
@@ -1541,17 +1664,13 @@ static int ne_npac_mount(const char *drive, const char *path, void *index,
         m->path = copy;
     }
 
-    m->fd = open(path, O_RDONLY, 0);
+    m->fd = ne_npac_open_seekable(m, path);
     if (m->fd < 0)
     {
         NEA_DebugPrint("%s couldn't be opened", path);
         m->fd = -1;
         return -1;
     }
-
-    // Only helps when the archive is on a FAT drive; the call checks that
-    // itself and reports that it isn't supported otherwise.
-    fatInitLookupCache(m->fd, 2048);
 
     if (ne_npac_load_index(m) != 0)
     {
