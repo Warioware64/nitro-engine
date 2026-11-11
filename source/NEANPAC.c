@@ -1935,7 +1935,8 @@ typedef struct {
     uint32_t left;          // Packed bytes not read into the window yet
     uint32_t at;
     uint32_t fill;
-    bool failed;
+    bool failed;            // No more bytes: the stream ran out, or the card
+    bool card_failed;       // ...the card would not give them
 } ne_npac_source_t;
 
 static uint8_t ne_npac_window[NPAC_WINDOW_BYTES] __attribute__((aligned(4)));
@@ -1947,10 +1948,15 @@ static uint8_t ne_npac_source_byte(ne_npac_source_t *src)
     {
         uint32_t piece = (src->left < NPAC_WINDOW_BYTES) ? src->left
                                                          : NPAC_WINDOW_BYTES;
-        if ((piece == 0) ||
-            (ne_npac_read_at(src->mnt, src->next, ne_npac_window, piece) != 0))
+        if (piece == 0)
         {
             src->failed = true;
+            return 0;
+        }
+        if (ne_npac_read_at(src->mnt, src->next, ne_npac_window, piece) != 0)
+        {
+            src->failed = true;
+            src->card_failed = true;
             return 0;
         }
         src->next += piece;
@@ -2130,25 +2136,40 @@ static int ne_npac_read_member(ne_npac_mount_t *m, uint32_t offset,
         cothread_yield();
     ne_npac_window_busy = true;
 
-    // The stream starts with the BIOS's four byte header: the method, then
-    // the size, which the index already has.
-    ne_npac_source_t src = {
-        .mnt = m,
-        .next = offset,
-        .left = stored,
-    };
-    for (int i = 0; i < 4; i++)
-        ne_npac_source_byte(&src);
+    // A stream that does not decode was written whole and checked (the
+    // tools read it back), so what came from the card was not what is on it:
+    // it is read and decoded again from the start. A read the card refused
+    // was tried again already, in ne_npac_read_at().
+    bool ok = false;
+    bool card_failed = false;
+    for (int tries = 0; !ok && !card_failed && (tries < NPAC_READ_TRIES); tries++)
+    {
+        // The stream starts with the BIOS's four byte header: the method,
+        // then the size, which the index already has.
+        ne_npac_source_t src = {
+            .mnt = m,
+            .next = offset,
+            .left = stored,
+        };
+        for (int i = 0; i < 4; i++)
+            ne_npac_source_byte(&src);
 
-    bool ok = !src.failed &&
-              ((method == NEA_NPAC_LZ77) ? ne_npac_unlz77(&src, dst, size)
-                                         : ne_npac_unrle(&src, dst, size));
+        ok = !src.failed &&
+             ((method == NEA_NPAC_LZ77) ? ne_npac_unlz77(&src, dst, size)
+                                        : ne_npac_unrle(&src, dst, size));
+        card_failed = src.card_failed;
+
+        if (!ok && !card_failed)
+            NEA_DebugPrint("NPAC member at %u did not decode", (unsigned)offset);
+    }
 
     ne_npac_window_busy = false;
 
     if (!ok)
     {
-        errno = EIO;
+        // EIO: the card refused a read. EILSEQ: it gave bytes, but not the
+        // ones written.
+        errno = card_failed ? EIO : EILSEQ;
         return -1;
     }
 
