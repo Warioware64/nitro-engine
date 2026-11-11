@@ -55,6 +55,9 @@ typedef struct {
     bool used;
     char name[NEA_NPAC_MAX_DRIVE_NAME + 1];
     int fd;                 // Archive file, held open for the mount's lifetime
+    // Where 'fd' was opened from, to open it again after a failed read. NULL
+    // when the path was too long to keep (the read is then not retried).
+    const char *path;
     // Held across the seek+read pair on 'fd'. See ne_npac_io_lock().
     volatile bool io_busy;
     uint32_t img_offset;    // Offset of the file image within the archive file
@@ -110,6 +113,12 @@ typedef struct {
 } ne_npac_dir_t;
 
 static ne_npac_mount_t ne_npac_mounts[NEA_NPAC_MAX_MOUNTS];
+
+// Each mount's own copy of its archive's path (a peek's mount, on the stack
+// for one call, points at the caller's string instead).
+#define NPAC_PATH_MAX       128
+
+static char ne_npac_paths[NEA_NPAC_MAX_MOUNTS][NPAC_PATH_MAX];
 
 // Open files come from here, so that opening one does not touch the heap.
 // Past this many open at once, they are calloc()ed as they always were. The
@@ -186,6 +195,54 @@ static void ne_npac_io_unlock(ne_npac_mount_t *m)
     m->io_busy = false;
 }
 
+// How many times a read of the archive is tried before it is given up.
+#define NPAC_READ_TRIES     3
+
+static int ne_npac_read_once(ne_npac_mount_t *m, uint32_t offset, void *dst,
+                             size_t len)
+{
+    if ((m->fd < 0) || (lseek(m->fd, (off_t)offset, SEEK_SET) != (off_t)offset))
+        return -1;
+
+    uint8_t *out = dst;
+    size_t done = 0;
+    while (done < len)
+    {
+        ssize_t got = read(m->fd, out + done, len - done);
+        if (got <= 0)
+            return -1;
+        done += (size_t)got;
+    }
+
+    return 0;
+}
+
+// A card can fail one read and give the same sectors on the next (a DSi's SD
+// controller times out now and then). The file it failed on keeps failing
+// all the same: FAT remembers the error on the open file. So the archive is
+// opened again, and the read tried again from there.
+static bool ne_npac_reopen(ne_npac_mount_t *m)
+{
+    if (m->path == NULL)
+        return false;
+
+    if (m->fd >= 0)
+        close(m->fd);
+
+    m->fd = open(m->path, O_RDONLY, 0);
+    if (m->fd < 0)
+    {
+        m->fd = -1;
+        return false;
+    }
+
+    // As at mount: optional, and only a registered mount has one.
+    if (m->used)
+        fatInitLookupCache(m->fd, 2048);
+
+    return true;
+}
+
 static int ne_npac_read_at(ne_npac_mount_t *m, uint32_t offset, void *dst,
                            size_t len)
 {
@@ -194,27 +251,24 @@ static int ne_npac_read_at(ne_npac_mount_t *m, uint32_t offset, void *dst,
 
     ne_npac_io_lock(m);
 
-    if (lseek(m->fd, (off_t)offset, SEEK_SET) != (off_t)offset)
+    int result = -1;
+    for (int tries = 0; tries < NPAC_READ_TRIES; tries++)
     {
-        ne_npac_io_unlock(m);
-        return -1;
-    }
+        if ((tries > 0) && !ne_npac_reopen(m))
+            break;
 
-    uint8_t *out = dst;
-    size_t done = 0;
-    while (done < len)
-    {
-        ssize_t got = read(m->fd, out + done, len - done);
-        if (got <= 0)
+        if (ne_npac_read_once(m, offset, dst, len) == 0)
         {
-            ne_npac_io_unlock(m);
-            return -1;
+            result = 0;
+            break;
         }
-        done += (size_t)got;
+
+        NEA_DebugPrint("NPAC read of %u bytes at %u failed", (unsigned)len,
+                       (unsigned)offset);
     }
 
     ne_npac_io_unlock(m);
-    return 0;
+    return result;
 }
 
 static uint8_t *ne_npac_read_chunk(ne_npac_mount_t *m, uint32_t offset,
@@ -1480,6 +1534,13 @@ static int ne_npac_mount(const char *drive, const char *path, void *index,
     m->index_buf = index;
     m->index_size = index_size;
 
+    if (strlen(path) < NPAC_PATH_MAX)
+    {
+        char *copy = ne_npac_paths[m - ne_npac_mounts];
+        strcpy(copy, path);
+        m->path = copy;
+    }
+
     m->fd = open(path, O_RDONLY, 0);
     if (m->fd < 0)
     {
@@ -1659,6 +1720,7 @@ int NEA_NpacIndexBytes(const char *path)
 
     ne_npac_mount_t m;
     memset(&m, 0, sizeof(m));
+    m.path = path;
     m.fd = open(path, O_RDONLY, 0);
     if (m.fd < 0)
         return -1;
@@ -1672,7 +1734,8 @@ int NEA_NpacIndexBytes(const char *path)
                        ((c.cmp != 0) ? ((c.files * 4 + 3) & ~3u) : 0));
 
     int saved = errno;
-    close(m.fd);
+    if (m.fd >= 0)
+        close(m.fd);
     errno = saved;
     return result;
 }
@@ -1693,6 +1756,7 @@ int NEA_NpacPeek(const char *archive, const char *member, uint32_t from,
     // read through the window as the path is looked up, nothing else is kept.
     ne_npac_mount_t m;
     memset(&m, 0, sizeof(m));
+    m.path = archive;
     m.fd = open(archive, O_RDONLY, 0);
     if (m.fd < 0)
         return -1;
@@ -1774,7 +1838,8 @@ out:
         // The window may hold this stack mount's bytes: forget them.
         ne_npac_fnt_owner = NULL;
         int saved = errno;
-        close(m.fd);
+        if (m.fd >= 0)
+            close(m.fd);
         errno = saved;
     }
     return result;
