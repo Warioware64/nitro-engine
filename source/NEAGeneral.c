@@ -12,6 +12,19 @@
 #include "NEAMain.h"
 #include "NEAMath.h"
 
+// Weak references: physics (and the collision it brings), the GUI and the
+// particles are only linked when the user calls their own functions. Without
+// them these resolve to NULL, and what would reset, update or end them is
+// skipped: with no module there is nothing of it to reset, update or end.
+extern int NEA_PhysicsSystemReset(int max_objects) __attribute__((weak));
+extern void NEA_PhysicsSystemEnd(void) __attribute__((weak));
+extern void NEA_PhysicsUpdateAll(void) __attribute__((weak));
+extern int NEA_GUISystemReset(int max_objects) __attribute__((weak));
+extern void NEA_GUISystemEnd(void) __attribute__((weak));
+extern void NEA_GUIUpdate(void) __attribute__((weak));
+extern void NEA_ParticleSystemEnd(void) __attribute__((weak));
+extern void NEA_ParticleUpdateAll(void) __attribute__((weak));
+
 /// @file NEAGeneral.c
 
 const char NEA_VersionString[] =
@@ -87,7 +100,8 @@ void NEA_End(void)
     // has claimed it, so that it isn't left hooked after shutdown.
     __NEA_GfxFifoIrqEnd();
 
-    NEA_ParticleSystemEnd();
+    if (NEA_ParticleSystemEnd)
+        NEA_ParticleSystemEnd();
 
     vramSetBankA(VRAM_A_LCD);
     vramSetBankB(VRAM_B_LCD);
@@ -211,9 +225,11 @@ void NEA_End(void)
 
     vramSetBankE(VRAM_E_LCD); // Palettes
 
-    NEA_GUISystemEnd();
+    if (NEA_GUISystemEnd)
+        NEA_GUISystemEnd();
     NEA_SpriteSystemEnd();
-    NEA_PhysicsSystemEnd();
+    if (NEA_PhysicsSystemEnd)
+        NEA_PhysicsSystemEnd();
     NEA_ModelSystemEnd();
     NEA_AnimationSystemEnd();
     NEA_TextResetSystem();
@@ -318,9 +334,11 @@ static void ne_systems_end_all(void)
     if (NEA_NpacSystemEnd)
         NEA_NpacSystemEnd();
 
-    NEA_GUISystemEnd();
+    if (NEA_GUISystemEnd)
+        NEA_GUISystemEnd();
     NEA_SpriteSystemEnd();
-    NEA_PhysicsSystemEnd();
+    if (NEA_PhysicsSystemEnd)
+        NEA_PhysicsSystemEnd();
     NEA_ModelSystemEnd();
     NEA_AnimationSystemEnd();
     NEA_TextResetSystem();
@@ -334,11 +352,11 @@ static int ne_systems_reset_all(NEA_VRAMBankFlags vram_banks)
     // Default number of objects for everyting.
     if (NEA_CameraSystemReset(0) != 0)
         goto cleanup;
-    if (NEA_PhysicsSystemReset(0) != 0)
+    if (NEA_PhysicsSystemReset && NEA_PhysicsSystemReset(0) != 0)
         goto cleanup;
     if (NEA_SpriteSystemReset(0) != 0)
         goto cleanup;
-    if (NEA_GUISystemReset(0) != 0)
+    if (NEA_GUISystemReset && NEA_GUISystemReset(0) != 0)
         goto cleanup;
     if (NEA_ModelSystemReset(0) != 0)
         goto cleanup;
@@ -2110,13 +2128,13 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
     if (!ne_two_pass_enabled || ne_two_pass_frame == 0)
         ne_fps_frames++;
 
-    if (flags & NEA_UPDATE_GUI)
+    if ((flags & NEA_UPDATE_GUI) && NEA_GUIUpdate)
     {
         NEA_GUIUpdate();
     }
     if (flags & NEA_UPDATE_ANIMATIONS)
         NEA_ModelAnimateAll();
-    if (flags & NEA_UPDATE_PHYSICS)
+    if ((flags & NEA_UPDATE_PHYSICS) && NEA_PhysicsUpdateAll)
         NEA_PhysicsUpdateAll();
     // Weak reference: if user code links NEASound (by calling any NEA_Sound*
     // function), the strong definition is pulled from the archive and used.
@@ -2183,7 +2201,7 @@ void NEA_WaitForVBL(NEA_UpdateFlags flags)
         NEA_ThreadProcess();
 
     // Advance particle emitters once per frame.
-    if (flags & NEA_UPDATE_PARTICLES)
+    if ((flags & NEA_UPDATE_PARTICLES) && NEA_ParticleUpdateAll)
         NEA_ParticleUpdateAll();
 
     // Weak reference: the post-process effects are only linked when the user

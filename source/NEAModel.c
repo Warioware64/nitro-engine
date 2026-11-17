@@ -10,6 +10,29 @@
 
 #include "NEAMain.h"
 
+// Weak references: the particles and the material animations are only linked
+// when the user calls their own functions. A model with no emitter has none
+// to let go of. A model with an animation set needs the module, which made
+// the animation: should it be missing anyway, this stops on libnds's crash
+// screen naming it, never a call to address 0.
+extern void __NEA_ParticleDetachModel(NEA_Model *model) __attribute__((weak));
+extern int NEA_AnimMatFindTarget(const NEA_AnimMatData *data, const char *name) __attribute__((weak));
+extern void NEA_AnimMatApplyTarget(NEA_AnimMatInstance *inst, int target) __attribute__((weak));
+
+static void ne_animmat_apply(NEA_AnimMatInstance *inst, int target)
+{
+    if (NEA_AnimMatApplyTarget == NULL)
+        libndsCrash("NEA: the AnimMat module is missing");
+    NEA_AnimMatApplyTarget(inst, target);
+}
+
+static int ne_animmat_find(const NEA_AnimMatData *data, const char *name)
+{
+    if (NEA_AnimMatFindTarget == NULL)
+        libndsCrash("NEA: the AnimMat module is missing");
+    return NEA_AnimMatFindTarget(data, name);
+}
+
 /// @file NEAModel.c
 
 typedef struct {
@@ -198,7 +221,8 @@ void NEA_ModelDelete(NEA_Model *model)
 
     // Same reason: a particle emitter attached to this model follows it by raw
     // pointer and reads its position every frame.
-    __NEA_ParticleDetachModel(model);
+    if (__NEA_ParticleDetachModel)
+        __NEA_ParticleDetachModel(model);
 
     int i = 0;
     while (1)
@@ -445,7 +469,7 @@ void NEA_ModelDraw(const NEA_Model *model)
                 if (model->animmat != NULL && i < NEA_MAX_SUBMESHES &&
                     model->animmat_target[i] >= 0)
                 {
-                    NEA_AnimMatApplyTarget(model->animmat,
+                    ne_animmat_apply(model->animmat,
                                            model->animmat_target[i]);
                 }
             }
@@ -467,7 +491,7 @@ void NEA_ModelDraw(const NEA_Model *model)
         if (!NEA_TestTouch && model->animmat != NULL &&
             model->animmat_target[0] >= 0)
         {
-            NEA_AnimMatApplyTarget(model->animmat, model->animmat_target[0]);
+            ne_animmat_apply(model->animmat, model->animmat_target[0]);
         }
 
         ne_mesh_info_t *mesh = &NEA_Mesh[model->meshindex];
@@ -553,12 +577,12 @@ void NEA_ModelSetAnimMat(NEA_Model *model, NEA_AnimMatInstance *inst)
         // Prefer the submesh's own material name (it comes from the DLMM file
         // and is what an artist named the material), falling back to the name
         // of the material object bound to it.
-        int target = NEA_AnimMatFindTarget(inst->data,
+        int target = ne_animmat_find(inst->data,
                                            model->multi->submeshes[i].name);
 
         if (target < 0 && model->multi->submeshes[i].material != NULL)
         {
-            target = NEA_AnimMatFindTarget(
+            target = ne_animmat_find(
                 inst->data,
                 NEA_MaterialGetName(model->multi->submeshes[i].material));
         }
