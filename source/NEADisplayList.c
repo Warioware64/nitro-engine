@@ -213,9 +213,11 @@ void NEA_DisplayListDrawDMA_GFX_FIFO(const void *list)
 
 // Number of 32-bit words pushed to the GXFIFO on each NDMA "FIFO half-empty"
 // trigger. The GXFIFO requests data when it is less than half full (room for
-// ~128 entries), so this must stay <= 128. 112 is the well-known GXFIFO-DMA
-// block size; tune here if polygons are lost on hardware.
-#define NEA_NDMA_GFX_FIFO_BLOCK 112
+// ~128 entries), so this must stay <= 128. 16, not the usual 112: a block of
+// 112 holds the bus long enough that an HBlank-started legacy DMA (a per-line
+// scroll) misses its line on a DSi -- measured on hardware, 11 to 19 lines of
+// 192 in step with 112, all of them with 16, the same words fed per frame.
+#define NEA_NDMA_GFX_FIFO_BLOCK 16
 
 void NEA_DisplayListDrawNDMA_GFX_FIFO(const void *list)
 {
