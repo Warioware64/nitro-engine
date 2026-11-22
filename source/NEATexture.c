@@ -211,6 +211,12 @@ static inline void ne_set_material_tex_param(NEA_Material *tex,
 static void ne_defrag_forget_slot(int slot);
 static void *ne_alloc_plain(size_t size);
 
+// The banks a texture that is not 4x4 may go to (NEA_VRAM_A..D), and whether
+// its texels are written when it is loaded.
+#define NE_PLAIN_ANY (NEA_VRAM_A | NEA_VRAM_B | NEA_VRAM_C | NEA_VRAM_D)
+static uint32_t ne_plain_banks = NE_PLAIN_ANY;
+static bool ne_plain_deferred = false;
+
 static void ne_texture_delete(int texture_index)
 {
     int slot = texture_index;
@@ -1444,7 +1450,9 @@ int NEA_MaterialTexLoad(NEA_Material *tex, NEA_TextureFormat fmt,
     NEA_Texture[slot].address = addr;
     NEA_Texture[slot].uses = 1; // Initially only this material uses the texture
 
-    ne_copy_tex_to_vram(addr, fmt, size, texture);
+    // (Deferred: the caller writes the texels later, NEA_TextureSetPlainDeferred.)
+    if (!ne_plain_deferred)
+        ne_copy_tex_to_vram(addr, fmt, size, texture);
 
     // NEA_RGB5 is stored in VRAM as NEA_A1RGB5 (see ne_copy_tex_to_vram())
     NEA_TextureFormat hw_fmt = (fmt == NEA_RGB5) ? NEA_A1RGB5 : fmt;
@@ -1697,12 +1705,14 @@ void NEA_TextureGetStats(NEA_TextureStats *out)
     if (!ne_texture_system_inited)
         return;
 
-    const uintptr_t ranges[4][2] = {
+    const uintptr_t ranges[5][2] = {
         { (uintptr_t)VRAM_A, (uintptr_t)VRAM_B },
         { (uintptr_t)VRAM_B, (uintptr_t)VRAM_B + 64 * 1024 },
         { (uintptr_t)VRAM_B + 64 * 1024, (uintptr_t)VRAM_C },
         { (uintptr_t)VRAM_C, (uintptr_t)VRAM_D },
+        { (uintptr_t)VRAM_D, (uintptr_t)VRAM_E },
     };
+    int largest[5] = { 0, 0, 0, 0, 0 };
     for (NEAChunk *c = NEA_TexAllocList; c != NULL; c = c->next)
     {
         if (c->state != NEA_STATE_FREE)
@@ -1713,14 +1723,17 @@ void NEA_TextureGetStats(NEA_TextureStats *out)
         out->freeChunks++;
         if (size > out->largest)
             out->largest = size;
-        for (int r = 0; r < 4; r++)
+        for (int r = 0; r < 5; r++)
         {
             const uintptr_t a = start > ranges[r][0] ? start : ranges[r][0];
             const uintptr_t b = end < ranges[r][1] ? end : ranges[r][1];
-            if (b > a && (int)(b - a) > out->largestIn[r])
-                out->largestIn[r] = (int)(b - a);
+            if (b > a && (int)(b - a) > largest[r])
+                largest[r] = (int)(b - a);
         }
     }
+    for (int r = 0; r < 4; r++)
+        out->largestIn[r] = largest[r];
+    out->largestInD = largest[4];
 
     out->slotsMax = NEA_MAX_TEXTURES;
     for (int i = 0; i < NEA_MAX_TEXTURES; i++)
@@ -1728,6 +1741,22 @@ void NEA_TextureGetStats(NEA_TextureStats *out)
         if (NEA_Texture[i].address == NULL)
             continue;
         out->slotsUsed++;
+        // A texture that is not 4x4: its bytes in each bank.
+        const uint32_t fmt = (NEA_Texture[i].param >> 26) & 7;
+        if (fmt != NEA_TEX4X4 && fmt != 0)
+        {
+            const uintptr_t at = (uintptr_t)NEA_Texture[i].address;
+            const uintptr_t end = at + ne_tex_data_size((NEA_TextureFormat)fmt, NEA_Texture[i].sizex,
+                                                        NEA_Texture[i].sizey);
+            for (int bank = 0; bank < 4; bank++)
+            {
+                const uintptr_t lo = (uintptr_t)VRAM_A + (uintptr_t)bank * 128 * 1024;
+                const uintptr_t a = at > lo ? at : lo;
+                const uintptr_t b = end < lo + 128 * 1024 ? end : lo + 128 * 1024;
+                if (b > a)
+                    out->plainIn[bank] += (int)(b - a);
+            }
+        }
         bool named = false;
         for (int m = 0; m < NEA_MAX_TEXTURES && !named; m++)
         {
@@ -1747,6 +1776,22 @@ void NEA_TextureGetStats(NEA_TextureStats *out)
              NEA_Texture[mat->texindex].address == NULL))
             out->dangling++;
     }
+}
+
+int NEA_TextureBytesAt(const void *address)
+{
+    if (!ne_texture_system_inited || address == NULL)
+        return 0;
+    for (int i = 0; i < NEA_MAX_TEXTURES; i++)
+    {
+        if (NEA_Texture[i].address != address || NEA_Texture[i].uses <= 0)
+            continue;
+        const uint32_t fmt = (NEA_Texture[i].param >> 26) & 7;
+        if (fmt == NEA_TEX4X4)
+            return (NEA_Texture[i].sizex * NEA_Texture[i].sizey) >> 2;
+        return (int)ne_tex_data_size((NEA_TextureFormat)fmt, NEA_Texture[i].sizex, NEA_Texture[i].sizey);
+    }
+    return 0;
 }
 
 int NEA_TextureFree4x4(void)
@@ -2025,15 +2070,85 @@ void NEA_TextureSetDeadIndexPlacement(bool on)
     ne_place_in_dead_index = on;
 }
 
+void NEA_TextureSetPlainBanks(uint32_t bank_flags)
+{
+    bank_flags &= NE_PLAIN_ANY;
+    ne_plain_banks = bank_flags != 0 ? bank_flags : NE_PLAIN_ANY;
+}
+
+uint32_t NEA_TextureGetPlainBanks(void)
+{
+    return ne_plain_banks;
+}
+
+void NEA_TextureSetPlainDeferred(bool on)
+{
+    ne_plain_deferred = on;
+}
+
+// The highest free place of `size` bytes inside [lo, hi), taken; NULL if
+// there is none.
+static void *ne_alloc_from_end_in(uintptr_t lo, uintptr_t hi, size_t size)
+{
+    size = (size + NEA_ALLOC_MIN_SIZE - 1) & ~(size_t)(NEA_ALLOC_MIN_SIZE - 1);
+    NEAChunk *c = NEA_TexAllocList;
+    while (c != NULL && c->next != NULL)
+        c = c->next;
+    for (; c != NULL; c = c->previous)
+    {
+        if (c->state != NEA_STATE_FREE)
+            continue;
+        const uintptr_t s = (uintptr_t)c->start > lo ? (uintptr_t)c->start : lo;
+        const uintptr_t e = (uintptr_t)c->end < hi ? (uintptr_t)c->end : hi;
+        if (e <= s || e - s < size)
+            continue;
+        const uintptr_t at = (e - size) & ~(uintptr_t)(NEA_ALLOC_MIN_SIZE - 1);
+        if (at < s)
+            continue;
+        if (NEA_AllocAddress(NEA_TexAllocList, (void *)at, size) == 0)
+            return (void *)at;
+    }
+    return NULL;
+}
+
 static void *ne_alloc_plain(size_t size)
 {
-    if (!ne_place_in_dead_index)
+    if (ne_plain_banks == NE_PLAIN_ANY)
+    {
+        if (!ne_place_in_dead_index)
+            return NEA_AllocFromEnd(NEA_TexAllocList, size);
+        // Dead index memory first: there it costs 4x4 textures nothing.
+        void *dead = ne_find_dead_index((uint32_t)size);
+        if (dead != NULL && NEA_AllocAddress(NEA_TexAllocList, dead, size) == 0)
+            return dead;
         return NEA_AllocFromEnd(NEA_TexAllocList, size);
-    // Dead index memory first: there it costs 4x4 textures nothing.
-    void *dead = ne_find_dead_index((uint32_t)size);
-    if (dead != NULL && NEA_AllocAddress(NEA_TexAllocList, dead, size) == 0)
-        return dead;
-    return NEA_AllocFromEnd(NEA_TexAllocList, size);
+    }
+
+    // Only the banks allowed: dead index memory first if B is one of them,
+    // then from the top of each run of allowed banks, the highest run first.
+    if (ne_place_in_dead_index && (ne_plain_banks & NEA_VRAM_B))
+    {
+        void *dead = ne_find_dead_index((uint32_t)size);
+        if (dead != NULL && NEA_AllocAddress(NEA_TexAllocList, dead, size) == 0)
+            return dead;
+    }
+    for (int b = 3; b >= 0;)
+    {
+        if (!(ne_plain_banks & (1u << b)))
+        {
+            b--;
+            continue;
+        }
+        const int top = b;
+        while (b >= 0 && (ne_plain_banks & (1u << b)))
+            b--;
+        const uintptr_t lo = (uintptr_t)VRAM_A + (uintptr_t)(b + 1) * 128 * 1024;
+        const uintptr_t hi = (uintptr_t)VRAM_A + (uintptr_t)(top + 1) * 128 * 1024;
+        void *at = ne_alloc_from_end_in(lo, hi, size);
+        if (at != NULL)
+            return at;
+    }
+    return NULL;
 }
 
 static void ne_defrag_forget_slot(int slot)
@@ -2078,8 +2193,9 @@ static bool ne_defrag_choose(void)
         void *dst02 = NULL, *dst1 = NULL;
         if (!is4x4)
         {
-            // (a) Out of A or C, into dead index memory.
-            if (!inTexelBank)
+            // (a) Out of A or C, into dead index memory (where such
+            // textures may go: NEA_TextureSetPlainBanks).
+            if (!inTexelBank || !(ne_plain_banks & NEA_VRAM_B))
                 continue;
             dst02 = ne_find_dead_index(size02);
             if (dst02 == NULL)

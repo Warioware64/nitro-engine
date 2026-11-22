@@ -536,10 +536,18 @@ typedef struct {
     /// in that slot). Both are 0 when all is well.
     int leaked;
     int dangling;
+    int largestInD;    ///< The largest free piece inside bank D
+    /// Bytes of textures that are not 4x4 in banks A, B, C and D.
+    int plainIn[4];
 } NEA_TextureStats;
 
 /// Fills `out` with the state of the texture memory.
 void NEA_TextureGetStats(NEA_TextureStats *out);
+
+/// How many bytes the texture whose data starts at `address` takes (a 4x4
+/// one's texels alone), or 0 if no texture starts there now. For whoever
+/// kept a texture's address and must know it is still that texture's.
+int NEA_TextureBytesAt(const void *address);
 
 /// How many bytes of 4x4 (compressed) texture data could still go in: free
 /// memory in bank A or C whose matching index memory in bank B is free too.
@@ -558,6 +566,26 @@ int NEA_TextureLargest4x4(void);
 /// then from the end of the texture memory, as NEA always did. False: always
 /// as NEA always did. (Takes effect for textures loaded from then on.)
 void NEA_TextureSetDeadIndexPlacement(bool on);
+
+/// The banks a texture that is not 4x4 may go to, as NEA_VRAM_A..D flags (a
+/// 4x4 texture can only be in A or C, with its index in B). Bank D alone
+/// keeps A, B and C for 4x4 textures. A load that finds no room there fails:
+/// it does not go elsewhere. By default (and given 0): any bank, as
+/// NEA_TextureSetDeadIndexPlacement() says. Only banks the texture system was
+/// given (NEA_TextureSystemReset()) are ever used. (Takes effect for textures
+/// loaded from then on.)
+void NEA_TextureSetPlainBanks(uint32_t bank_flags);
+
+/// What NEA_TextureSetPlainBanks() was last given (all four by default).
+uint32_t NEA_TextureGetPlainBanks(void);
+
+/// True: a texture that is not 4x4 is given its memory and its parameters
+/// when it is loaded, but its texels are not written (the texture data
+/// pointer is not read). For while that memory is not the 3D engine's -- a
+/// bank lent to a display capture -- and the caller writes the texels itself
+/// later (NEA_VramWrite() at NEA_MaterialGetTexParam()'s address). A NEA_RGB5
+/// texture is then the caller's to give its alpha bits. Off by default.
+void NEA_TextureSetPlainDeferred(bool on);
 
 /// Defragmentation, a little at a time, while the game runs.
 ///
